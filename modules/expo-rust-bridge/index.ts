@@ -764,7 +764,7 @@ function initializeDatabase(dbPath: string): void {
 async function syncLibrary(
   dbPath: string,
   account: Account,
-  onPageComplete?: (stats: SyncStats, page: number) => void
+  onPageComplete?: (stats: SyncStats, page: number, aggregatedStats: SyncStats) => void
 ): Promise<SyncStats> {
   const accountJson = JSON.stringify(account);
 
@@ -805,7 +805,7 @@ async function syncLibrary(
 
     // Notify caller of page completion
     if (onPageComplete) {
-      onPageComplete(pageStats, page);
+      onPageComplete(pageStats, page, aggregatedStats);
     }
 
     page++;

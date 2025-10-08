@@ -4,7 +4,14 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import * as SecureStore from 'expo-secure-store';
 import LoginScreen from './LoginScreen';
 import Button from '../components/Button';
-import { syncLibrary, initializeDatabase, refreshToken, getBooks, getCustomerInformation } from '../../modules/expo-rust-bridge';
+import {
+  syncLibrary,
+  initializeDatabase,
+  refreshToken,
+  getBooks,
+  getCustomerInformation,
+  SyncStats
+} from '../../modules/expo-rust-bridge';
 import type { Account } from '../../modules/expo-rust-bridge';
 import { Paths } from 'expo-file-system';
 import { useStyles } from '../hooks/useStyles';
@@ -17,7 +24,7 @@ export default function SimpleAccountScreen() {
   const [account, setAccount] = useState<Account | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isSyncing, setIsSyncing] = useState(false);
-  const [syncStats, setSyncStats] = useState<any>(null);
+  const [syncStats, setSyncStats] = useState<SyncStats | null>(null);
   const [lastSyncDate, setLastSyncDate] = useState<Date | null>(null);
   const [tokenExpiry, setTokenExpiry] = useState<Date | null>(null);
   const [timeRemaining, setTimeRemaining] = useState<number | null>(null);
@@ -94,13 +101,14 @@ export default function SimpleAccountScreen() {
         }
 
         // Show that we have synced data with actual counts
-        const mockStats = {
+        const mockStats: SyncStats = {
           total_items: response.total_count,
           total_library_count: response.total_count,
           books_added: 0,
           books_updated: 0,
           books_absent: 0,
           errors: [],
+          has_more: false,
         };
         setSyncStats(mockStats);
         console.log('[SimpleAccountScreen] Library card will show:', response.total_count, 'books');
@@ -302,14 +310,14 @@ export default function SimpleAccountScreen() {
 
       // Sync library page-by-page with progress updates
       console.log('[SimpleAccountScreen] Starting page-by-page sync...');
-      const stats = await syncLibrary(dbPath, account, (pageStats, page) => {
-        console.log(`[SimpleAccountScreen] Page ${page} synced: ${pageStats.total_items} items`);
+      const stats = await syncLibrary(dbPath, account, (_pageStats, page, aggregatedStats) => {
+        console.log(`[SimpleAccountScreen] Page ${page} synced: ${_pageStats.total_items} items`);
         // Update UI incrementally after each page
         setSyncStats({
-          ...pageStats,
-          total_items: pageStats.total_items, // This is cumulative in the aggregated stats
-          books_added: pageStats.books_added,
-          books_updated: pageStats.books_updated,
+          ..._pageStats,
+          total_items: aggregatedStats.total_items, // This is cumulative in the aggregated stats
+          books_added: aggregatedStats.books_added,
+          books_updated: aggregatedStats.books_updated,
         });
       });
 
@@ -410,7 +418,7 @@ export default function SimpleAccountScreen() {
           <View style={styles.card}>
             <Text style={styles.label}>Library</Text>
             <Text style={styles.value}>
-              {syncStats.total_items} / {syncStats.total_library_count} audiobooks
+              {syncStats.total_items} audiobooks
             </Text>
             {syncStats.total_items > 0 && syncStats.total_items < syncStats.total_library_count && (
               <Text style={styles.caption}>

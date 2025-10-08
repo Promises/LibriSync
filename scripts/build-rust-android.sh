@@ -32,8 +32,16 @@ echo -e "${GREEN}Using NDK at: $NDK_PATH${NC}"
 
 # Add NDK toolchain to PATH (works on both Intel and Apple Silicon Macs)
 export PATH="$NDK_PATH/toolchains/llvm/prebuilt/darwin-x86_64/bin:$PATH"
-export CC_aarch64_linux_android="$NDK_PATH/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android23-clang"
+
+# Set up cross-compilation environment for all architectures
+export CC_aarch64_linux_android="$NDK_PATH/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android30-clang"
 export AR_aarch64_linux_android="$NDK_PATH/toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-ar"
+export CC_armv7_linux_androideabi="$NDK_PATH/toolchains/llvm/prebuilt/darwin-x86_64/bin/armv7a-linux-androideabi30-clang"
+export AR_armv7_linux_androideabi="$NDK_PATH/toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-ar"
+export CC_i686_linux_android="$NDK_PATH/toolchains/llvm/prebuilt/darwin-x86_64/bin/i686-linux-android30-clang"
+export AR_i686_linux_android="$NDK_PATH/toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-ar"
+export CC_x86_64_linux_android="$NDK_PATH/toolchains/llvm/prebuilt/darwin-x86_64/bin/x86_64-linux-android30-clang"
+export AR_x86_64_linux_android="$NDK_PATH/toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-ar"
 
 # Install Rust targets if not already installed
 echo -e "${YELLOW}Checking Rust targets...${NC}"

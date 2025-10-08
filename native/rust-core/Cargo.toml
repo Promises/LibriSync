@@ -18,11 +18,50 @@ cli = ["clap", "tokio/full"]
 
 [dependencies]
 uniffi = "0.28"
-jni = { version = "0.21", optional = true }
+jni = "0.21"
+lazy_static = "1.4"
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# HTTP client and async runtime
+reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "json", "cookies", "stream"] }
+tokio = { version = "1.35", features = ["rt-multi-thread", "fs", "io-util", "time", "sync", "process"] }
+futures-util = "0.3"
+
+# Database
+sqlx = { version = "0.7", features = ["runtime-tokio", "sqlite", "chrono"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Date/time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Crypto (for DRM)
+aes = "0.8"
+sha2 = "0.10"
+base64 = "0.21"
+
+# URL encoding and parsing
+urlencoding = "2.1"
+url = "2.5"
+
+# Random generation (for OAuth PKCE)
+rand = "0.8"
+
+# UUID generation (for device serial numbers)
+uuid = { version = "1.6", features = ["v4"] }
+
+# RSA key generation (for device registration)
+rsa = "0.9"
+pkcs8 = { version = "0.10", features = ["std", "pem"] }
 
 # CLI dependencies (desktop only)
 clap = { version = "4.5", features = ["derive"], optional = true }
-tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
+regex = "1.11.3"
 
 [build-dependencies]
 uniffi = { version = "0.28", features = ["build"] }

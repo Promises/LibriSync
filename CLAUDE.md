@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-RN Audible is a React Native port of Libation (an Audible client and DRM remover) for iOS and Android. The architecture uses React Native + Expo for the UI layer, with shared native code written in Rust for performance-critical operations like DRM removal and audio processing.
+RN Audible is a React Native mobile app powered by **`libaudible`** - a direct Rust library port of Libation (an Audible client and DRM remover). The Rust library (`native/rust-core/`) is a complete 1:1 translation of Libation's C# codebase, maintaining the same architecture, data models, and business logic. This library is then embedded in a React Native app via JNI (Android) and C FFI (iOS) bindings.
+
+**Key Principle:** This is a **direct port**, not a rewrite. Each Rust module corresponds to a Libation C# component in `references/Libation/Source/`, and functionality is ported method-by-method to ensure feature parity.
 
 ## Key Architecture Patterns
 
@@ -38,6 +40,13 @@ When adding new Rust functions:
 4. Update TypeScript interface in `index.ts`
 
 ## Development Commands
+
+### Environment Setup
+
+```bash
+# Required for Android builds
+export ANDROID_NDK_HOME=$HOME/Library/Android/sdk/ndk/29.0.14033849
+```
 
 ### Quick Development (No Native Rebuild)
 
@@ -117,9 +126,32 @@ The project uses StyleSheet API for styling. Consistent dark theme is defined in
 
 Prefer StyleSheet over inline styles for maintainability and performance.
 
-### Reference Implementation
+### Reference Implementation & Porting Methodology
 
-The `references/Libation/` directory contains the original C# Libation source code. When implementing new features (Audible API, DRM removal, library management), consult the C# implementation in `references/Libation/` to understand the logic, then port it to Rust in `native/rust-core/`.
+The `references/Libation/` directory contains the original C# Libation source code, which serves as the **authoritative reference** for all implementation work.
+
+**Direct Port Approach:**
+1. **Locate the C# source** for the feature in `references/Libation/Source/`
+2. **Read and understand** the complete C# implementation
+3. **Translate to Rust** maintaining the same:
+   - Module structure
+   - Data models (classes → structs)
+   - Method signatures (adjusted for Rust idioms)
+   - Business logic (line-by-line where possible)
+4. **Add reference comment** at the top of each Rust file:
+   ```rust
+   //! Direct port of Libation's XYZ functionality
+   //! Reference: references/Libation/Source/ComponentName/ClassName.cs
+   ```
+5. **Validate behavior** matches the original implementation
+
+**Module Mapping:**
+- `src/api/` ← `AudibleUtilities/`
+- `src/crypto/` ← `AaxDecrypter/` + `Widevine/`
+- `src/storage/` ← `DataLayer/`
+- `src/download/` ← `FileLiberator/`
+- `src/audio/` ← `FileLiberator/`
+- `src/file/` ← `FileManager/`
 
 **Note**: The `references/` directory is git-ignored and should remain local only.
 
@@ -143,10 +175,27 @@ The `references/Libation/` directory contains the original C# Libation source co
 
 ## Current Implementation Status
 
-### ✅ Completed
+### ✅ Completed - Rust Core (Phase 1)
+**All 113 unit tests passing (100%)**
+
+- **Error Handling**: 58 error variants with structured context
+- **HTTP Client**: Retry logic, 11 regional domains, connection pooling
+- **Authentication**: OAuth 2.0 with PKCE, token exchange, device registration
+- **Database Layer**: Complete SQLite schema (11 tables, 17 indexes)
+- **Library Sync**: Audible API integration with **progressive page-by-page syncing**
+- **Content & License APIs**: Download vouchers, DRM detection
+- **Download Manager**: Resumable downloads with progress tracking
+- **AAX Decryption**: FFmpeg integration with activation bytes
+- **Audio Processing**: Format detection, conversion, metadata embedding
+- **File Management**: Cross-platform path handling and templates
+
+**See:** `native/rust-core/IMPLEMENTATION_STATUS.md` for detailed breakdown
+
+### ✅ Completed - React Native App Structure
 - Expo project structure with native directories
 - Rust core module with JNI bindings (Android) - **TESTED AND WORKING**
-- Expo native module (`ExpoRustBridgeModule.kt`)
+- Rust core module with C FFI bindings (iOS) - **COMPILED AND READY**
+- Expo native module (`ExpoRustBridgeModule.kt` for Android)
 - Cross-compilation build scripts for Android (all architectures)
 - Cross-compilation build scripts for iOS (device + simulator)
 - Automated test and build pipeline
@@ -157,20 +206,65 @@ The `references/Libation/` directory contains the original C# Libation source co
   - **Settings Screen**: Download directory, DRM options, app settings
 - Bottom tab navigation with React Navigation
 
-### 🚧 In Progress / Needs Testing
-- **iOS Native Bridge**: Build script ready, needs iOS-specific Expo module implementation
+### ✅ Completed - iOS C FFI Bridge
+- **`native/rust-core/src/ios_bridge.rs`**: Complete C FFI implementation
+  - All authentication functions (OAuth, tokens, activation bytes)
+  - All database functions (init, sync, get books, search)
+  - Download and decryption functions
+  - Utility functions (validation, locales)
+  - Memory management with `rust_free_string()`
+- **`native/rust-core/ios_bridge.h`**: C header file for Swift/Objective-C
+- **`native/rust-core/SwiftIntegration.md`**: Complete Swift wrapper and examples
+- **`native/rust-core/IOS_BRIDGE_IMPLEMENTATION.md`**: Technical documentation
+- Successfully compiles for:
+  - `aarch64-apple-ios` (iOS devices)
+  - `aarch64-apple-ios-sim` (iOS simulator)
+
+### ✅ OAuth Authentication - WORKING! (Oct 7, 2025)
+- **OAuth 2.0 Flow**: ✅ Complete end-to-end in React Native Android app
+- **WebView Integration**: ✅ Amazon login with 2FA/CVF support
+- **Device Registration**: ✅ Full token exchange via `/auth/register`
+- **Session Data**: ✅ Complete registration response captured
+- **Test Fixture**: `native/rust-core/test_fixtures/registration_response.json`
+
+**Key Details:**
+- Device type: `A10KISP2GWF0E4` (Android)
+- client_id: lowercase hex-encoded `SERIAL#DEVICETYPE`
+- See `OAUTH_SUCCESS_SUMMARY.md` and `OAUTH_IMPLEMENTATION_NOTES.md`
+
+### ✅ Paginated Library Sync - COMPLETE! (Oct 8, 2025)
+- **Page-by-Page API**: ✅ `syncLibraryPage(dbPath, accountJson, page)` in Rust core
+- **Progressive UI Updates**: ✅ UI updates after each page synced
+- **Full Stack Implementation**: ✅ Rust → JNI/FFI → Kotlin/Swift → TypeScript → React Native
+- **has_more Flag**: ✅ SyncStats includes pagination status
+- **Automatic Pagination**: ✅ `syncLibrary()` loops through all pages automatically
+- **Callback Support**: ✅ Optional `onPageComplete` callback for incremental UI updates
+
+**Implementation Details:**
+- `sync_library_page()` in `src/api/library.rs:638-708`
+- JNI bridge: `nativeSyncLibraryPage` in `src/jni_bridge.rs:576-617`
+- iOS C FFI: `rust_sync_library_page` in `src/ios_bridge.rs:524-555`
+- TypeScript: `syncLibraryPage()` exported from `modules/expo-rust-bridge/index.ts`
+- See `SimpleAccountScreen.tsx:301-310` for UI implementation with progress callbacks
+
+### 🚧 Next Phase
+- **Extract Full Registration Data** - Parse all tokens (adp_token, device_private_key, cookies)
+- **Activation Bytes** - Fix binary blob extraction for DRM
+- **iOS Expo Module**: Create Swift module using C FFI bridge
+- **Library Display UI**: Enhanced book list with cover images, sorting, filtering
 
 ### 📋 Next Implementation Priorities
 
-See `LIBATION_PORT_PLAN.md` for comprehensive porting plan.
+See `LIBATION_PORT_PLAN.md` for comprehensive plan.
 
 **Immediate priorities:**
-1. Implement Rust error handling types
-2. HTTP client for Audible API
-3. SQLite database layer (port from Libation schema)
-4. OAuth authentication flow
-5. Library sync from Audible
+1. ✅ ~~OAuth authentication flow~~ **COMPLETE**
+2. ✅ ~~Paginated library sync~~ **COMPLETE**
+3. **Extract full registration response** - Parse all tokens (adp_token, device_private_key, cookies)
+4. **Enhanced library UI** - Cover images, sorting, filtering, search
+5. **Activation bytes** - Fix binary blob extraction for DRM
 6. DRM removal (AAX → M4B conversion)
+7. Download manager UI
 
 ## Build Architecture
 

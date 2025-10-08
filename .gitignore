@@ -30,6 +30,10 @@ yarn-error.*
 .DS_Store
 *.pem
 
+# IDEs
+.idea/
+.vscode/
+
 # local env files
 .env*.local
 
@@ -62,3 +66,4 @@ tests/fixtures/test_account.json
 .env.test
 *.aax
 *.aaxc
+/native/rust-core/test_fixtures/

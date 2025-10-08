@@ -1,6 +1,8 @@
 # RN Audible
 
-A React Native port of [Libation](https://github.com/rmcrackan/Libation) - an Audible client and DRM remover for iOS and Android.
+A React Native mobile app powered by a **direct Rust port of [Libation](https://github.com/rmcrackan/Libation)** - bringing Audible library management and DRM removal to iOS and Android.
+
+**Project Goal:** Create a 1:1 Rust library port (`libaudible`) of Libation's C# codebase, then embed it in a React Native mobile application via native bindings.
 
 ## Project Structure
 
@@ -23,9 +25,28 @@ rn-audible/
 
 ## Architecture
 
-- **React Native + Expo**: Cross-platform mobile framework
-- **Rust**: Shared native code for performance-critical operations (DRM removal, audio processing)
-- **UniFFI**: Generates bindings between Rust and native platforms (iOS/Android)
+### Three-Layer Design
+
+1. **Mobile UI Layer**: React Native + Expo (cross-platform)
+2. **Native Bridge Layer**: JNI (Android) + C FFI (iOS)
+3. **Core Library**: `libaudible` - **Direct Rust port of Libation**
+
+### Libation → Rust Port
+
+The `native/rust-core/` directory contains `libaudible` - a complete Rust translation of Libation's C# codebase:
+
+- **Direct 1:1 port**: Maintains Libation's architecture, data models, and logic
+- **Library format**: Reusable library (not a standalone app)
+- **Reference-driven**: Each Rust module corresponds to a Libation C# component in `references/Libation/Source/`
+- **Feature parity goal**: Implement all core Libation functionality (auth, sync, DRM, downloads)
+
+**Ported Components:**
+- `src/api/` ← `AudibleUtilities/` (Audible API, OAuth)
+- `src/crypto/` ← `AaxDecrypter/` + `Widevine/` (DRM removal)
+- `src/storage/` ← `DataLayer/` (SQLite database)
+- `src/download/` ← `FileLiberator/` (download orchestration)
+- `src/audio/` ← `FileLiberator/` (audio conversion)
+- `src/file/` ← `FileManager/` (file operations)
 
 ## Getting Started
 
@@ -119,19 +140,33 @@ cargo test --manifest-path native/rust-core/Cargo.toml
 
 ### Current Features
 
-- ✅ Rust-to-JavaScript bridge with JNI (Android)
-- ✅ Shared Rust codebase for iOS and Android
-- ✅ Expo Modules integration
+**Rust Core (113/113 tests passing):**
+- ✅ Complete OAuth 2.0 authentication with PKCE
+- ✅ Device registration and token management
+- ✅ Audible API client (11 regional domains)
+- ✅ SQLite database layer (11 tables)
+- ✅ Library sync from Audible API
+- ✅ Download manager with resume support
+- ✅ AAX decryption (FFmpeg integration)
+- ✅ Audio processing and metadata embedding
+
+**React Native Integration:**
+- ✅ **OAuth authentication WORKING in Android app!**
+- ✅ WebView login flow with 2FA/CVF support
+- ✅ Token exchange and device registration
+- ✅ Account management UI
+- ✅ JNI bridge (Android) - fully functional
+- ✅ C FFI bridge (iOS) - compiled and ready
 - ✅ Cross-compilation build scripts
-- ✅ Automated testing pipeline
 
 ## Next Steps
 
-1. Implement Audible API client in Rust
-2. Add DRM removal functionality
-3. Create library management UI
-4. Add audio playback controls
-5. Implement download manager
+1. ✅ ~~OAuth authentication~~ **COMPLETE!**
+2. **Extract full registration data** (device_private_key, adp_token, cookies)
+3. **Library sync UI** - Display books from Audible
+4. **Activation bytes** - Fix binary blob extraction
+5. Download and DRM removal integration
+6. Audio playback UI
 
 ## References
 

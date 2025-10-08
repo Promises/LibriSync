@@ -36,7 +36,8 @@
             "extraMavenRepos": []
           }
         }
-      ]
+      ],
+      "expo-secure-store"
     ]
   }
 }

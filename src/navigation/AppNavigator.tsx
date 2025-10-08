@@ -4,7 +4,7 @@ import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { colors } from '../styles/theme';
 
 import LibraryScreen from '../screens/LibraryScreen';
-import AccountScreen from '../screens/AccountScreen';
+import SimpleAccountScreen from '../screens/SimpleAccountScreen';
 import SettingsScreen from '../screens/SettingsScreen';
 
 const Tab = createBottomTabNavigator();
@@ -42,7 +42,7 @@ export default function AppNavigator() {
         />
         <Tab.Screen
           name="Account"
-          component={AccountScreen}
+          component={SimpleAccountScreen}
           options={{
             tabBarLabel: 'Account',
             headerShown: false,

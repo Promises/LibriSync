@@ -1,8 +1,15 @@
-# Libation → Rust Port Plan
+# Libation → Rust Direct Library Port Plan
 
 ## Overview
 
-This document outlines the comprehensive plan for porting Libation (C# Audible client) to a Rust library for use in the RN Audible React Native mobile app.
+This document outlines the comprehensive plan for creating a **direct 1:1 port of Libation as a Rust library**. The goal is to translate Libation's C# codebase into a standalone Rust library (`libaudible`) that provides the same functionality as the original Libation desktop application, but as a library suitable for embedding in the RN Audible React Native mobile app.
+
+**Key Principles:**
+1. **Direct Port**: Maintain the same architecture, logic flow, and API surface as Libation
+2. **Library-First**: Create a reusable Rust library, not a standalone application
+3. **Reference Implementation**: Use `references/Libation/` as the authoritative source for all logic
+4. **Feature Parity**: Implement all core Libation features (authentication, library sync, DRM removal, downloads)
+5. **Mobile-Ready**: Design for embedding in React Native via JNI/FFI bindings
 
 ## Architecture Analysis
 
@@ -30,50 +37,166 @@ Based on analysis of `references/Libation/Source/`:
 
 ## Rust Library Architecture
 
-### Crate Structure
+**Goal:** Create `libaudible` - a direct Rust port of Libation's core functionality as a reusable library.
+
+### Design Philosophy
+
+This is a **direct translation**, not a reimagining:
+- **Preserve Libation's architecture**: Same module boundaries and responsibilities
+- **Match Libation's data models**: Port Entity Framework entities to Rust structs
+- **Replicate Libation's logic**: Download flows, crypto algorithms, API patterns
+- **Reference C# code**: Each Rust module should have a corresponding C# reference in `references/Libation/Source/`
+
+### Crate Structure (Direct Mapping from Libation)
 
 ```
-native/rust-core/
+native/rust-core/              → Libation/Source/
 ├── Cargo.toml
 ├── build.rs
 └── src/
-    ├── lib.rs                    # Main library entry + JNI exports
-    ├── jni_bridge.rs             # JNI bindings for Android
-    ├── api/                      # Audible API integration
+    ├── lib.rs                 # Library entry point + public API
+    ├── jni_bridge.rs          # Android JNI bindings (mobile-specific)
+    ├── error.rs               # Unified error types
+    │
+    ├── api/                   → AudibleUtilities/
     │   ├── mod.rs
-    │   ├── auth.rs               # Authentication (OAuth, tokens)
-    │   ├── client.rs             # HTTP client
-    │   ├── library.rs            # Library sync
-    │   ├── content.rs            # Content metadata
-    │   └── license.rs            # License/voucher retrieval
-    ├── crypto/                   # Cryptography and DRM
+    │   ├── auth.rs            → Mkb79Auth.cs (OAuth, device registration)
+    │   ├── client.rs          → ApiExtended.cs (HTTP client, retry logic)
+    │   ├── library.rs         → (Library sync methods)
+    │   ├── content.rs         → (Content metadata retrieval)
+    │   └── license.rs         → (License/voucher handling)
+    │
+    ├── crypto/                → AaxDecrypter/ + AudibleUtilities/Widevine/
     │   ├── mod.rs
-    │   ├── activation.rs         # Activation bytes handling
-    │   ├── aax.rs                # AAX file decryption
-    │   ├── aaxc.rs               # AAXC file decryption
-    │   └── widevine.rs           # Widevine CDM integration
-    ├── download/                 # Download management
+    │   ├── activation.rs      → ActivationBytes extraction
+    │   ├── aax.rs             → AAX decryption logic
+    │   ├── aaxc.rs            → AAXC decryption logic
+    │   └── widevine.rs        → Widevine CDM integration
+    │
+    ├── download/              → AaxDecrypter/ + FileLiberator/
     │   ├── mod.rs
-    │   ├── manager.rs            # Download orchestration
-    │   ├── stream.rs             # Network streaming
-    │   └── progress.rs           # Progress tracking
-    ├── audio/                    # Audio processing
+    │   ├── manager.rs         → DownloadDecryptBook.cs (orchestration)
+    │   ├── stream.rs          → NetworkFileStream.cs (streaming)
+    │   └── progress.rs        → AverageSpeed.cs (progress tracking)
+    │
+    ├── audio/                 → FileLiberator/
     │   ├── mod.rs
-    │   ├── decoder.rs            # Audio decoding
-    │   ├── converter.rs          # Format conversion (AAX → M4B/MP3)
-    │   └── metadata.rs           # ID3 tags, cover art
-    ├── storage/                  # Data persistence
+    │   ├── decoder.rs         → AudioFormatDecoder.cs
+    │   ├── converter.rs       → ConvertToMp3.cs (FFmpeg integration)
+    │   └── metadata.rs        → (ID3 tags, cover art embedding)
+    │
+    ├── storage/               → DataLayer/
     │   ├── mod.rs
-    │   ├── database.rs           # SQLite database
-    │   ├── models.rs             # Data models
-    │   ├── migrations.rs         # Schema migrations
-    │   └── queries.rs            # Query helpers
-    ├── file/                     # File operations
-    │   ├── mod.rs
-    │   ├── manager.rs            # File system operations
-    │   └── paths.rs              # Path utilities
-    └── error.rs                  # Error types
+    │   ├── database.rs        → LibationContext.cs (database context)
+    │   ├── models.rs          → EfClasses/ (Book, LibraryBook, Series, etc.)
+    │   ├── migrations.rs      → Migrations/ (schema migrations)
+    │   └── queries.rs         → QueryObjects/ (query helpers)
+    │
+    └── file/                  → FileManager/
+        ├── mod.rs
+        ├── manager.rs         → File system operations
+        └── paths.rs           → Path utilities, naming templates
 ```
+
+**Mapping Legend:**
+- `→` indicates the Rust module ports functionality from the corresponding Libation C# component
+- Each Rust file should reference its C# source counterpart in code comments
+- Preserve Libation's class/method names where possible (converting to Rust naming conventions)
+
+### Library API Surface
+
+The Rust library will expose a public API matching Libation's core functionality:
+
+```rust
+// Equivalent to Libation's main operations
+pub struct LibationLib {
+    api_client: ApiClient,
+    database: Database,
+}
+
+impl LibationLib {
+    // Account management (→ AudibleUtilities)
+    pub fn authenticate(email: &str, password: &str) -> Result<Account>;
+    pub fn get_activation_bytes(account: &Account) -> Result<Vec<u8>>;
+
+    // Library operations (→ AudibleUtilities + DataLayer)
+    pub fn sync_library(account: &Account) -> Result<Vec<Book>>;
+    pub fn get_library_books() -> Result<Vec<LibraryBook>>;
+
+    // Download & Decrypt (→ FileLiberator + AaxDecrypter)
+    pub fn download_book(asin: &str, options: DownloadOptions) -> Result<DownloadResult>;
+    pub fn decrypt_aax(input: &Path, output: &Path, activation_bytes: &[u8]) -> Result<()>;
+
+    // Audio processing (→ FileLiberator)
+    pub fn convert_to_m4b(input: &Path, output: &Path) -> Result<()>;
+}
+```
+
+This API will be wrapped with JNI/FFI for React Native integration.
+
+---
+
+## Porting Methodology
+
+### Step-by-Step Translation Process
+
+For each Libation C# class/module:
+
+1. **Locate the C# source** in `references/Libation/Source/`
+2. **Read and understand** the complete C# implementation
+3. **Create Rust equivalent** with identical functionality
+4. **Add reference comment** at top of Rust file:
+   ```rust
+   //! Direct port of Libation's XYZ functionality
+   //! Reference: references/Libation/Source/ComponentName/ClassName.cs
+   ```
+5. **Port data structures** first (classes → structs)
+6. **Port logic** method-by-method
+7. **Write equivalent tests** based on Libation's test suite
+8. **Validate behavior** matches original
+
+### Example: Porting a C# Class
+
+**C# Original** (`Libation/Source/AudibleUtilities/Account.cs`):
+```csharp
+public class Account {
+    public string Email { get; set; }
+    public string LocaleName { get; set; }
+    public Identity Identity { get; set; }
+
+    public async Task<Library> GetLibraryAsync() { ... }
+}
+```
+
+**Rust Port** (`src/api/account.rs`):
+```rust
+//! Direct port of Libation's Account functionality
+//! Reference: references/Libation/Source/AudibleUtilities/Account.cs
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Account {
+    pub email: String,
+    pub locale_name: String,
+    pub identity: Identity,
+}
+
+impl Account {
+    pub async fn get_library(&self) -> Result<Library> {
+        // Port the exact logic from GetLibraryAsync()
+        // ...
+    }
+}
+```
+
+### Porting Priorities
+
+**Port in this order:**
+1. **Data models** (easiest, no logic)
+2. **Utilities** (pure functions, no side effects)
+3. **Business logic** (stateful operations)
+4. **Complex flows** (orchestration, async operations)
 
 ---
 
@@ -132,13 +255,14 @@ serde_json = "1.0"
 ### Phase 2: Authentication & API (Week 3-4)
 
 **Priority: Critical**
+**Status:** ✅ **COMPLETE** (OAuth working in React Native app!)
 
 #### 2.1 Audible Authentication
-- [ ] Implement OAuth 2.0 flow
-- [ ] Device registration (generate device keys)
-- [ ] Token management (access, refresh)
-- [ ] Activation bytes retrieval
-- [ ] Account persistence
+- [x] Implement OAuth 2.0 flow
+- [x] Device registration (generate device keys)
+- [x] Token management (access, refresh)
+- [ ] Activation bytes retrieval (endpoint identified, binary extraction needed)
+- [x] Account persistence
 
 **Key Components:**
 - OAuth flow with Audible

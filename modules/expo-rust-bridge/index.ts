@@ -409,18 +409,31 @@ export interface ExpoRustBridgeModule {
   // --------------------------------------------------------------------------
 
   /**
-   * Download an audiobook from Audible.
+   * Download and decrypt an audiobook (complete pipeline).
    *
+   * This function handles the entire process:
+   * 1. Rust downloads encrypted AAXC file to cache and extracts decryption keys
+   * 2. Kotlin decrypts using FFmpeg-Kit (16KB page size compatible)
+   * 3. Kotlin copies to user's chosen directory (handles SAF URIs via DocumentFile)
+   * 4. Kotlin cleans up cache files
+   * 5. Returns final decrypted file path with duration
+   *
+   * @param accountJson - JSON-serialized Account object with identity
    * @param asin - Audible product ID (ASIN)
-   * @param licenseJson - JSON-serialized license information
-   * @param outputPath - Absolute path for downloaded file
-   * @returns Path to downloaded file
+   * @param outputDirectory - Directory to save M4B file (supports content:// SAF URIs)
+   * @param quality - Download quality ("Low", "Normal", "High", "Extreme")
+   * @returns Final file path, size, and duration
    */
   downloadBook(
+    accountJson: string,
     asin: string,
-    licenseJson: string,
-    outputPath: string
-  ): Promise<RustResponse<{ file_path: string }>>;
+    outputDirectory: string,
+    quality: string
+  ): Promise<RustResponse<{
+    outputPath: string;
+    fileSize: number;
+    duration: number;
+  }>>;
 
   /**
    * Decrypt AAX audiobook to M4B format.
@@ -481,6 +494,56 @@ export interface ExpoRustBridgeModule {
    * @returns Confirmation of logging
    */
   logFromRust(message: string): RustResponse<{ logged: boolean }>;
+
+  // --------------------------------------------------------------------------
+  // FFmpeg-Kit Functions (16KB Page Size Compatible)
+  // --------------------------------------------------------------------------
+
+  /**
+   * Convert AAX/AAXC to M4B using FFmpeg-Kit.
+   *
+   * @param inputPath - Path to input AAX/AAXC file
+   * @param outputPath - Path to output M4B file
+   * @param activationBytes - Optional activation bytes for AAX (8 hex chars)
+   * @param aaxcKey - Optional AAXC decryption key (hex string)
+   * @param aaxcIv - Optional AAXC initialization vector (hex string)
+   * @returns Conversion result with output path and file size
+   */
+  convertToM4b(
+    inputPath: string,
+    outputPath: string,
+    activationBytes?: string,
+    aaxcKey?: string,
+    aaxcIv?: string
+  ): Promise<RustResponse<{ outputPath: string; fileSize: number; returnCode: number }>>;
+
+  /**
+   * Convert audio file to different format using FFmpeg-Kit.
+   *
+   * @param inputPath - Path to input file
+   * @param outputPath - Path to output file
+   * @param codec - Audio codec (aac, libmp3lame, copy)
+   * @param bitrate - Bitrate (e.g., "128k" or null for default)
+   * @param quality - VBR quality (0-9 for MP3, null for CBR)
+   * @returns Conversion result with output path and file size
+   */
+  convertAudio(
+    inputPath: string,
+    outputPath: string,
+    codec: string,
+    bitrate?: string,
+    quality?: number
+  ): Promise<RustResponse<{ outputPath: string; fileSize: number }>>;
+
+  /**
+   * Get audio file duration and metadata using FFprobe.
+   *
+   * @param filePath - Path to audio file
+   * @returns Duration and metadata information
+   */
+  getAudioInfo(
+    filePath: string
+  ): Promise<RustResponse<{ duration: number; bitrate: string; format: string; size: string }>>;
 }
 
 // ============================================================================
@@ -859,6 +922,59 @@ async function syncLibraryPage(dbPath: string, account: Account, page: number): 
   return unwrapResult(response);
 }
 
+/**
+ * Download and decrypt an audiobook (complete pipeline).
+ *
+ * This is a high-level helper that handles the entire download+decrypt workflow:
+ * 1. Request download license from Audible
+ * 2. Download encrypted AAXC file
+ * 3. Extract decryption keys
+ * 4. Decrypt to playable M4B using FFmpeg-Kit
+ * 5. Get duration and metadata
+ * 6. Delete encrypted file (save space)
+ *
+ * @param account - Account with authentication
+ * @param asin - Book ASIN to download
+ * @param outputDirectory - Directory to save M4B file
+ * @param quality - Download quality (defaults to "High")
+ * @returns Download result with file path, size, and duration
+ * @throws {RustBridgeError} If download or decryption fails
+ *
+ * @example
+ * ```typescript
+ * const result = await downloadAndDecryptBook(
+ *   account,
+ *   'B07T2F8VJM',
+ *   '/storage/audiobooks',
+ *   'High'
+ * );
+ * console.log(`Downloaded to: ${result.outputPath}`);
+ * console.log(`Duration: ${result.duration / 3600} hours`);
+ * ```
+ */
+async function downloadAndDecryptBook(
+  account: Account,
+  asin: string,
+  outputDirectory: string,
+  quality: string = 'High'
+): Promise<{ outputPath: string; fileSize: number; duration: number }> {
+  const accountJson = JSON.stringify(account);
+
+  // Kotlin handles the entire pipeline:
+  // 1. Rust downloads encrypted .aax to cache
+  // 2. Kotlin decrypts with FFmpeg-Kit
+  // 3. Kotlin copies to user's directory (if SAF URI)
+  // 4. Kotlin cleans up cache files
+  const response = await NativeModule!.downloadBook(
+    accountJson,
+    asin,
+    outputDirectory,
+    quality
+  );
+
+  return unwrapResult(response);
+}
+
 // ============================================================================
 // Exports
 // ============================================================================
@@ -878,6 +994,7 @@ export {
   syncLibraryPage,
   getBooks,
   getCustomerInformation,
+  downloadAndDecryptBook,
   generateDeviceSerial,
   unwrapResult,
   RustBridgeError,

@@ -44,6 +44,10 @@ yarn-error.*
 /ios
 /android
 
+# Exception: Track the FFmpeg-Kit .aar file
+!/android/app/libs/
+!/android/app/libs/ffmpeg-kit.aar
+
 # Module build artifacts
 modules/**/android/build/
 modules/**/ios/build/
@@ -57,6 +61,10 @@ native/rust-core/Cargo.lock
 *.so
 *.dylib
 *.dll
+
+# FFmpeg-Kit source (large external repo, rebuilt locally)
+# Only track the final .aar in android/app/libs/
+native/ffmpeg-kit-16KB/
 
 # References
 references/

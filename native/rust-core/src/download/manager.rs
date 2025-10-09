@@ -294,17 +294,16 @@ impl DownloadManager {
 
             // Notify completion via callback
             if let Some(cb) = callback {
-                let progress = DownloadProgress {
-                    asin: task.book.asin.clone(),
-                    title: task.book.title.clone(),
-                    bytes_downloaded: task.book.file_size,
-                    total_bytes: task.book.file_size,
-                    percent_complete: 100.0,
-                    download_speed: 0.0,
-                    eta_seconds: 0,
-                    state: task.state,
-                    error_message: task.error.clone(),
-                };
+                let mut progress = DownloadProgress::new(
+                    task.book.asin.clone(),
+                    task.book.title.clone(),
+                    task.book.file_size,
+                    task.book.file_size
+                );
+                progress.set_state(task.state);
+                if let Some(error) = task.error.clone() {
+                    progress.error_message = Some(error);
+                }
                 cb(progress);
             }
         });
@@ -431,16 +430,18 @@ impl DownloadManager {
     /// Get progress for a specific download
     pub async fn get_progress(&self, asin: &str) -> Option<DownloadProgress> {
         let active = self.active_downloads.read().await;
-        active.get(asin).map(|task| DownloadProgress {
-            asin: task.book.asin.clone(),
-            title: task.book.title.clone(),
-            bytes_downloaded: 0, // Would need to track this
-            total_bytes: task.book.file_size,
-            percent_complete: 0.0,
-            download_speed: 0.0,
-            eta_seconds: 0,
-            state: task.state,
-            error_message: task.error.clone(),
+        active.get(asin).map(|task| {
+            let mut progress = DownloadProgress::new(
+                task.book.asin.clone(),
+                task.book.title.clone(),
+                0, // Would need to track this
+                task.book.file_size
+            );
+            progress.set_state(task.state);
+            if let Some(error) = &task.error {
+                progress.error_message = Some(error.clone());
+            }
+            progress
         })
     }
 
@@ -452,17 +453,17 @@ impl DownloadManager {
         {
             let queue = self.download_queue.read().await;
             for task in queue.iter() {
-                downloads.push(DownloadProgress {
-                    asin: task.book.asin.clone(),
-                    title: task.book.title.clone(),
-                    bytes_downloaded: 0,
-                    total_bytes: task.book.file_size,
-                    percent_complete: 0.0,
-                    download_speed: 0.0,
-                    eta_seconds: 0,
-                    state: task.state,
-                    error_message: task.error.clone(),
-                });
+                let mut progress = DownloadProgress::new(
+                    task.book.asin.clone(),
+                    task.book.title.clone(),
+                    0,
+                    task.book.file_size
+                );
+                progress.set_state(task.state);
+                if let Some(error) = &task.error {
+                    progress.error_message = Some(error.clone());
+                }
+                downloads.push(progress);
             }
         }
 
@@ -470,17 +471,17 @@ impl DownloadManager {
         {
             let active = self.active_downloads.read().await;
             for task in active.values() {
-                downloads.push(DownloadProgress {
-                    asin: task.book.asin.clone(),
-                    title: task.book.title.clone(),
-                    bytes_downloaded: 0,
-                    total_bytes: task.book.file_size,
-                    percent_complete: 0.0,
-                    download_speed: 0.0,
-                    eta_seconds: 0,
-                    state: task.state,
-                    error_message: task.error.clone(),
-                });
+                let mut progress = DownloadProgress::new(
+                    task.book.asin.clone(),
+                    task.book.title.clone(),
+                    0,
+                    task.book.file_size
+                );
+                progress.set_state(task.state);
+                if let Some(error) = &task.error {
+                    progress.error_message = Some(error.clone());
+                }
+                downloads.push(progress);
             }
         }
 

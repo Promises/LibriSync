@@ -845,54 +845,6 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeSearch
 /// }
 /// ```
 #[no_mangle]
-pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeDownloadBook(
-    mut env: JNIEnv,
-    _class: JClass,
-    params_json: JString,
-) -> jstring {
-    let params_str_result = jstring_to_string(&mut env, params_json);
-
-    let response = catch_panic(move || {
-        #[derive(Deserialize)]
-        struct Params {
-            asin: String,
-            access_token: String,
-            locale_code: String,
-            output_path: String,
-        }
-
-        match (move || -> crate::Result<String> {
-            let params_str = params_str_result?;
-            let params: Params = serde_json::from_str(&params_str)
-                .map_err(|e| crate::LibationError::InvalidInput(format!("Invalid JSON: {}", e)))?;
-
-            let _locale = crate::api::auth::Locale::from_country_code(&params.locale_code)
-                .ok_or_else(|| crate::LibationError::InvalidInput(format!("Invalid locale: {}", params.locale_code)))?;
-
-            // Note: This is a placeholder - actual implementation would need:
-            // 1. Account object with tokens
-            // 2. License data and content URL from the API
-            // 3. DownloadConfig with output directory
-            // For now, just return a placeholder response
-            let bytes_downloaded = 0u64; // TODO: Implement actual download
-
-            let response = serde_json::json!({
-                "bytes_downloaded": bytes_downloaded,
-                "output_path": params.output_path,
-            });
-
-            Ok(success_response(response))
-        })() {
-            Ok(result) => result,
-            Err(e) => error_response(&e.to_string()),
-        }
-    });
-
-    env.new_string(response)
-        .expect("Failed to create Java string")
-        .into_raw()
-}
-
 // ============================================================================
 // DECRYPTION FUNCTIONS
 // ============================================================================
@@ -1220,6 +1172,189 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetCus
                 let customer_info = client.get_customer_information().await?;
 
                 Ok::<_, crate::LibationError>(customer_info)
+            })?;
+
+            Ok(success_response(result))
+        })() {
+            Ok(result) => result,
+            Err(e) => error_response(&e.to_string()),
+        }
+    });
+
+    env.new_string(response)
+        .expect("Failed to create Java string")
+        .into_raw()
+}
+
+/// Download and decrypt an audiobook
+///
+/// # Parameters
+/// JSON string with:
+/// ```json
+/// {
+///   "accountJson": "{ ... }",  // Complete account JSON with identity
+///   "asin": "B07T2F8VJM",
+///   "outputDirectory": "/path/to/save",
+///   "quality": "High"  // "Low", "Normal", "High", "Extreme"
+/// }
+/// ```
+///
+/// # Returns
+/// JSON response:
+/// ```json
+/// {
+///   "success": true,
+///   "data": {
+///     "outputPath": "/path/to/file.m4b",
+///     "fileSize": 148080000,
+///     "duration": 9783.3
+///   }
+/// }
+/// ```
+#[no_mangle]
+pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeDownloadBook(
+    mut env: JNIEnv,
+    _class: JClass,
+    params_json: JString,
+) -> jstring {
+    let params_str_result = jstring_to_string(&mut env, params_json);
+
+    let response = catch_panic(move || {
+        #[derive(Deserialize)]
+        struct Params {
+            #[serde(rename = "accountJson")]
+            account_json: String,
+            asin: String,
+            #[serde(rename = "outputDirectory")]
+            output_directory: String,
+            quality: String,
+        }
+
+        match (move || -> crate::Result<String> {
+            let params_str = params_str_result?;
+            let params: Params = serde_json::from_str(&params_str)
+                .map_err(|e| crate::LibationError::InvalidInput(format!("Invalid JSON: {}", e)))?;
+
+            let result = RUNTIME.block_on(async {
+                // Parse account
+                let account: crate::api::auth::Account = serde_json::from_str(&params.account_json)
+                    .map_err(|e| crate::LibationError::InvalidInput(format!("Invalid account JSON: {}", e)))?;
+
+                // Parse quality
+                let quality = match params.quality.as_str() {
+                    "Low" => crate::api::content::DownloadQuality::Low,
+                    "Normal" => crate::api::content::DownloadQuality::Normal,
+                    "High" => crate::api::content::DownloadQuality::High,
+                    "Extreme" => crate::api::content::DownloadQuality::Extreme,
+                    _ => crate::api::content::DownloadQuality::High,
+                };
+
+                // Create client
+                let client = crate::api::client::AudibleClient::new(account)?;
+
+                // Get download license
+                let license = client.build_download_license(&params.asin, quality, false).await?;
+
+                // Extract AAXC keys
+                let (key_hex, iv_hex) = if let Some(ref keys) = license.decryption_keys {
+                    if !keys.is_empty() && keys[0].key_part_1.len() == 16 {
+                        let key = keys[0].key_part_1.iter()
+                            .map(|b| format!("{:02x}", b))
+                            .collect::<String>();
+                        let iv = if let Some(ref iv_bytes) = keys[0].key_part_2 {
+                            iv_bytes.iter()
+                                .map(|b| format!("{:02x}", b))
+                                .collect::<String>()
+                        } else {
+                            return Err(crate::LibationError::InvalidInput("No IV in AAXC keys".to_string()));
+                        };
+                        (key, iv)
+                    } else {
+                        return Err(crate::LibationError::InvalidInput("Unsupported key format (only AAXC supported)".to_string()));
+                    }
+                } else {
+                    return Err(crate::LibationError::InvalidInput("No decryption keys in license".to_string()));
+                };
+
+                // Download encrypted file to cache directory
+                // (TypeScript layer will copy to user's chosen directory after decryption)
+                let cache_dir = std::env::var("TMPDIR")
+                    .or_else(|_| std::env::var("TEMP"))
+                    .unwrap_or_else(|_| "/data/local/tmp".to_string());
+
+                // Create audiobooks subdirectory in cache
+                let audiobooks_cache = format!("{}/audiobooks", cache_dir.trim_end_matches('/'));
+                let _ = std::fs::create_dir_all(&audiobooks_cache);
+
+                let encrypted_path = format!("{}/{}.aax", audiobooks_cache, params.asin);
+                let decrypted_path = format!("{}/{}.m4b", audiobooks_cache, params.asin);
+
+                // Download with reqwest
+                let user_agent = "Audible/671 CFNetwork/1240.0.4 Darwin/20.6.0";
+                let http_client = reqwest::Client::new();
+                let response = http_client
+                    .get(&license.download_url)
+                    .header("User-Agent", user_agent)
+                    .send()
+                    .await
+                    .map_err(|e| crate::LibationError::NetworkError {
+                        message: format!("Download request failed: {}", e),
+                        is_transient: true,
+                    })?;
+
+                if !response.status().is_success() {
+                    return Err(crate::LibationError::NetworkError {
+                        message: format!("HTTP {}", response.status()),
+                        is_transient: false,
+                    });
+                }
+
+                use futures_util::StreamExt;
+                use tokio::io::AsyncWriteExt;
+
+                let mut file = tokio::fs::File::create(&encrypted_path).await
+                    .map_err(|e| crate::LibationError::internal(format!("Failed to create file {}: {}", encrypted_path, e)))?;
+
+                let mut stream = response.bytes_stream();
+                while let Some(chunk) = stream.next().await {
+                    let chunk = chunk
+                        .map_err(|e| crate::LibationError::NetworkError {
+                            message: format!("Stream error: {}", e),
+                            is_transient: true,
+                        })?;
+                    file.write_all(&chunk).await
+                        .map_err(|e| crate::LibationError::internal(format!("Write failed: {}", e)))?;
+                }
+                file.flush().await
+                    .map_err(|e| crate::LibationError::internal(format!("Flush failed: {}", e)))?;
+
+                // Return encrypted file path and decryption keys
+                // The TypeScript/Kotlin layer will use FFmpeg-Kit to decrypt
+                let metadata = tokio::fs::metadata(&encrypted_path).await
+                    .map_err(|e| crate::LibationError::not_found(format!("Downloaded file not found: {}", encrypted_path)))?;
+
+                // Return decryption info for FFmpeg-Kit to use
+                #[derive(Serialize)]
+                struct DownloadResultWithKeys {
+                    #[serde(rename = "encryptedPath")]
+                    encrypted_path: String,
+                    #[serde(rename = "outputPath")]
+                    output_path: String,
+                    #[serde(rename = "fileSize")]
+                    file_size: u64,
+                    #[serde(rename = "aaxcKey")]
+                    aaxc_key: String,
+                    #[serde(rename = "aaxcIv")]
+                    aaxc_iv: String,
+                }
+
+                Ok::<_, crate::LibationError>(DownloadResultWithKeys {
+                    encrypted_path,
+                    output_path: decrypted_path,
+                    file_size: metadata.len(),
+                    aaxc_key: key_hex,
+                    aaxc_iv: iv_hex,
+                })
             })?;
 
             Ok(success_response(result))

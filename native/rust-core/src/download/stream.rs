@@ -339,7 +339,8 @@ impl ResumableStream {
 
                 // Update progress
                 if let Some(ref mut tracker) = self.progress_tracker {
-                    if tracker.update(self.state.write_position) {
+                    tracker.update(self.state.write_position, self.state.content_length);
+                    if tracker.should_update() {
                         progress_callback(tracker.clone_progress());
                     }
                 }
@@ -402,7 +403,7 @@ impl ResumableStream {
                 if let Some(content_length) = response.content_length() {
                     self.state.content_length = content_length;
                     if let Some(ref mut tracker) = self.progress_tracker {
-                        tracker.get_progress();
+                        tracker.progress.total_bytes = content_length;
                     }
                 } else {
                     return Err(LibationError::DownloadFailed("No content length in response".to_string()));

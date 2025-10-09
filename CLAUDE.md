@@ -275,11 +275,44 @@ The `references/Libation/` directory contains the original C# Libation source co
 - TypeScript: `syncLibraryPage()` exported from `modules/expo-rust-bridge/index.ts`
 - See `SimpleAccountScreen.tsx:301-310` for UI implementation with progress callbacks
 
+### ✅ FFmpeg-Kit Integration - COMPLETE! (Oct 9, 2025)
+- **16KB Page Size Support**: ✅ Google Play compliant (Nov 2025 requirement)
+- **Complete Download Pipeline**: ✅ Download + Decrypt + Copy to user directory
+- **FFmpeg-Kit**: ✅ Built from AliAkhgar/ffmpeg-kit-16KB fork (34MB .aar)
+- **SAF Support**: ✅ DocumentFile APIs for content:// URIs
+- **Full Stack Flow**: ✅ Rust → Kotlin → FFmpeg-Kit → SAF
+
+**Architecture:**
+1. **Rust**: Downloads encrypted AAXC file to cache, extracts decryption keys
+2. **Kotlin**: Decrypts with FFmpeg-Kit (16KB page aligned)
+3. **Kotlin**: Copies to user's chosen directory via SAF DocumentFile APIs
+4. **Cleanup**: Deletes cache files automatically
+
+**Implementation Details:**
+- FFmpeg-Kit build: `scripts/build-ffmpeg-kit.sh`
+- Integration: `scripts/integrate-ffmpeg-kit.sh`
+- Verification: `scripts/check_elf_alignment.sh` (confirms 16KB alignment)
+- JNI bridge: Modified `nativeDownloadBook` to return decryption keys
+- Kotlin module: `ExpoRustBridgeModule.kt` orchestrates download → decrypt → copy
+- Three FFmpeg-Kit functions: `convertToM4b()`, `convertAudio()`, `getAudioInfo()`
+
+**Test Results:**
+- Book: "A Mind of Her Own" (B07NP9L44Y)
+- Size: 72.2 MB, Duration: 76 minutes
+- Successfully saved to user's SAF directory
+- Multiple downloads validated
+
+**Build Configuration:**
+- NDK r27 with native 16KB support
+- .aar file: 34MB at `android/app/libs/ffmpeg-kit.aar`
+- Dependencies: `com.arthenica:smart-exception-java:0.1.1`
+- ELF alignment verified: 2**14 (16384 bytes = 16KB) ✅
+
 ### 🚧 Next Phase
-- **Extract Full Registration Data** - Parse all tokens (adp_token, device_private_key, cookies)
-- **Activation Bytes** - Fix binary blob extraction for DRM
+- **Enhanced Library UI**: Cover images, sorting, filtering, search
+- **Download Progress UI**: Real-time progress indicators in library list
 - **iOS Expo Module**: Create Swift module using C FFI bridge
-- **Library Display UI**: Enhanced book list with cover images, sorting, filtering
+- **Activation Bytes**: Fix binary blob extraction for DRM (currently using AAXC keys)
 
 ### 📋 Next Implementation Priorities
 
@@ -288,11 +321,11 @@ See `LIBATION_PORT_PLAN.md` for comprehensive plan.
 **Immediate priorities:**
 1. ✅ ~~OAuth authentication flow~~ **COMPLETE**
 2. ✅ ~~Paginated library sync~~ **COMPLETE**
-3. **Extract full registration response** - Parse all tokens (adp_token, device_private_key, cookies)
-4. **Enhanced library UI** - Cover images, sorting, filtering, search
-5. **Activation bytes** - Fix binary blob extraction for DRM
-6. DRM removal (AAX → M4B conversion)
-7. Download manager UI
+3. ✅ ~~FFmpeg-Kit integration~~ **COMPLETE**
+4. ✅ ~~Download and decrypt pipeline~~ **COMPLETE**
+5. **Enhanced library UI** - Cover images, sorting, filtering, search
+6. **Download progress UI** - Real-time progress indicators
+7. **Activation bytes** - Fix binary blob extraction for AAX DRM (AAXC keys working)
 
 ## Build Architecture
 

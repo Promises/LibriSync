@@ -313,15 +313,21 @@ pub struct ContentUrl {
 /// - ChapterInfo (ChapterInfo)
 /// - ContentReference (ContentReference)
 /// - ContentUrl (ContentUrl)
+///
+/// Note: Different API endpoints return different subsets:
+/// - /1.0/content/{asin}/metadata - Returns all fields
+/// - /1.0/content/{asin}/licenserequest - Returns only content_url
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContentMetadata {
     /// Chapter information with timing
-    #[serde(rename = "chapter_info")]
-    pub chapter_info: ChapterInfo,
+    /// Only present in full metadata endpoint, not in license response
+    #[serde(rename = "chapter_info", skip_serializing_if = "Option::is_none")]
+    pub chapter_info: Option<ChapterInfo>,
 
     /// Content reference with codec/version info
-    #[serde(rename = "content_reference")]
-    pub content_reference: ContentReference,
+    /// Only present in full metadata endpoint, not in license response
+    #[serde(rename = "content_reference", skip_serializing_if = "Option::is_none")]
+    pub content_reference: Option<ContentReference>,
 
     /// Download and streaming URLs
     #[serde(rename = "content_url")]

@@ -5,6 +5,8 @@ import expo.modules.kotlin.modules.ModuleDefinition
 import expo.modules.kotlin.Promise
 import org.json.JSONObject
 import org.json.JSONArray
+import android.net.Uri
+import androidx.documentfile.provider.DocumentFile
 
 class ExpoRustBridgeModule : Module() {
   override fun definition() = ModuleDefinition {
@@ -228,15 +230,138 @@ class ExpoRustBridgeModule : Module() {
      * @param outputPath The path where the .aax file should be saved
      * @return Promise resolving to Map with download info or rejecting with error
      */
-    AsyncFunction("downloadBook") { asin: String, licenseJson: String, outputPath: String ->
+    /**
+     * Download and decrypt an audiobook (complete pipeline with FFmpeg-Kit).
+     *
+     * Flow:
+     * 1. Rust downloads encrypted .aax to cache and returns decryption keys
+     * 2. Kotlin uses FFmpeg-Kit to decrypt to .m4b in cache
+     * 3. If SAF URI, Kotlin copies to user's directory using DocumentFile
+     * 4. Returns final output path
+     *
+     * @param accountJson The complete account JSON with identity
+     * @param asin The book ASIN to download
+     * @param outputDirectory The directory to save the decrypted M4B file (can be SAF URI)
+     * @param quality Download quality ("Low", "Normal", "High", "Extreme")
+     * @return Promise resolving to Map with outputPath, fileSize, duration
+     */
+    AsyncFunction("downloadBook") { accountJson: String, asin: String, outputDirectory: String, quality: String ->
       try {
+        val context = appContext.reactContext ?: throw Exception("React context not available")
+
+        // Step 1: Download encrypted file using Rust
         val params = JSONObject().apply {
+          put("accountJson", accountJson)
           put("asin", asin)
-          put("license_json", licenseJson)
-          put("output_path", outputPath)
+          put("outputDirectory", outputDirectory) // Ignored by Rust (uses cache)
+          put("quality", quality)
         }
-        val result = nativeDownloadBook(params.toString())
-        parseJsonResponse(result)
+
+        val downloadResult = nativeDownloadBook(params.toString())
+        val parsedResult = parseJsonResponse(downloadResult)
+
+        if (parsedResult["success"] != true) {
+          return@AsyncFunction parsedResult
+        }
+
+        val data = parsedResult["data"] as? Map<*, *>
+          ?: return@AsyncFunction mapOf("success" to false, "error" to "Invalid download response")
+
+        val encryptedPath = data["encryptedPath"] as? String
+          ?: return@AsyncFunction mapOf("success" to false, "error" to "Missing encryptedPath")
+        val decryptedCachePath = data["outputPath"] as? String
+          ?: return@AsyncFunction mapOf("success" to false, "error" to "Missing outputPath")
+        val aaxcKey = data["aaxcKey"] as? String
+        val aaxcIv = data["aaxcIv"] as? String
+
+        // Step 2: Decrypt using FFmpeg-Kit
+        val command = buildList {
+          add("-y") // Overwrite output
+
+          if (aaxcKey != null && aaxcIv != null) {
+            add("-audible_key")
+            add(aaxcKey)
+            add("-audible_iv")
+            add(aaxcIv)
+          }
+
+          add("-i")
+          add(encryptedPath)
+          add("-c")
+          add("copy")
+          add("-vn")
+          add(decryptedCachePath)
+        }.toTypedArray()
+
+        val session = com.arthenica.ffmpegkit.FFmpegKit.execute(command.joinToString(" "))
+
+        if (!com.arthenica.ffmpegkit.ReturnCode.isSuccess(session.returnCode)) {
+          return@AsyncFunction mapOf(
+            "success" to false,
+            "error" to "FFmpeg decryption failed: ${session.failStackTrace}"
+          )
+        }
+
+        // Step 3: Get duration
+        val infoSession = com.arthenica.ffmpegkit.FFprobeKit.getMediaInformation(decryptedCachePath)
+        val duration = infoSession.mediaInformation?.duration?.toDoubleOrNull() ?: 0.0
+
+        val cachedFile = java.io.File(decryptedCachePath)
+        var finalOutputPath = decryptedCachePath
+        var finalFileSize = cachedFile.length()
+
+        // Step 4: If SAF URI, copy to user's directory using DocumentFile
+        if (outputDirectory.startsWith("content://")) {
+          val treeUri = Uri.parse(outputDirectory)
+          val docDir = DocumentFile.fromTreeUri(context, treeUri)
+            ?: throw Exception("Invalid SAF URI: $outputDirectory")
+
+          if (!docDir.canWrite()) {
+            throw Exception("No write permission for SAF directory: $outputDirectory")
+          }
+
+          val fileName = "$asin.m4b"
+
+          // Delete existing file if present
+          val existingFile = docDir.findFile(fileName)
+          if (existingFile != null) {
+            android.util.Log.d("ExpoRustBridge", "Deleting existing file: ${existingFile.uri}")
+            existingFile.delete()
+          }
+
+          // Create new file - try multiple MIME types
+          val outputFile = docDir.createFile("audio/mp4", fileName)
+            ?: docDir.createFile("audio/x-m4b", fileName)
+            ?: docDir.createFile("audio/*", fileName)
+            ?: throw Exception("Failed to create file '$fileName' in SAF directory (tried multiple MIME types)")
+
+          android.util.Log.d("ExpoRustBridge", "Created SAF file: ${outputFile.uri}")
+
+          // Copy to SAF location
+          context.contentResolver.openOutputStream(outputFile.uri)?.use { outputStream ->
+            cachedFile.inputStream().use { inputStream ->
+              inputStream.copyTo(outputStream)
+            }
+          } ?: throw Exception("Failed to open SAF output stream")
+
+          finalOutputPath = outputFile.uri.toString()
+          android.util.Log.d("ExpoRustBridge", "Copied to SAF: $finalOutputPath")
+
+          // Delete cache file
+          cachedFile.delete()
+        }
+
+        // Step 5: Delete encrypted file
+        java.io.File(encryptedPath).delete()
+
+        mapOf(
+          "success" to true,
+          "data" to mapOf(
+            "outputPath" to finalOutputPath,
+            "fileSize" to finalFileSize,
+            "duration" to duration
+          )
+        )
       } catch (e: Exception) {
         mapOf(
           "success" to false,
@@ -311,6 +436,164 @@ class ExpoRustBridgeModule : Module() {
       }
       val response = parseJsonResponse(nativeGetCustomerInformation(params.toString()))
       promise.resolve(response)
+    }
+
+    // ============================================================================
+    // FFMPEG-KIT FUNCTIONS (16KB Page Size Compatible)
+    // ============================================================================
+
+    /**
+     * Convert AAX/AAXC to M4B using FFmpeg-Kit.
+     *
+     * @param inputPath Path to input AAX/AAXC file
+     * @param outputPath Path to output M4B file
+     * @param activationBytes Optional activation bytes for AAX (8 hex chars)
+     * @param aaxcKey Optional AAXC decryption key (hex string)
+     * @param aaxcIv Optional AAXC initialization vector (hex string)
+     * @return Promise resolving to Map with conversion info or error
+     */
+    AsyncFunction("convertToM4b") { inputPath: String, outputPath: String, activationBytes: String?, aaxcKey: String?, aaxcIv: String? ->
+      try {
+        val command = buildList {
+          add("-y") // Overwrite output
+
+          // Add decryption parameters
+          when {
+            aaxcKey != null && aaxcIv != null -> {
+              add("-audible_key")
+              add(aaxcKey)
+              add("-audible_iv")
+              add(aaxcIv)
+            }
+            activationBytes != null && activationBytes.isNotEmpty() -> {
+              add("-activation_bytes")
+              add(activationBytes)
+            }
+          }
+
+          add("-i")
+          add(inputPath)
+          add("-c")
+          add("copy") // Fast copy without re-encoding
+          add("-vn") // No video
+          add(outputPath)
+        }.toTypedArray()
+
+        val session = com.arthenica.ffmpegkit.FFmpegKit.execute(command.joinToString(" "))
+
+        if (com.arthenica.ffmpegkit.ReturnCode.isSuccess(session.returnCode)) {
+          val outputFile = java.io.File(outputPath)
+          mapOf(
+            "success" to true,
+            "data" to mapOf(
+              "outputPath" to outputPath,
+              "fileSize" to outputFile.length(),
+              "returnCode" to session.returnCode.value
+            )
+          )
+        } else {
+          mapOf(
+            "success" to false,
+            "error" to "FFmpeg conversion failed: ${session.failStackTrace}"
+          )
+        }
+      } catch (e: Exception) {
+        mapOf(
+          "success" to false,
+          "error" to "Convert to M4B error: ${e.message}"
+        )
+      }
+    }
+
+    /**
+     * Convert audio file to different format using FFmpeg-Kit.
+     *
+     * @param inputPath Path to input file
+     * @param outputPath Path to output file
+     * @param codec Audio codec (aac, libmp3lame, copy)
+     * @param bitrate Bitrate (e.g., "128k" or null for default)
+     * @param quality VBR quality (0-9 for MP3, null for CBR)
+     * @return Promise resolving to Map with conversion info or error
+     */
+    AsyncFunction("convertAudio") { inputPath: String, outputPath: String, codec: String, bitrate: String?, quality: Int? ->
+      try {
+        val command = buildList {
+          add("-y") // Overwrite output
+          add("-i")
+          add(inputPath)
+          add("-codec:a")
+          add(codec)
+
+          if (quality != null && codec == "libmp3lame") {
+            add("-q:a")
+            add(quality.toString())
+          } else if (bitrate != null) {
+            add("-b:a")
+            add(bitrate)
+          }
+
+          add("-vn") // No video
+          add(outputPath)
+        }.toTypedArray()
+
+        val session = com.arthenica.ffmpegkit.FFmpegKit.execute(command.joinToString(" "))
+
+        if (com.arthenica.ffmpegkit.ReturnCode.isSuccess(session.returnCode)) {
+          val outputFile = java.io.File(outputPath)
+          mapOf(
+            "success" to true,
+            "data" to mapOf(
+              "outputPath" to outputPath,
+              "fileSize" to outputFile.length()
+            )
+          )
+        } else {
+          mapOf(
+            "success" to false,
+            "error" to "FFmpeg conversion failed: ${session.failStackTrace}"
+          )
+        }
+      } catch (e: Exception) {
+        mapOf(
+          "success" to false,
+          "error" to "Convert audio error: ${e.message}"
+        )
+      }
+    }
+
+    /**
+     * Get audio file duration and metadata using FFprobe.
+     *
+     * @param filePath Path to audio file
+     * @return Promise resolving to Map with duration and metadata
+     */
+    AsyncFunction("getAudioInfo") { filePath: String ->
+      try {
+        val session = com.arthenica.ffmpegkit.FFprobeKit.getMediaInformation(filePath)
+        val info = session.mediaInformation
+
+        if (info != null) {
+          mapOf(
+            "success" to true,
+            "data" to mapOf(
+              "duration" to info.duration.toDoubleOrNull(),
+              "bitrate" to info.bitrate,
+              "format" to info.format,
+              "size" to info.size
+            )
+          )
+        } else {
+          mapOf(
+            "success" to false,
+            "error" to "Could not get media information"
+          )
+        }
+      } catch (e: Exception) {
+        mapOf(
+          "success" to false,
+          "error" to "Get audio info error: ${e.message}"
+        )
+      }
     }
 
     /**

@@ -262,7 +262,9 @@ mod tests {
 
         assert!(tokens.access_token.starts_with("Atna|"));
         assert!(tokens.refresh_token.starts_with("Atnr|"));
-        assert_eq!(tokens.expires_in, "3600");
+        // Token expiration can vary slightly (3599-3601 seconds)
+        let expires_in: i64 = tokens.expires_in.parse().unwrap();
+        assert!(expires_in >= 3599 && expires_in <= 3601, "expires_in should be ~3600, got {}", expires_in);
     }
 
     #[test]

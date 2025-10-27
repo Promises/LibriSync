@@ -9,6 +9,7 @@ import android.content.Context
 import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
 import expo.modules.rustbridge.workers.WorkerScheduler
+import java.io.File
 
 class ExpoRustBridgeModule : Module() {
   override fun definition() = ModuleDefinition {
@@ -295,11 +296,11 @@ class ExpoRustBridgeModule : Module() {
      * @return Promise resolving to Map with download info or rejecting with error
      */
     /**
-     * Download and decrypt an audiobook (complete pipeline with FFmpeg-Kit).
+     * Download and decrypt an audiobook (complete pipeline with FFmpeg-Kit + metadata).
      *
      * Flow:
-     * 1. Rust downloads encrypted .aax to cache and returns decryption keys
-     * 2. Kotlin uses FFmpeg-Kit to decrypt to .m4b in cache
+     * 1. Rust downloads encrypted .aax to cache and fetches metadata from database
+     * 2. Kotlin uses FFmpeg-Kit to decrypt and embed metadata (title, author, narrator, ASIN, etc.)
      * 3. If SAF URI, Kotlin copies to user's directory using DocumentFile
      * 4. Returns final output path
      *
@@ -307,9 +308,10 @@ class ExpoRustBridgeModule : Module() {
      * @param asin The book ASIN to download
      * @param outputDirectory The directory to save the decrypted M4B file (can be SAF URI)
      * @param quality Download quality ("Low", "Normal", "High", "Extreme")
+     * @param dbPath Path to SQLite database (for fetching metadata)
      * @return Promise resolving to Map with outputPath, fileSize, duration
      */
-    AsyncFunction("downloadBook") { accountJson: String, asin: String, outputDirectory: String, quality: String ->
+    AsyncFunction("downloadBook") { accountJson: String, asin: String, outputDirectory: String, quality: String, dbPath: String ->
       try {
         val context = appContext.reactContext ?: throw Exception("React context not available")
 
@@ -319,6 +321,7 @@ class ExpoRustBridgeModule : Module() {
           put("asin", asin)
           put("outputDirectory", outputDirectory) // Ignored by Rust (uses cache)
           put("quality", quality)
+          put("dbPath", dbPath) // For fetching metadata
         }
 
         val downloadResult = nativeDownloadBook(params.toString())
@@ -337,8 +340,30 @@ class ExpoRustBridgeModule : Module() {
           ?: return@AsyncFunction mapOf("success" to false, "error" to "Missing outputPath")
         val aaxcKey = data["aaxcKey"] as? String
         val aaxcIv = data["aaxcIv"] as? String
+        val metadata = data["metadata"] as? Map<*, *>
 
-        // Step 2: Decrypt using FFmpeg-Kit
+        // Step 2: Download cover art if available
+        var coverArtPath: String? = null
+        if (metadata != null) {
+          val coverUrl = (metadata["picture_large"] ?: metadata["picture_id"]) as? String
+          if (coverUrl != null && coverUrl.isNotEmpty()) {
+            try {
+              val coverFile = File.createTempFile("cover_", ".jpg")
+              val url = java.net.URL(coverUrl)
+              url.openStream().use { input ->
+                coverFile.outputStream().use { output ->
+                  input.copyTo(output)
+                }
+              }
+              coverArtPath = coverFile.absolutePath
+              android.util.Log.d("ExpoRustBridge", "Downloaded cover art: $coverArtPath")
+            } catch (e: Exception) {
+              android.util.Log.w("ExpoRustBridge", "Failed to download cover art: ${e.message}")
+            }
+          }
+        }
+
+        // Step 3: Decrypt using FFmpeg-Kit with metadata and cover art
         val command = buildList {
           add("-y") // Overwrite output
 
@@ -351,13 +376,125 @@ class ExpoRustBridgeModule : Module() {
 
           add("-i")
           add(encryptedPath)
-          add("-c")
-          add("copy")
-          add("-vn")
+
+          // Add cover art input if available
+          if (coverArtPath != null) {
+            add("-i")
+            add(coverArtPath)
+          }
+
+          // Add metadata tags if available
+          if (metadata != null) {
+            // Title
+            metadata["title"]?.let {
+              add("-metadata")
+              add("title=${escapeMetadata(it.toString())}")
+            }
+
+            // Subtitle (append to description/comment)
+            metadata["subtitle"]?.let { subtitle ->
+              val description = metadata["description"]?.toString() ?: ""
+              val fullDesc = if (description.isNotEmpty()) {
+                "$description\n\nSubtitle: $subtitle"
+              } else {
+                "Subtitle: $subtitle"
+              }
+              add("-metadata")
+              add("comment=${escapeMetadata(fullDesc)}")
+            } ?: metadata["description"]?.let {
+              add("-metadata")
+              add("comment=${escapeMetadata(it.toString())}")
+            }
+
+            // Authors (artist tag)
+            metadata["authors"]?.let {
+              add("-metadata")
+              add("artist=${escapeMetadata(it.toString())}")
+              add("-metadata")
+              add("album_artist=${escapeMetadata(it.toString())}")
+            }
+
+            // Narrators (composer tag - standard for audiobooks)
+            metadata["narrators"]?.let {
+              add("-metadata")
+              add("composer=${escapeMetadata(it.toString())}")
+            }
+
+            // Publisher
+            metadata["publisher"]?.let { publisher ->
+              add("-metadata")
+              add("publisher=${escapeMetadata(publisher.toString())}")
+
+              // Copyright (format: ©YEAR Publisher;(P)YEAR Publisher)
+              val year = metadata["date_published"]?.toString()?.take(4) ?: "2024"
+              val copyright = "©$year $publisher;(P)$year $publisher"
+              add("-metadata")
+              add("copyright=${escapeMetadata(copyright)}")
+            }
+
+            // Series information (album tag)
+            val seriesName = metadata["series_name"]?.toString()
+            val seriesSequence = metadata["series_sequence"]
+            if (seriesName != null) {
+              val albumTag = if (seriesSequence != null) {
+                "$seriesName, Book $seriesSequence"
+              } else {
+                seriesName
+              }
+              add("-metadata")
+              add("album=${escapeMetadata(albumTag)}")
+            }
+
+            // Release date (year tag)
+            metadata["date_published"]?.toString()?.let { dateStr ->
+              // Extract year from date (format: YYYY-MM-DD or YYYY)
+              val year = dateStr.take(4)
+              add("-metadata")
+              add("date=${escapeMetadata(year)}")
+            }
+
+            // Language
+            metadata["language"]?.let {
+              add("-metadata")
+              add("language=${escapeMetadata(it.toString())}")
+            }
+
+            // Audible ASIN (grouping tag - perfect for tracking IDs)
+            metadata["audible_asin"]?.let {
+              add("-metadata")
+              add("grouping=${escapeMetadata(it.toString())}")
+            }
+
+            // Genre (always Audiobook)
+            add("-metadata")
+            add("genre=Audiobook")
+          }
+
+          // Map streams explicitly (audio + optional cover art)
+          add("-map")
+          add("0:a")  // Audio from encrypted file
+
+          if (coverArtPath != null) {
+            add("-map")
+            add("1")    // Cover art from image file
+            add("-disposition:v:0")
+            add("attached_pic")
+            add("-c:v")
+            add("mjpeg")  // Encode cover as MJPEG
+          } else {
+            // Skip all video streams (no cover art)
+            add("-vn")
+          }
+
+          add("-c:a")
+          add("copy")  // Copy audio without re-encoding
           add(decryptedCachePath)
         }.toTypedArray()
 
         val session = com.arthenica.ffmpegkit.FFmpegKit.execute(command.joinToString(" "))
+
+        // Cleanup cover art temp file
+        coverArtPath?.let { java.io.File(it).delete() }
 
         if (!com.arthenica.ffmpegkit.ReturnCode.isSuccess(session.returnCode)) {
           return@AsyncFunction mapOf(
@@ -366,7 +503,7 @@ class ExpoRustBridgeModule : Module() {
           )
         }
 
-        // Step 3: Get duration
+        // Step 4: Get duration
         val infoSession = com.arthenica.ffmpegkit.FFprobeKit.getMediaInformation(decryptedCachePath)
         val duration = infoSession.mediaInformation?.duration?.toDoubleOrNull() ?: 0.0
 
@@ -1107,6 +1244,25 @@ class ExpoRustBridgeModule : Module() {
     }
 
     /**
+     * Clear download state for all books.
+     *
+     * Resets download status but keeps all book metadata.
+     *
+     * @param dbPath Database path
+     */
+    AsyncFunction("clearDownloadState") { dbPath: String ->
+      try {
+        val params = JSONObject().apply {
+          put("db_path", dbPath)
+        }
+        val result = nativeClearDownloadState(params.toString())
+        parseJsonResponse(result)
+      } catch (e: Exception) {
+        mapOf("success" to false, "error" to e.message)
+      }
+    }
+
+    /**
      * Clear all library data (for testing).
      *
      * @param dbPath Database path
@@ -1270,6 +1426,17 @@ class ExpoRustBridgeModule : Module() {
   // ============================================================================
 
   /**
+   * Escape metadata value for FFmpeg command line.
+   * Wraps in double quotes and escapes special characters.
+   */
+  private fun escapeMetadata(value: String): String {
+    val escaped = value
+      .replace("\\", "\\\\")  // Escape backslashes
+      .replace("\"", "\\\"")  // Escape double quotes
+    return "\"$escaped\""  // Wrap in double quotes
+  }
+
+  /**
    * Parse JSON response from Rust into a Kotlin Map.
    *
    * Rust returns JSON in the format:
@@ -1355,6 +1522,7 @@ class ExpoRustBridgeModule : Module() {
     @JvmStatic external fun nativeSyncLibrary(paramsJson: String): String
     @JvmStatic external fun nativeSyncLibraryPage(paramsJson: String): String
     @JvmStatic external fun nativeGetBooks(paramsJson: String): String
+    @JvmStatic external fun nativeGetBookByAsin(paramsJson: String): String
     @JvmStatic external fun nativeSearchBooks(paramsJson: String): String
     @JvmStatic external fun nativeGetBooksWithFilters(paramsJson: String): String
     @JvmStatic external fun nativeGetAllSeries(paramsJson: String): String
@@ -1382,6 +1550,7 @@ class ExpoRustBridgeModule : Module() {
     @JvmStatic external fun nativeGetPrimaryAccount(paramsJson: String): String
 
     // Testing functions
+    @JvmStatic external fun nativeClearDownloadState(paramsJson: String): String
     @JvmStatic external fun nativeClearLibrary(paramsJson: String): String
   }
 }

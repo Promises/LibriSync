@@ -294,7 +294,31 @@ class DownloadWorker(
                 totalBytes = 0
             ))
 
-            // Decrypt using FFmpeg-Kit
+            // Fetch metadata from database
+            val metadata = fetchBookMetadata(asin)
+
+            // Download cover art if available
+            var coverArtPath: String? = null
+            if (metadata != null) {
+                val coverUrl = metadata["picture_large"] as? String
+                if (coverUrl != null && coverUrl.isNotEmpty()) {
+                    try {
+                        val coverFile = File.createTempFile("cover_", ".jpg")
+                        val url = java.net.URL(coverUrl)
+                        url.openStream().use { input ->
+                            coverFile.outputStream().use { output ->
+                                input.copyTo(output)
+                            }
+                        }
+                        coverArtPath = coverFile.absolutePath
+                        Log.d(TAG, "Downloaded cover art for $asin: $coverArtPath")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to download cover art for $asin: ${e.message}")
+                    }
+                }
+            }
+
+            // Decrypt using FFmpeg-Kit with metadata and cover art
             val command = buildList {
                 add("-y")
                 add("-audible_key")
@@ -303,19 +327,131 @@ class DownloadWorker(
                 add(aaxcIv)
                 add("-i")
                 add(encryptedPath)
-                add("-c")
-                add("copy")
-                add("-vn")
+
+                // Add cover art input if available
+                if (coverArtPath != null) {
+                    add("-i")
+                    add(coverArtPath)
+                }
+
+                // Add metadata tags if available
+                if (metadata != null) {
+                    // Title
+                    metadata["title"]?.let {
+                        add("-metadata")
+                        add("title=${escapeMetadata(it.toString())}")
+                    }
+
+                    // Subtitle (append to description/comment)
+                    metadata["subtitle"]?.let { subtitle ->
+                        val description = metadata["description"]?.toString() ?: ""
+                        val fullDesc = if (description.isNotEmpty()) {
+                            "$description\n\nSubtitle: $subtitle"
+                        } else {
+                            "Subtitle: $subtitle"
+                        }
+                        add("-metadata")
+                        add("comment=${escapeMetadata(fullDesc)}")
+                    } ?: metadata["description"]?.let {
+                        add("-metadata")
+                        add("comment=${escapeMetadata(it.toString())}")
+                    }
+
+                    // Authors (artist tag)
+                    metadata["authors"]?.let {
+                        add("-metadata")
+                        add("artist=${escapeMetadata(it.toString())}")
+                        add("-metadata")
+                        add("album_artist=${escapeMetadata(it.toString())}")
+                    }
+
+                    // Narrators (composer tag - standard for audiobooks)
+                    metadata["narrators"]?.let {
+                        add("-metadata")
+                        add("composer=${escapeMetadata(it.toString())}")
+                    }
+
+                    // Publisher
+                    metadata["publisher"]?.let { publisher ->
+                        add("-metadata")
+                        add("publisher=${escapeMetadata(publisher.toString())}")
+
+                        // Copyright (format: ©YEAR Publisher;(P)YEAR Publisher)
+                        val year = metadata["date_published"]?.toString()?.take(4) ?: "2024"
+                        val copyright = "©$year $publisher;(P)$year $publisher"
+                        add("-metadata")
+                        add("copyright=${escapeMetadata(copyright)}")
+                    }
+
+                    // Series information (album tag)
+                    val seriesName = metadata["series_name"]?.toString()
+                    val seriesSequence = metadata["series_sequence"]
+                    if (seriesName != null) {
+                        val albumTag = if (seriesSequence != null) {
+                            "$seriesName, Book $seriesSequence"
+                        } else {
+                            seriesName
+                        }
+                        add("-metadata")
+                        add("album=${escapeMetadata(albumTag)}")
+                    }
+
+                    // Release date (year tag)
+                    metadata["date_published"]?.toString()?.let { dateStr ->
+                        // Extract year from date (format: YYYY-MM-DD or YYYY)
+                        val year = dateStr.take(4)
+                        add("-metadata")
+                        add("date=${escapeMetadata(year)}")
+                    }
+
+                    // Language
+                    metadata["language"]?.let {
+                        add("-metadata")
+                        add("language=${escapeMetadata(it.toString())}")
+                    }
+
+                    // Audible ASIN (grouping tag - perfect for tracking IDs)
+                    metadata["audible_asin"]?.let {
+                        add("-metadata")
+                        add("grouping=${escapeMetadata(it.toString())}")
+                    }
+
+                    // Genre (always Audiobook)
+                    add("-metadata")
+                    add("genre=Audiobook")
+                }
+
+                // Map streams explicitly (audio + optional cover art)
+                add("-map")
+                add("0:a")  // Audio from encrypted file
+
+                if (coverArtPath != null) {
+                    add("-map")
+                    add("1")    // Cover art from image file
+                    add("-disposition:v:0")
+                    add("attached_pic")
+                    add("-c:v")
+                    add("mjpeg")  // Encode cover as MJPEG
+                } else {
+                    // Skip all video streams (no cover art)
+                    add("-vn")
+                }
+
+                add("-c:a")
+                add("copy")  // Copy audio without re-encoding
                 add(decryptedCachePath)
             }.joinToString(" ")
 
             val session = com.arthenica.ffmpegkit.FFmpegKit.execute(command)
 
+            // Cleanup cover art temp file
+            coverArtPath?.let { File(it).delete() }
+
             if (!com.arthenica.ffmpegkit.ReturnCode.isSuccess(session.returnCode)) {
                 throw Exception("FFmpeg failed: ${session.failStackTrace}")
             }
 
-            Log.d(TAG, "Conversion complete for $asin")
+            Log.d(TAG, "Conversion complete for $asin (with metadata + cover art)")
 
             // Update stage
             manager.updateTaskMetadata(task.id, mapOf(
@@ -588,6 +724,63 @@ class DownloadWorker(
     // ========================================================================
     // Helper Methods
     // ========================================================================
+
+    /**
+     * Escape metadata value for FFmpeg command line.
+     * Wraps in double quotes and escapes special characters.
+     */
+    private fun escapeMetadata(value: String): String {
+        val escaped = value
+            .replace("\\", "\\\\")  // Escape backslashes
+            .replace("\"", "\\\"")  // Escape double quotes
+        return "\"$escaped\""  // Wrap in double quotes
+    }
+
+    /**
+     * Fetch book metadata from database by ASIN
+     */
+    private fun fetchBookMetadata(asin: String): Map<String, Any?>? {
+        return try {
+            val params = JSONObject().apply {
+                put("db_path", manager.getDbPath())
+                put("asin", asin)
+            }
+
+            val result = ExpoRustBridgeModule.nativeGetBookByAsin(params.toString())
+            val parsed = parseJsonResponse(result)
+
+            if (parsed["success"] == true) {
+                val book = parsed["data"] as? Map<*, *>
+
+                if (book != null) {
+                    // Return metadata map with proper field names
+                    mapOf(
+                        "title" to book["title"],
+                        "subtitle" to book["subtitle"],
+                        "description" to book["description"],
+                        "authors" to (book["authors"] as? List<*>)?.joinToString(", "),
+                        "narrators" to (book["narrators"] as? List<*>)?.joinToString(", "),
+                        "publisher" to book["publisher"],
+                        "series_name" to book["series_name"],
+                        "series_sequence" to book["series_sequence"],
+                        "date_published" to book["release_date"],
+                        "language" to book["language"],
+                        "picture_large" to book["cover_url"],
+                        "audible_asin" to asin
+                    )
+                } else {
+                    Log.w(TAG, "No book metadata found for ASIN: $asin")
+                    null
+                }
+            } else {
+                Log.w(TAG, "Book not found in database: $asin (${parsed["error"]})")
+                null
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error fetching metadata for $asin", e)
+            null
+        }
+    }
 
     private fun parseJsonResponse(jsonString: String): Map<String, Any?> {
         return try {

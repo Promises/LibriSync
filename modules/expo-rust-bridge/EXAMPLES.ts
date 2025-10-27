@@ -328,6 +328,7 @@ export class AudiobookManager {
     account: Account,
     asin: string,
     outputPath: string,
+    dbPath: string,
     quality: string = 'High'
   ): Promise<string> {
     try {
@@ -338,7 +339,8 @@ export class AudiobookManager {
         accountJson,
         asin,
         outputPath,
-        quality
+        quality,
+        dbPath  // For metadata embedding
       );
 
       const { outputPath: filePath } = unwrapResult(response);
@@ -397,11 +399,12 @@ export class AudiobookManager {
     account: Account,
     asin: string,
     outputPath: string,
+    dbPath: string,
     quality: string = 'High'
   ): Promise<string> {
     try {
-      // Download encrypted file AND decrypt in one call
-      const filePath = await this.downloadBook(account, asin, outputPath, quality);
+      // Download encrypted file AND decrypt in one call (with metadata embedding)
+      const filePath = await this.downloadBook(account, asin, outputPath, dbPath, quality);
       return filePath;
     } catch (error) {
       console.error('Download and decrypt failed:', error);

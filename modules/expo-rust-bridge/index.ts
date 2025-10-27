@@ -490,7 +490,8 @@ export interface ExpoRustBridgeModule {
     accountJson: string,
     asin: string,
     outputDirectory: string,
-    quality: string
+    quality: string,
+    dbPath: string
   ): Promise<RustResponse<{
     outputPath: string;
     fileSize: number;
@@ -775,6 +776,12 @@ export interface ExpoRustBridgeModule {
    * Get primary account from SQLite database.
    */
   getPrimaryAccount(dbPath: string): Promise<RustResponse<{ account: string | null }>>;
+
+  /**
+   * Clear download state for all books (for testing).
+   * Resets download status but keeps book metadata.
+   */
+  clearDownloadState(dbPath: string): Promise<RustResponse<{ books_updated: number }>>;
 
   /**
    * Clear all library data (for testing).
@@ -1294,20 +1301,22 @@ async function downloadAndDecryptBook(
   account: Account,
   asin: string,
   outputDirectory: string,
-  quality: string = 'High'
+  quality: string = 'High',
+  dbPath: string
 ): Promise<{ outputPath: string; fileSize: number; duration: number }> {
   const accountJson = JSON.stringify(account);
 
   // Kotlin handles the entire pipeline:
-  // 1. Rust downloads encrypted .aax to cache
-  // 2. Kotlin decrypts with FFmpeg-Kit
+  // 1. Rust downloads encrypted .aax to cache and fetches metadata from db
+  // 2. Kotlin decrypts with FFmpeg-Kit and embeds metadata (title, author, narrator, ASIN, etc.)
   // 3. Kotlin copies to user's directory (if SAF URI)
   // 4. Kotlin cleans up cache files
   const response = await NativeModule!.downloadBook(
     accountJson,
     asin,
     outputDirectory,
-    quality
+    quality,
+    dbPath
   );
 
   return unwrapResult(response);
@@ -1673,6 +1682,12 @@ async function getPrimaryAccount(dbPath: string): Promise<Account | null> {
  *
  * @param dbPath - Database path
  */
+async function clearDownloadState(dbPath: string): Promise<number> {
+  const response = await NativeModule!.clearDownloadState(dbPath);
+  const data = unwrapResult(response);
+  return data.books_updated;
+}
+
 async function clearLibrary(dbPath: string): Promise<void> {
   const response = await NativeModule!.clearLibrary(dbPath);
   unwrapResult(response);
@@ -1816,6 +1831,7 @@ export {
   saveAccount,
   getPrimaryAccount,
   // Testing
+  clearDownloadState,
   clearLibrary,
   // Periodic Worker Scheduling
   scheduleTokenRefresh,

@@ -276,6 +276,94 @@ pub async fn list_books_with_relations(pool: &SqlitePool, limit: i64, offset: i6
     Ok(books)
 }
 
+/// Get a single book with all related data by ASIN
+pub async fn find_book_with_relations_by_asin(pool: &SqlitePool, asin: &str) -> Result<Option<BookWithRelations>> {
+    let book = sqlx::query_as::<_, BookWithRelations>(
+        r#"
+        WITH book_authors AS (
+            SELECT
+                bc.book_id,
+                GROUP_CONCAT(c.name, ', ') as authors
+            FROM BookContributors bc
+            JOIN Contributors c ON bc.contributor_id = c.contributor_id
+            WHERE bc.role = 1
+            GROUP BY bc.book_id
+        ),
+        book_narrators AS (
+            SELECT
+                bc.book_id,
+                GROUP_CONCAT(c.name, ', ') as narrators
+            FROM BookContributors bc
+            JOIN Contributors c ON bc.contributor_id = c.contributor_id
+            WHERE bc.role = 2
+            GROUP BY bc.book_id
+        ),
+        book_publishers AS (
+            SELECT
+                bc.book_id,
+                c.name as publisher
+            FROM BookContributors bc
+            JOIN Contributors c ON bc.contributor_id = c.contributor_id
+            WHERE bc.role = 3
+        ),
+        book_series AS (
+            SELECT
+                sb.book_id,
+                s.name as series_name,
+                sb."index" as series_sequence,
+                ROW_NUMBER() OVER (PARTITION BY sb.book_id ORDER BY sb."index") as rn
+            FROM SeriesBooks sb
+            JOIN Series s ON sb.series_id = s.series_id
+        )
+        SELECT
+            b.book_id,
+            b.audible_product_id,
+            b.title,
+            b.subtitle,
+            b.description,
+            b.length_in_minutes,
+            b.content_type,
+            b.locale,
+            b.picture_id,
+            b.picture_large,
+            b.is_abridged,
+            b.is_spatial,
+            b.date_published,
+            b.language,
+            b.rating_overall,
+            b.rating_performance,
+            b.rating_story,
+            b.pdf_url,
+            b.is_finished,
+            b.is_downloadable,
+            b.is_ayce,
+            b.origin_asin,
+            b.episode_number,
+            b.content_delivery_type,
+            b.created_at,
+            b.updated_at,
+            ba.authors as authors_str,
+            bn.narrators as narrators_str,
+            bp.publisher,
+            bs.series_name,
+            bs.series_sequence,
+            lb.date_added as purchase_date
+        FROM Books b
+        LEFT JOIN book_authors ba ON b.book_id = ba.book_id
+        LEFT JOIN book_narrators bn ON b.book_id = bn.book_id
+        LEFT JOIN book_publishers bp ON b.book_id = bp.book_id
+        LEFT JOIN book_series bs ON b.book_id = bs.book_id AND bs.rn = 1
+        LEFT JOIN LibraryBooks lb ON b.book_id = lb.book_id
+        WHERE b.audible_product_id = ?
+        "#,
+    )
+    .bind(asin)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(book)
+}
+
 /// Count total books
 pub async fn count_books(pool: &SqlitePool) -> Result<i64> {
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM Books")
@@ -1058,6 +1146,36 @@ pub async fn upsert_book(pool: &SqlitePool, book: &NewBook) -> Result<i64> {
 ///
 /// Deletes all books and related data from the database.
 /// Use with caution - this is irreversible!
+/// Clear download state for all books
+///
+/// Resets all download-related fields in UserDefinedItems table:
+/// - book_status -> 0 (NotLiberated)
+/// - pdf_status -> NULL
+/// - last_downloaded -> NULL
+/// - last_downloaded_version -> NULL
+/// - last_downloaded_format -> NULL
+/// - last_downloaded_file_version -> NULL
+///
+/// This keeps all book metadata but resets download status, useful for testing
+/// or when re-downloading the entire library.
+pub async fn clear_download_state(pool: &SqlitePool) -> Result<i64> {
+    let result = sqlx::query(
+        r#"
+        UPDATE UserDefinedItems
+        SET book_status = 0,
+            pdf_status = NULL,
+            last_downloaded = NULL,
+            last_downloaded_version = NULL,
+            last_downloaded_format = NULL,
+            last_downloaded_file_version = NULL
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected() as i64)
+}
+
 pub async fn clear_library(pool: &SqlitePool) -> Result<()> {
     // Delete in correct order to respect foreign keys
     sqlx::query("DELETE FROM LibraryBooks").execute(pool).await?;

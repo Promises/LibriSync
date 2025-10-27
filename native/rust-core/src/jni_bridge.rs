@@ -880,6 +880,99 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetBoo
         .into_raw()
 }
 
+/// Get a single book by exact ASIN with all relations
+///
+/// # Arguments (JSON string)
+/// ```json
+/// {
+///   "db_path": "/data/data/.../libation.db",
+///   "asin": "B07T2F8VJM"
+/// }
+/// ```
+///
+/// # Returns (JSON)
+/// ```json
+/// {
+///   "success": true,
+///   "data": { book object with all fields }
+/// }
+/// ```
+#[no_mangle]
+pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetBookByAsin(
+    mut env: JNIEnv,
+    _class: JClass,
+    params_json: JString,
+) -> jstring {
+    let params_str_result = jstring_to_string(&mut env, params_json);
+
+    let response = catch_panic(move || {
+        #[derive(Deserialize)]
+        struct Params {
+            db_path: String,
+            asin: String,
+        }
+
+        match (move || -> crate::Result<String> {
+            let params_str = params_str_result?;
+            let params: Params = serde_json::from_str(&params_str)
+                .map_err(|e| crate::LibationError::InvalidInput(format!("Invalid JSON: {}", e)))?;
+
+            let result = RUNTIME.block_on(async {
+                let db = crate::storage::Database::new(&params.db_path).await?;
+                let book = crate::storage::queries::find_book_with_relations_by_asin(db.pool(), &params.asin).await?;
+
+                if let Some(book) = book {
+                    let book_json = serde_json::json!({
+                        "id": book.book_id,
+                        "audible_product_id": book.audible_product_id,
+                        "title": book.title,
+                        "subtitle": book.subtitle,
+                        "description": book.description,
+                        "duration_seconds": book.length_in_minutes * 60,
+                        "language": book.language,
+                        "rating": book.rating_overall,
+                        "cover_url": book.picture_large,
+                        "release_date": book.date_published,
+                        "purchase_date": book.purchase_date,
+                        "created_at": book.created_at,
+                        "updated_at": book.updated_at,
+                        "authors": book.authors_str.as_ref()
+                            .map(|s| s.split(", ").filter(|a| !a.is_empty()).collect::<Vec<_>>())
+                            .unwrap_or_default(),
+                        "narrators": book.narrators_str.as_ref()
+                            .map(|s| s.split(", ").filter(|n| !n.is_empty()).collect::<Vec<_>>())
+                            .unwrap_or_default(),
+                        "publisher": book.publisher,
+                        "series_name": book.series_name,
+                        "series_sequence": book.series_sequence,
+                        "pdf_url": book.pdf_url,
+                        "is_finished": book.is_finished,
+                        "is_downloadable": book.is_downloadable,
+                        "is_ayce": book.is_ayce,
+                        "origin_asin": book.origin_asin,
+                        "episode_number": book.episode_number,
+                        "content_delivery_type": book.content_delivery_type,
+                        "is_abridged": book.is_abridged,
+                        "is_spatial": book.is_spatial,
+                    });
+                    Ok::<_, crate::LibationError>(book_json)
+                } else {
+                    Err(crate::LibationError::not_found(format!("Book not found: {}", params.asin)))
+                }
+            })?;
+
+            Ok(success_response(result))
+        })() {
+            Ok(result) => result,
+            Err(e) => error_response(&e.to_string()),
+        }
+    });
+
+    env.new_string(response)
+        .expect("Failed to create Java string")
+        .into_raw()
+}
+
 /// Search books by title
 ///
 /// # Arguments (JSON string)
@@ -1625,6 +1718,8 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeDownlo
             #[serde(rename = "outputDirectory")]
             output_directory: String,
             quality: String,
+            #[serde(rename = "dbPath")]
+            db_path: Option<String>,
         }
 
         match (move || -> crate::Result<String> {
@@ -1730,10 +1825,46 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeDownlo
 
                 // Return encrypted file path and decryption keys
                 // The TypeScript/Kotlin layer will use FFmpeg-Kit to decrypt
-                let metadata = tokio::fs::metadata(&encrypted_path).await
+                let file_metadata = tokio::fs::metadata(&encrypted_path).await
                     .map_err(|e| crate::LibationError::not_found(format!("Downloaded file not found: {}", encrypted_path)))?;
 
-                // Return decryption info for FFmpeg-Kit to use
+                // Fetch book metadata from database if db_path provided
+                let book_metadata = if let Some(ref db_path) = params.db_path {
+                    let db = crate::storage::Database::new(db_path).await?;
+                    crate::storage::queries::find_book_with_relations_by_asin(db.pool(), &params.asin).await?
+                } else {
+                    None
+                };
+
+                // Return decryption info and metadata for FFmpeg-Kit to use
+                #[derive(Serialize)]
+                struct BookMetadata {
+                    title: String,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    subtitle: Option<String>,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    authors: Option<String>,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    narrators: Option<String>,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    publisher: Option<String>,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    series_name: Option<String>,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    series_sequence: Option<f32>,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    description: Option<String>,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    date_published: Option<String>,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    language: Option<String>,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    picture_large: Option<String>,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    picture_id: Option<String>,
+                    audible_asin: String,
+                }
+
                 #[derive(Serialize)]
                 struct DownloadResultWithKeys {
                     #[serde(rename = "encryptedPath")]
@@ -1746,14 +1877,33 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeDownlo
                     aaxc_key: String,
                     #[serde(rename = "aaxcIv")]
                     aaxc_iv: String,
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    metadata: Option<BookMetadata>,
                 }
+
+                let metadata = book_metadata.map(|b| BookMetadata {
+                    title: b.title,
+                    subtitle: b.subtitle,
+                    authors: b.authors_str,
+                    narrators: b.narrators_str,
+                    publisher: b.publisher,
+                    series_name: b.series_name,
+                    series_sequence: b.series_sequence,
+                    description: Some(b.description),
+                    date_published: b.date_published,
+                    language: b.language,
+                    picture_large: b.picture_large,
+                    picture_id: b.picture_id,
+                    audible_asin: params.asin.clone(),
+                });
 
                 Ok::<_, crate::LibationError>(DownloadResultWithKeys {
                     encrypted_path,
                     output_path: decrypted_path,
-                    file_size: metadata.len(),
+                    file_size: file_metadata.len(),
                     aaxc_key: key_hex,
                     aaxc_iv: iv_hex,
+                    metadata,
                 })
             })?;
 
@@ -2379,6 +2529,59 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetPri
             });
 
             Ok(success_response(response))
+        })() {
+            Ok(result) => result,
+            Err(e) => error_response(&e.to_string()),
+        }
+    });
+
+    env.new_string(response)
+        .expect("Failed to create Java string")
+        .into_raw()
+}
+
+/// Clear download state for all books
+///
+/// Resets download status but keeps all book metadata.
+///
+/// # Arguments (JSON string)
+/// ```json
+/// {
+///   "db_path": "/data/data/.../audible.db"
+/// }
+/// ```
+///
+/// # Returns (JSON)
+/// ```json
+/// {
+///   "success": true,
+///   "data": { "books_updated": 123 }
+/// }
+/// ```
+#[no_mangle]
+pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeClearDownloadState(
+    mut env: JNIEnv,
+    _class: JClass,
+    params_json: JString,
+) -> jstring {
+    let params_str_result = jstring_to_string(&mut env, params_json);
+
+    let response = catch_panic(move || {
+        #[derive(Deserialize)]
+        struct Params {
+            db_path: String,
+        }
+
+        match (move || -> crate::Result<String> {
+            let params_str = params_str_result?;
+            let params: Params = serde_json::from_str(&params_str)
+                .map_err(|e| crate::LibationError::InvalidInput(format!("Invalid JSON: {}", e)))?;
+
+            RUNTIME.block_on(async {
+                let db = crate::storage::Database::new(&params.db_path).await?;
+                let books_updated = crate::storage::queries::clear_download_state(db.pool()).await?;
+                Ok(success_response(serde_json::json!({"books_updated": books_updated})))
+            })
         })() {
             Ok(result) => result,
             Err(e) => error_response(&e.to_string()),

@@ -1578,6 +1578,80 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetSup
         .into_raw()
 }
 
+/// Build file path using naming pattern
+///
+/// # Arguments (JSON string)
+/// ```json
+/// {
+///   "db_path": "/data/data/.../libation.db",
+///   "asin": "B07T2F8VJM",
+///   "naming_pattern": "author_series_book"  // or "flat_file", "author_book_folder"
+/// }
+/// ```
+///
+/// # Returns (JSON)
+/// ```json
+/// {
+///   "success": true,
+///   "data": {
+///     "file_path": "Dennis E. Taylor/Bobiverse 3 - All These Worlds/Bobiverse 3 - All These Worlds.m4b"
+///   }
+/// }
+/// ```
+#[no_mangle]
+pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeBuildFilePath(
+    mut env: JNIEnv,
+    _class: JClass,
+    params_json: JString,
+) -> jstring {
+    let params_str_result = jstring_to_string(&mut env, params_json);
+
+    let response = catch_panic(move || {
+        #[derive(Deserialize)]
+        struct Params {
+            db_path: String,
+            asin: String,
+            naming_pattern: String,
+        }
+
+        match (move || -> crate::Result<String> {
+            let params_str = params_str_result?;
+            let params: Params = serde_json::from_str(&params_str)
+                .map_err(|e| crate::LibationError::InvalidInput(format!("Invalid JSON: {}", e)))?;
+
+            let result = RUNTIME.block_on(async {
+                // Get book metadata
+                let db = crate::storage::Database::new(&params.db_path).await?;
+                let book = crate::storage::queries::find_book_with_relations_by_asin(db.pool(), &params.asin).await?
+                    .ok_or_else(|| crate::LibationError::not_found(format!("Book not found: {}", params.asin)))?;
+
+                // Convert to AudioMetadata
+                let metadata = book.to_audio_metadata();
+
+                // Parse naming pattern
+                let pattern = crate::file::paths::NamingPattern::from_string(&params.naming_pattern)
+                    .unwrap_or(crate::file::paths::NamingPattern::AuthorSeriesBook);
+
+                // Build path
+                let file_path = crate::file::paths::build_file_path(&metadata, pattern, "m4b")?;
+
+                Ok::<_, crate::LibationError>(serde_json::json!({
+                    "file_path": file_path,
+                }))
+            })?;
+
+            Ok(success_response(result))
+        })() {
+            Ok(result) => result,
+            Err(e) => error_response(&e.to_string()),
+        }
+    });
+
+    env.new_string(response)
+        .expect("Failed to create Java string")
+        .into_raw()
+}
+
 /// Get customer information from Audible API
 ///
 /// # Arguments (JSON string)

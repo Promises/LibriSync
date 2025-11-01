@@ -11,9 +11,11 @@ import {
   scheduleLibrarySync,
   cancelTokenRefresh,
   cancelLibrarySync,
+  ExpoRustBridge,
 } from '../../modules/expo-rust-bridge';
 
 const DOWNLOAD_PATH_KEY = 'download_path';
+const NAMING_PATTERN_KEY = 'naming_pattern';
 const AUTO_DOWNLOAD_KEY = 'auto_download';
 const WIFI_ONLY_KEY = 'wifi_only';
 const REMOVE_DRM_KEY = 'remove_drm';
@@ -22,11 +24,13 @@ const SYNC_WIFI_ONLY_KEY = 'sync_wifi_only';
 const AUTO_TOKEN_REFRESH_KEY = 'auto_token_refresh';
 
 type SyncFrequency = 'manual' | '1h' | '6h' | '12h' | '24h';
+type NamingPattern = 'flat_file' | 'author_book_folder' | 'author_series_book';
 
 export default function SettingsScreen() {
   const styles = useStyles(createStyles);
   const { colors } = useTheme(); // For Switch components
   const [downloadPath, setDownloadPath] = useState<string | null>(null);
+  const [namingPattern, setNamingPattern] = useState<NamingPattern>('author_series_book');
   const [autoDownload, setAutoDownload] = useState(false);
   const [wifiOnly, setWifiOnly] = useState(true);
   const [removeDRM, setRemoveDRM] = useState(true);
@@ -61,6 +65,18 @@ export default function SettingsScreen() {
       if (savedSyncFreq) setSyncFrequency(savedSyncFreq as SyncFrequency);
       if (savedSyncWifi !== null) setSyncWifiOnly(savedSyncWifi === 'true');
       if (savedAutoRefresh !== null) setAutoTokenRefresh(savedAutoRefresh === 'true');
+
+      // Load naming pattern from native SharedPreferences
+      if (Platform.OS === 'android') {
+        try {
+          const result = await ExpoRustBridge.getNamingPattern();
+          if (result.success && result.data) {
+            setNamingPattern((result.data as any).pattern as NamingPattern);
+          }
+        } catch (error) {
+          console.error('[Settings] Failed to load naming pattern from native:', error);
+        }
+      }
     } catch (error) {
       console.error('[Settings] Failed to load settings:', error);
     } finally {
@@ -198,6 +214,56 @@ export default function SettingsScreen() {
     } catch (error: any) {
       console.error('[Settings] Failed to schedule/cancel token refresh:', error);
       Alert.alert('Error', error.message || 'Failed to update token refresh setting');
+    }
+  };
+
+  const getNamingPatternLabel = (pattern: NamingPattern): string => {
+    switch (pattern) {
+      case 'flat_file': return 'Flat File';
+      case 'author_book_folder': return 'Author/Book Folder';
+      case 'author_series_book': return 'Author/Series+Book';
+    }
+  };
+
+  const getNamingPatternExample = (pattern: NamingPattern): string => {
+    switch (pattern) {
+      case 'flat_file': return 'All These Worlds.m4b';
+      case 'author_book_folder': return 'Dennis E. Taylor/All These Worlds/All These Worlds.m4b';
+      case 'author_series_book': return 'Dennis E. Taylor/Bobiverse 3 - All These Worlds/Bobiverse 3 - All These Worlds.m4b';
+    }
+  };
+
+  const handleNamingPatternPress = () => {
+    const options = [
+      { label: 'Flat File', value: 'flat_file' as NamingPattern, example: 'All These Worlds.m4b' },
+      { label: 'Author/Book Folder', value: 'author_book_folder' as NamingPattern, example: 'Author/Title/Title.m4b' },
+      { label: 'Author/Series+Book', value: 'author_series_book' as NamingPattern, example: 'Author/Series X - Title/Series X - Title.m4b' },
+    ];
+
+    Alert.alert(
+      'File Naming Pattern',
+      'Choose how downloaded audiobooks should be organized:',
+      [
+        ...options.map(opt => ({
+          text: `${opt.label}\n${opt.example}`,
+          onPress: () => handleNamingPatternChange(opt.value),
+        })),
+        { text: 'Cancel', style: 'cancel' },
+      ]
+    );
+  };
+
+  const handleNamingPatternChange = async (value: NamingPattern) => {
+    setNamingPattern(value);
+
+    // Save to native SharedPreferences for Kotlin download code to access
+    try {
+      await ExpoRustBridge.setNamingPattern(value);
+      console.log(`[Settings] Naming pattern changed to: ${value}`);
+      Alert.alert('Success', `File naming pattern updated to: ${getNamingPatternLabel(value)}\n\n${getNamingPatternExample(value)}`);
+    } catch (error: any) {
+      console.error('[Settings] Failed to save naming pattern:', error);
+      Alert.alert('Error', error.message || 'Failed to update naming pattern');
     }
   };
 
@@ -382,6 +448,25 @@ export default function SettingsScreen() {
               Full path: {downloadPath}
             </Text>
           )}
+
+          <View style={styles.settingItem}>
+            <View style={styles.settingInfo}>
+              <Text style={styles.settingLabel}>File Naming Pattern</Text>
+              <Text style={styles.settingDescription}>
+                How downloaded audiobooks should be organized
+              </Text>
+              <Text style={styles.settingHint}>
+                Example: {getNamingPatternExample(namingPattern)}
+              </Text>
+            </View>
+            <TouchableOpacity
+              style={styles.button}
+              onPress={handleNamingPatternPress}
+              disabled={isLoading}
+            >
+              <Text style={styles.buttonText}>{getNamingPatternLabel(namingPattern)}</Text>
+            </TouchableOpacity>
+          </View>
         </View>
 
         <View style={styles.section}>

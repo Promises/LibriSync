@@ -1,6 +1,7 @@
 import React from 'react';
 import { NavigationContainer } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
+import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from '../styles/theme';
 
 import LibraryScreen from '../screens/LibraryScreen';
@@ -41,6 +42,9 @@ export default function AppNavigator() {
           options={{
             tabBarLabel: 'Library',
             headerShown: false,
+            tabBarIcon: ({ color, size }) => (
+              <Ionicons name="library" size={size} color={color} />
+            ),
           }}
         />
         <Tab.Screen
@@ -49,6 +53,9 @@ export default function AppNavigator() {
           options={{
             tabBarLabel: 'Account',
             headerShown: false,
+            tabBarIcon: ({ color, size }) => (
+              <Ionicons name="person" size={size} color={color} />
+            ),
           }}
         />
         <Tab.Screen
@@ -57,6 +64,9 @@ export default function AppNavigator() {
           options={{
             tabBarLabel: 'Settings',
             headerShown: false,
+            tabBarIcon: ({ color, size }) => (
+              <Ionicons name="settings" size={size} color={color} />
+            ),
           }}
         />
         <Tab.Screen
@@ -65,6 +75,9 @@ export default function AppNavigator() {
           options={{
             tabBarLabel: 'Debug',
             headerShown: false,
+            tabBarIcon: ({ color, size }) => (
+              <Ionicons name="bug" size={size} color={color} />
+            ),
           }}
         />
       </Tab.Navigator>

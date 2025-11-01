@@ -76,22 +76,41 @@ impl PathTemplate {
         Self { template }
     }
 
-    /// Default template: `{author}/{title}`
+    /// Flat file: `{title}.m4b`
+    /// Example: "All These Worlds.m4b"
+    pub fn flat_file() -> Self {
+        Self::new("{title}".to_string())
+    }
+
+    /// Author/Book folder: `{author}/{title}/{title}.m4b`
+    /// Example: "Dennis E. Taylor/All These Worlds/All These Worlds.m4b"
+    pub fn author_book_folder() -> Self {
+        Self::new("{author}/{title}/{title}".to_string())
+    }
+
+    /// Author/Series+Book: `{author}/{series} {series_seq} - {title_no_series}/{series} {series_seq} - {title_no_series}.m4b`
+    /// Example: "Dennis E. Taylor/Bobiverse 3 - All These Worlds/Bobiverse 3 - All These Worlds.m4b"
+    /// Falls back to author/title/title if no series
+    pub fn author_series_book() -> Self {
+        Self::new("{author}/{series_folder}/{series_file}".to_string())
+    }
+
+    /// Legacy: Default template: `{author}/{title}`
     pub fn default_audiobook() -> Self {
         Self::new("{author}/{title}".to_string())
     }
 
-    /// Series template: `{author}/{series}/{title}`
+    /// Legacy: Series template: `{author}/{series}/{title}`
     pub fn default_series() -> Self {
         Self::new("{author}/{series}/{title}".to_string())
     }
 
-    /// With series number: `{author}/{series} #{series_seq} - {title}`
+    /// Legacy: With series number: `{author}/{series} #{series_seq} - {title}`
     pub fn default_series_numbered() -> Self {
         Self::new("{author}/{series} #{series_seq} - {title}".to_string())
     }
 
-    /// Simple template: `{title} - {author}`
+    /// Legacy: Simple template: `{title} - {author}`
     pub fn simple() -> Self {
         Self::new("{title} - {author}".to_string())
     }
@@ -144,12 +163,54 @@ impl PathTemplate {
         }
 
         // Series
+        let mut title_no_series = metadata.title.clone();
         if let Some(ref series) = metadata.series {
             tags.insert("series".to_string(), series.name.clone());
-            if let Some(ref position) = series.position {
-                tags.insert("series_seq".to_string(), position.clone());
+
+            let series_seq = series.position.as_ref()
+                .map(|p| p.clone())
+                .unwrap_or_default();
+
+            tags.insert("series_seq".to_string(), series_seq.clone());
+
+            // Strip series name from title for {title_no_series} tag
+            // Remove patterns like "Bobiverse 3 - " or "Cradle: " or "(Cradle Book 3)"
+            let series_lower = series.name.to_lowercase();
+            let title_lower = title_no_series.to_lowercase();
+
+            // Try to remove series name from beginning
+            if title_lower.starts_with(&series_lower) {
+                let after_series = &title_no_series[series.name.len()..];
+                // Remove common separators: " - ", ": ", " ", "#X - "
+                title_no_series = after_series
+                    .trim_start_matches(':')
+                    .trim_start_matches('-')
+                    .trim_start()
+                    .to_string();
             }
+
+            // Try to remove series name from parentheses
+            let paren_pattern = format!("({})", series.name);
+            if title_no_series.contains(&paren_pattern) {
+                title_no_series = title_no_series.replace(&paren_pattern, "").trim().to_string();
+            }
+
+            // Build series_folder and series_file tags for Author/Series+Book pattern
+            // Format: "SeriesName Seq - Title"
+            let series_folder = if !series_seq.is_empty() {
+                format!("{} {} - {}", series.name, series_seq, metadata.title)
+            } else {
+                format!("{} - {}", series.name, metadata.title)
+            };
+
+            tags.insert("series_folder".to_string(), series_folder.clone());
+            tags.insert("series_file".to_string(), series_folder);
+        } else {
+            // No series - fall back to title/title pattern
+            tags.insert("series_folder".to_string(), metadata.title.clone());
+            tags.insert("series_file".to_string(), metadata.title.clone());
         }
+        tags.insert("title_no_series".to_string(), title_no_series);
 
         // Year
         if let Some(ref date) = metadata.publication_date {
@@ -352,16 +413,19 @@ pub fn get_default_library_path() -> PathBuf {
 ///
 /// # Reference: `FileManager/ReplacementCharacters.cs` ReplaceFilenameChars()
 pub fn sanitize_filename(name: &str) -> String {
-    let mut result = String::with_capacity(name.len());
+    // First, strip commas entirely
+    let without_commas = name.replace(',', "");
 
-    for (i, c) in name.chars().enumerate() {
-        let is_last = i == name.len() - 1;
+    let mut result = String::with_capacity(without_commas.len());
+
+    for (i, c) in without_commas.chars().enumerate() {
+        let is_last = i == without_commas.len() - 1;
         let next_char = if !is_last {
-            name.chars().nth(i + 1)
+            without_commas.chars().nth(i + 1)
         } else {
             None
         };
-        let prev_char = if i > 0 { name.chars().nth(i - 1) } else { None };
+        let prev_char = if i > 0 { without_commas.chars().nth(i - 1) } else { None };
 
         result.push(replace_char(c, prev_char, next_char, true));
     }
@@ -386,16 +450,19 @@ pub fn sanitize_filename(name: &str) -> String {
 ///
 /// # Reference: `FileManager/FileUtility.cs` GetSafePath()
 pub fn sanitize_path_component(name: &str) -> String {
-    let mut result = String::with_capacity(name.len());
+    // First, strip commas entirely
+    let without_commas = name.replace(',', "");
 
-    for (i, c) in name.chars().enumerate() {
-        let is_last = i == name.len() - 1;
+    let mut result = String::with_capacity(without_commas.len());
+
+    for (i, c) in without_commas.chars().enumerate() {
+        let is_last = i == without_commas.len() - 1;
         let next_char = if !is_last {
-            name.chars().nth(i + 1)
+            without_commas.chars().nth(i + 1)
         } else {
             None
         };
-        let prev_char = if i > 0 { name.chars().nth(i - 1) } else { None };
+        let prev_char = if i > 0 { without_commas.chars().nth(i - 1) } else { None };
 
         // For path components, we don't replace slashes
         if c == '/' || c == '\\' {
@@ -540,6 +607,86 @@ pub fn avoid_collision(path: &Path) -> PathBuf {
             return new_path;
         }
     }
+}
+
+/// Naming pattern for audiobook files
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NamingPattern {
+    /// Flat file: `{title}.m4b`
+    /// Example: "All These Worlds.m4b"
+    FlatFile,
+
+    /// Author/Book folder: `{author}/{title}/{title}.m4b`
+    /// Example: "Dennis E. Taylor/All These Worlds/All These Worlds.m4b"
+    AuthorBookFolder,
+
+    /// Author/Series+Book: `{author}/{series} {series_seq} - {title_no_series}/{series} {series_seq} - {title_no_series}.m4b`
+    /// Example: "Dennis E. Taylor/Bobiverse 3 - All These Worlds/Bobiverse 3 - All These Worlds.m4b"
+    /// Falls back to author/title/title if no series
+    AuthorSeriesBook,
+}
+
+impl NamingPattern {
+    pub fn to_template(&self) -> PathTemplate {
+        match self {
+            NamingPattern::FlatFile => PathTemplate::flat_file(),
+            NamingPattern::AuthorBookFolder => PathTemplate::author_book_folder(),
+            NamingPattern::AuthorSeriesBook => PathTemplate::author_series_book(),
+        }
+    }
+
+    pub fn from_string(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "flat" | "flat_file" => Some(NamingPattern::FlatFile),
+            "author_book" | "author_book_folder" => Some(NamingPattern::AuthorBookFolder),
+            "author_series" | "author_series_book" => Some(NamingPattern::AuthorSeriesBook),
+            _ => None,
+        }
+    }
+}
+
+/// Build file path using specified naming pattern
+///
+/// Returns the relative path (no base directory) ready to append to output directory.
+/// Example: "Dennis E. Taylor/Bobiverse 3 - All These Worlds/Bobiverse 3 - All These Worlds.m4b"
+pub fn build_file_path(
+    metadata: &AudioMetadata,
+    pattern: NamingPattern,
+    extension: &str,
+) -> Result<String> {
+    let template = pattern.to_template();
+    let rendered = template.render(metadata)?;
+
+    // Split into path components and sanitize each
+    let parts: Vec<&str> = rendered.split('/').collect();
+    let mut sanitized_parts = Vec::new();
+
+    for (i, part) in parts.iter().enumerate() {
+        let is_last = i == parts.len() - 1;
+
+        if is_last {
+            // Last part is the filename
+            let sanitized = sanitize_filename(part);
+            sanitized_parts.push(sanitized);
+        } else {
+            // Directory component
+            let sanitized = sanitize_path_component(part);
+            if !sanitized.is_empty() {
+                sanitized_parts.push(sanitized);
+            }
+        }
+    }
+
+    let result = sanitized_parts.join("/");
+
+    // Add extension if needed
+    let with_ext = if extension.is_empty() || result.ends_with(extension) {
+        result
+    } else {
+        format!("{}.{}", result, extension.trim_start_matches('.'))
+    };
+
+    Ok(with_ext)
 }
 
 /// Get a safe, unique filename

@@ -296,6 +296,14 @@ class DownloadWorker(
 
             // Fetch metadata from database
             val metadata = fetchBookMetadata(asin)
+            Log.d(TAG, "Fetched metadata for $asin: ${metadata?.keys?.joinToString(", ") ?: "null"}")
+            if (metadata != null) {
+                Log.d(TAG, "  title: ${metadata["title"]}")
+                Log.d(TAG, "  authors: ${metadata["authors"]} (${metadata["authors"]?.javaClass?.simpleName})")
+                Log.d(TAG, "  narrators: ${metadata["narrators"]} (${metadata["narrators"]?.javaClass?.simpleName})")
+                Log.d(TAG, "  publisher: ${metadata["publisher"]}")
+                Log.d(TAG, "  series_name: ${metadata["series_name"]}")
+            }
 
             // Download cover art if available
             var coverArtPath: String? = null
@@ -442,6 +450,7 @@ class DownloadWorker(
                 add(decryptedCachePath)
             }.joinToString(" ")
 
+            Log.d(TAG, "FFmpeg command for $asin: $command")
             val session = com.arthenica.ffmpegkit.FFmpegKit.execute(command)
 
             // Cleanup cover art temp file
@@ -522,15 +531,34 @@ class DownloadWorker(
                 throw Exception("No write permission for SAF directory")
             }
 
-            val fileName = "$asin.m4b"
+            // Build proper file path using naming pattern
+            val filePath = buildFilePathForBook(asin)
+            Log.d(TAG, "Using file path: $filePath")
 
-            // Delete existing
-            docDir.findFile(fileName)?.delete()
+            // Split path into directories and filename
+            val pathParts = filePath.split('/')
+            val fileName = pathParts.last()
+            val directories = pathParts.dropLast(1)
 
-            // Create new
-            val outputFile = docDir.createFile("audio/mp4", fileName)
-                ?: docDir.createFile("audio/x-m4b", fileName)
-                ?: docDir.createFile("audio/*", fileName)
+            // Navigate/create subdirectories
+            var currentDir = docDir
+            for (dirName in directories) {
+                val existing = currentDir.findFile(dirName)
+                currentDir = if (existing != null && existing.isDirectory) {
+                    existing
+                } else {
+                    currentDir.createDirectory(dirName)
+                        ?: throw Exception("Failed to create directory: $dirName")
+                }
+            }
+
+            // Delete existing file
+            currentDir.findFile(fileName)?.delete()
+
+            // Create new file
+            val outputFile = currentDir.createFile("audio/mp4", fileName)
+                ?: currentDir.createFile("audio/x-m4b", fileName)
+                ?: currentDir.createFile("audio/*", fileName)
                 ?: throw Exception("Failed to create file in SAF directory")
 
             Log.d(TAG, "Copying to SAF: ${outputFile.uri}")
@@ -726,6 +754,38 @@ class DownloadWorker(
     // ========================================================================
 
     /**
+     * Build file path for book using naming pattern from settings.
+     * Defaults to author_series_book pattern.
+     */
+    private fun buildFilePathForBook(asin: String): String {
+        return try {
+            // Get naming pattern from SharedPreferences (default to author_series_book)
+            val prefs = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
+            val namingPattern = prefs.getString("naming_pattern", "author_series_book") ?: "author_series_book"
+
+            val params = JSONObject().apply {
+                put("db_path", manager.getDbPath())
+                put("asin", asin)
+                put("naming_pattern", namingPattern)
+            }
+
+            val result = ExpoRustBridgeModule.nativeBuildFilePath(params.toString())
+            val parsed = parseJsonResponse(result)
+
+            if (parsed["success"] == true) {
+                val data = parsed["data"] as? Map<*, *>
+                data?.get("file_path") as? String ?: "$asin.m4b"
+            } else {
+                Log.w(TAG, "Failed to build file path for $asin: ${parsed["error"]}, using fallback")
+                "$asin.m4b"
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error building file path for $asin", e)
+            "$asin.m4b"  // Fallback to ASIN
+        }
+    }
+
+    /**
      * Escape metadata value for FFmpeg command line.
      * Wraps in double quotes and escapes special characters.
      */
@@ -753,13 +813,29 @@ class DownloadWorker(
                 val book = parsed["data"] as? Map<*, *>
 
                 if (book != null) {
+                    // Helper to convert JSONArray to comma-separated string
+                    fun jsonArrayToString(value: Any?): String? {
+                        return when (value) {
+                            is org.json.JSONArray -> {
+                                (0 until value.length())
+                                    .mapNotNull { value.optString(it, null) }
+                                    .filter { it.isNotEmpty() }
+                                    .joinToString(", ")
+                                    .takeIf { it.isNotEmpty() }
+                            }
+                            is List<*> -> value.mapNotNull { it?.toString() }.joinToString(", ").takeIf { it.isNotEmpty() }
+                            is String -> value.takeIf { it.isNotEmpty() }
+                            else -> null
+                        }
+                    }
+
                     // Return metadata map with proper field names
                     mapOf(
                         "title" to book["title"],
                         "subtitle" to book["subtitle"],
                         "description" to book["description"],
-                        "authors" to (book["authors"] as? List<*>)?.joinToString(", "),
-                        "narrators" to (book["narrators"] as? List<*>)?.joinToString(", "),
+                        "authors" to jsonArrayToString(book["authors"]),
+                        "narrators" to jsonArrayToString(book["narrators"]),
                         "publisher" to book["publisher"],
                         "series_name" to book["series_name"],
                         "series_sequence" to book["series_sequence"],

@@ -831,6 +831,20 @@ export interface ExpoRustBridgeModule {
    * Get status of library sync worker.
    */
   getLibrarySyncStatus(): RustResponse<{ state: string }>;
+
+  /**
+   * Set file naming pattern preference.
+   *
+   * @param pattern - Naming pattern: "flat_file", "author_book_folder", or "author_series_book"
+   */
+  setNamingPattern(pattern: string): RustResponse<{}>;
+
+  /**
+   * Get file naming pattern preference.
+   *
+   * @returns Current naming pattern
+   */
+  getNamingPattern(): RustResponse<{ pattern: string }>;
 }
 
 // ============================================================================

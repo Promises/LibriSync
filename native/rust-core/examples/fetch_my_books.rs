@@ -18,6 +18,7 @@ use rust_core::api::{
 };
 use std::path::PathBuf;
 use std::fs;
+use std::collections::HashSet;
 
 const TEST_FIXTURE_PATH: &str = "test_fixtures/registration_response.json";
 
@@ -106,13 +107,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let api_url = identity.locale.api_url();
     println!("   API: {}", api_url);
 
-    let options = LibraryOptions {
-        number_of_results_per_page: 5,
+    // First, get total count
+    let first_page_options = LibraryOptions {
+        number_of_results_per_page: 1,
         page_number: 1,
         ..Default::default()
     };
 
     let client = reqwest::Client::new();
+    let first_response = client
+        .get(format!("{}/1.0/library", api_url))
+        .header("Authorization", format!("Bearer {}", identity.access_token.token))
+        .query(&first_page_options)
+        .send()
+        .await?;
+
+    let first_text = first_response.text().await?;
+    let first_library: LibraryResponse = serde_json::from_str(&first_text)?;
+    let total_books = first_library.total_results.unwrap_or(0);
+
+    println!("   Total books in library: {}", total_books);
+    println!("   Fetching all books...\n");
+
+    // Now fetch all books (max 1000 per page)
+    let options = LibraryOptions {
+        number_of_results_per_page: 1000,
+        page_number: 1,
+        ..Default::default()
+    };
+
     let http_response = client
         .get(format!("{}/1.0/library", api_url))
         .header("Authorization", format!("Bearer {}", identity.access_token.token))
@@ -124,7 +147,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   Response Status: {}", status);
 
     let response_text = http_response.text().await?;
-    println!("   Response Preview: {}...\n", &response_text[..response_text.len().min(200)]);
 
     if !status.is_success() {
         if status.as_u16() == 403 && response_text.contains("could not be authenticated") {
@@ -198,7 +220,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match serde_json::from_str::<LibraryResponse>(&response_text) {
         Ok(library) => {
             println!("   ✅ Library retrieved!\n");
+
+            // Save full library JSON to file for analysis
+            let library_json_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("test_fixtures/full_library.json");
+            fs::write(&library_json_path, &response_text)?;
+            println!("💾 Full library saved to: {}\n", library_json_path.display());
+
             display_books(&library);
+            analyze_naming_conventions(&library);
             Ok(())
         }
         Err(e) => {
@@ -353,9 +383,141 @@ fn display_books(library: &LibraryResponse) {
         println!("  Showing: {} books", library.items.len());
     }
     println!("═══════════════════════════════════════════════════════════\n");
+}
 
-    println!("💡 To see more books, modify the fetch_my_books.rs example");
-    println!("   and change 'number_of_results_per_page: 5' to a higher number.\n");
+fn analyze_naming_conventions(library: &LibraryResponse) {
+    println!("\n═══════════════════════════════════════════════════════════");
+    println!("  Naming Convention Analysis");
+    println!("═══════════════════════════════════════════════════════════\n");
+
+    let mut special_chars_in_titles = HashSet::new();
+    let mut special_chars_in_authors = HashSet::new();
+    let mut special_chars_in_series = HashSet::new();
+    let mut problematic_titles = Vec::new();
+    let mut books_with_series = 0;
+    let mut books_with_subtitles = 0;
+
+    for book in &library.items {
+        // Analyze title
+        for ch in book.title.chars() {
+            if !ch.is_alphanumeric() && ch != ' ' {
+                special_chars_in_titles.insert(ch);
+
+                // Flag potentially problematic characters for filenames
+                if matches!(ch, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+                    problematic_titles.push((book.title.clone(), ch));
+                }
+            }
+        }
+
+        // Check for subtitle
+        if book.subtitle.is_some() {
+            books_with_subtitles += 1;
+        }
+
+        // Analyze authors
+        for author in &book.authors {
+            for ch in author.name.chars() {
+                if !ch.is_alphanumeric() && ch != ' ' {
+                    special_chars_in_authors.insert(ch);
+                }
+            }
+        }
+
+        // Analyze series
+        if let Some(series_list) = &book.series {
+            if !series_list.is_empty() {
+                books_with_series += 1;
+                for series in series_list {
+                    if let Some(title) = &series.title {
+                        for ch in title.chars() {
+                            if !ch.is_alphanumeric() && ch != ' ' {
+                                special_chars_in_series.insert(ch);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Report findings
+    println!("📊 Statistics:");
+    println!("   Total books: {}", library.items.len());
+    println!("   Books with series: {} ({:.1}%)", books_with_series, (books_with_series as f64 / library.items.len() as f64) * 100.0);
+    println!("   Books with subtitles: {} ({:.1}%)", books_with_subtitles, (books_with_subtitles as f64 / library.items.len() as f64) * 100.0);
+
+    println!("\n🔤 Special Characters Found:");
+    println!("   In titles: {}", format_char_set(&special_chars_in_titles));
+    println!("   In authors: {}", format_char_set(&special_chars_in_authors));
+    println!("   In series: {}", format_char_set(&special_chars_in_series));
+
+    if !problematic_titles.is_empty() {
+        println!("\n⚠️  Problematic Characters for Filenames ({} books):", problematic_titles.len());
+        for (title, ch) in problematic_titles.iter().take(10) {
+            println!("   '{}' in: {}", ch, title);
+        }
+        if problematic_titles.len() > 10 {
+            println!("   ... and {} more", problematic_titles.len() - 10);
+        }
+    }
+
+    // Show sample naming patterns
+    println!("\n📝 Sample Naming Patterns:\n");
+    for (i, book) in library.items.iter().take(5).enumerate() {
+        let authors = book.authors.iter()
+            .map(|a| a.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let series_info = if let Some(series_list) = &book.series {
+            series_list.first().and_then(|s| {
+                let title = s.title.as_deref().unwrap_or("Unknown");
+                let seq = s.sequence.as_deref().unwrap_or("?");
+                Some(format!(" [{}{}]", title, if seq != "?" { format!(" #{}", seq) } else { String::new() }))
+            })
+        } else {
+            None
+        };
+
+        println!("{}. Author/Title format:", i + 1);
+        println!("   {}/{}.m4b",
+            sanitize_filename(&authors),
+            sanitize_filename(&book.title)
+        );
+
+        println!("   Series/Title format:");
+        if let Some(series) = series_info {
+            println!("   {}/{}.m4b",
+                sanitize_filename(&series.trim_start_matches(' ').trim_start_matches('[')),
+                sanitize_filename(&book.title)
+            );
+        } else {
+            println!("   (no series)");
+        }
+
+        println!();
+    }
+
+    println!("═══════════════════════════════════════════════════════════\n");
+}
+
+fn format_char_set(chars: &HashSet<char>) -> String {
+    if chars.is_empty() {
+        return "none".to_string();
+    }
+    let mut sorted: Vec<_> = chars.iter().collect();
+    sorted.sort();
+    sorted.iter().map(|c| format!("'{}'", c)).collect::<Vec<_>>().join(", ")
+}
+
+fn sanitize_filename(name: &str) -> String {
+    name.chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            _ => c,
+        })
+        .collect()
 }
 
 fn format_duration(duration: chrono::Duration) -> String {

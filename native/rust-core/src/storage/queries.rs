@@ -186,6 +186,52 @@ pub struct BookWithRelations {
     pub purchase_date: Option<String>,
 }
 
+impl BookWithRelations {
+    /// Convert to AudioMetadata for path template rendering
+    pub fn to_audio_metadata(&self) -> crate::audio::metadata::AudioMetadata {
+        use crate::audio::metadata::{AudioMetadata, SeriesInfo};
+
+        let authors = self.authors_str.as_ref()
+            .map(|s| s.split(", ").map(String::from).collect())
+            .unwrap_or_else(Vec::new);
+
+        let narrators = self.narrators_str.as_ref()
+            .map(|s| s.split(", ").map(String::from).collect())
+            .unwrap_or_else(Vec::new);
+
+        let series = if let Some(ref name) = self.series_name {
+            Some(SeriesInfo {
+                name: name.clone(),
+                position: self.series_sequence.map(|seq| {
+                    // Format sequence: 1.0 -> "1", 1.5 -> "1.5"
+                    if seq.fract() == 0.0 {
+                        format!("{:.0}", seq)
+                    } else {
+                        format!("{}", seq)
+                    }
+                }),
+            })
+        } else {
+            None
+        };
+
+        AudioMetadata {
+            title: self.title.clone(),
+            authors,
+            narrators,
+            publisher: self.publisher.clone(),
+            publication_date: self.date_published.clone(),
+            language: self.language.clone(),
+            series,
+            description: Some(self.description.clone()),
+            genres: vec![], // Not available in BookWithRelations
+            runtime_minutes: Some(self.length_in_minutes),
+            asin: Some(self.audible_product_id.clone()),
+            cover_art_url: self.picture_large.clone(),
+        }
+    }
+}
+
 /// List books with all related data (authors, narrators, series, etc.)
 pub async fn list_books_with_relations(pool: &SqlitePool, limit: i64, offset: i64) -> Result<Vec<BookWithRelations>> {
     let books = sqlx::query_as::<_, BookWithRelations>(

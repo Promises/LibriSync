@@ -1415,6 +1415,39 @@ class ExpoRustBridgeModule : Module() {
         mapOf("success" to false, "error" to e.message)
       }
     }
+
+    /**
+     * Set file naming pattern preference.
+     *
+     * @param pattern The naming pattern: "flat_file", "author_book_folder", or "author_series_book"
+     * @return Map with success status
+     */
+    Function("setNamingPattern") { pattern: String ->
+      try {
+        val context = appContext.reactContext ?: throw Exception("Context not available")
+        val prefs = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
+        prefs.edit().putString("naming_pattern", pattern).apply()
+        mapOf("success" to true)
+      } catch (e: Exception) {
+        mapOf("success" to false, "error" to e.message)
+      }
+    }
+
+    /**
+     * Get file naming pattern preference.
+     *
+     * @return Map with pattern value
+     */
+    Function("getNamingPattern") {
+      try {
+        val context = appContext.reactContext ?: throw Exception("Context not available")
+        val prefs = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
+        val pattern = prefs.getString("naming_pattern", "author_series_book") ?: "author_series_book"
+        mapOf("success" to true, "data" to mapOf("pattern" to pattern))
+      } catch (e: Exception) {
+        mapOf("success" to false, "error" to e.message)
+      }
+    }
   }
 
   // ============================================================================
@@ -1531,6 +1564,7 @@ class ExpoRustBridgeModule : Module() {
     @JvmStatic external fun nativeDecryptAAX(paramsJson: String): String
     @JvmStatic external fun nativeValidateActivationBytes(paramsJson: String): String
     @JvmStatic external fun nativeGetSupportedLocales(paramsJson: String): String
+    @JvmStatic external fun nativeBuildFilePath(paramsJson: String): String
     @JvmStatic external fun nativeGetCustomerInformation(paramsJson: String): String
     @JvmStatic external fun nativeLogFromRust(paramsJson: String): String
 

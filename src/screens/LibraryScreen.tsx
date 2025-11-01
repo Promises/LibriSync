@@ -2,6 +2,7 @@ import React, {useState, useEffect, useRef} from 'react';
 import {View, Text, FlatList, TouchableOpacity, RefreshControl, Image, Alert, ActivityIndicator, Platform, PermissionsAndroid, TextInput, Modal, ScrollView} from 'react-native';
 import {SafeAreaView} from 'react-native-safe-area-context';
 import {useFocusEffect} from '@react-navigation/native';
+import {Ionicons} from '@expo/vector-icons';
 import {useStyles} from '../hooks/useStyles';
 import {useTheme} from '../styles/theme';
 import type {Theme} from '../hooks/useStyles';
@@ -63,6 +64,9 @@ export default function LibraryScreen() {
     // Modal state
     const [showFilterModal, setShowFilterModal] = useState(false);
     const [showSortModal, setShowSortModal] = useState(false);
+
+    // Controls visibility
+    const [showControls, setShowControls] = useState(false);
 
     // Debounce search
     const searchTimeout = useRef<NodeJS.Timeout | null>(null);
@@ -593,49 +597,74 @@ export default function LibraryScreen() {
     return (
         <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
             <View style={styles.header}>
-                <Text style={styles.headerTitle}>Library</Text>
-
-                {/* Search Bar */}
-                <View style={styles.searchContainer}>
-                    <Text style={styles.searchIcon}>🔍</Text>
-                    <TextInput
-                        style={styles.searchInput}
-                        placeholder="Search titles, authors, narrators..."
-                        placeholderTextColor={colors.textSecondary}
-                        value={searchQuery}
-                        onChangeText={setSearchQuery}
-                        returnKeyType="search"
-                    />
-                    {searchQuery.length > 0 && (
-                        <TouchableOpacity onPress={() => setSearchQuery('')}>
-                            <Text style={styles.clearIcon}>✕</Text>
-                        </TouchableOpacity>
-                    )}
-                </View>
-
-                {/* Controls Row */}
-                <View style={styles.controlsRow}>
+                <View style={styles.headerTitleRow}>
+                    <Text style={styles.headerTitle}>Library</Text>
                     <TouchableOpacity
-                        style={styles.controlButton}
-                        onPress={() => setShowSortModal(true)}
+                        style={styles.toggleControlsButton}
+                        onPress={() => setShowControls(!showControls)}
                     >
-                        <Text style={styles.controlButtonText}>
-                            {getSortLabel()}
-                        </Text>
-                    </TouchableOpacity>
-
-                    <TouchableOpacity
-                        style={[
-                            styles.controlButton,
-                            getActiveFiltersCount() > 0 && styles.controlButtonActive
-                        ]}
-                        onPress={() => setShowFilterModal(true)}
-                    >
-                        <Text style={styles.controlButtonText}>
-                            Filter {getActiveFiltersCount() > 0 ? `(${getActiveFiltersCount()})` : ''}
-                        </Text>
+                        <Ionicons
+                            name={showControls ? 'close' : 'search'}
+                            size={24}
+                            color={colors.textPrimary}
+                        />
                     </TouchableOpacity>
                 </View>
+
+                {showControls && (
+                    <>
+                        {/* Search Bar */}
+                        <View style={styles.searchContainer}>
+                            <Ionicons
+                                name="search"
+                                size={20}
+                                color={colors.textSecondary}
+                                style={styles.searchIcon}
+                            />
+                            <TextInput
+                                style={styles.searchInput}
+                                placeholder="Search titles, authors, narrators..."
+                                placeholderTextColor={colors.textSecondary}
+                                value={searchQuery}
+                                onChangeText={setSearchQuery}
+                                returnKeyType="search"
+                            />
+                            {searchQuery.length > 0 && (
+                                <TouchableOpacity onPress={() => setSearchQuery('')}>
+                                    <Ionicons
+                                        name="close-circle"
+                                        size={20}
+                                        color={colors.textSecondary}
+                                    />
+                                </TouchableOpacity>
+                            )}
+                        </View>
+
+                        {/* Controls Row */}
+                        <View style={styles.controlsRow}>
+                            <TouchableOpacity
+                                style={styles.controlButton}
+                                onPress={() => setShowSortModal(true)}
+                            >
+                                <Text style={styles.controlButtonText}>
+                                    {getSortLabel()}
+                                </Text>
+                            </TouchableOpacity>
+
+                            <TouchableOpacity
+                                style={[
+                                    styles.controlButton,
+                                    getActiveFiltersCount() > 0 && styles.controlButtonActive
+                                ]}
+                                onPress={() => setShowFilterModal(true)}
+                            >
+                                <Text style={styles.controlButtonText}>
+                                    Filter {getActiveFiltersCount() > 0 ? `(${getActiveFiltersCount()})` : ''}
+                                </Text>
+                            </TouchableOpacity>
+                        </View>
+                    </>
+                )}
 
                 <Text style={styles.headerSubtitle}>
                     {totalCount > 0 ? `${audiobooks.length} of ${totalCount} audiobooks` : `${audiobooks.length} audiobooks`}
@@ -850,9 +879,18 @@ const createStyles = (theme: Theme) => ({
         borderBottomWidth: 1,
         borderBottomColor: theme.colors.border,
     },
+    headerTitleRow: {
+        flexDirection: 'row' as const,
+        justifyContent: 'space-between' as const,
+        alignItems: 'center' as const,
+        marginBottom: theme.spacing.md,
+    },
     headerTitle: {
         ...theme.typography.title,
-        marginBottom: theme.spacing.md,
+    },
+    toggleControlsButton: {
+        padding: theme.spacing.xs,
+        paddingHorizontal: theme.spacing.sm,
     },
     searchContainer: {
         flexDirection: 'row' as const,
@@ -865,19 +903,13 @@ const createStyles = (theme: Theme) => ({
         borderColor: theme.colors.border,
     },
     searchIcon: {
-        fontSize: 16,
         marginRight: theme.spacing.sm,
     },
     searchInput: {
         flex: 1,
         ...theme.typography.body,
-        color: theme.colors.text,
+        color: theme.colors.textPrimary,
         paddingVertical: theme.spacing.sm,
-    },
-    clearIcon: {
-        fontSize: 16,
-        color: theme.colors.textSecondary,
-        padding: theme.spacing.xs,
     },
     controlsRow: {
         flexDirection: 'row' as const,

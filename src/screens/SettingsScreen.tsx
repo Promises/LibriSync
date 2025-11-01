@@ -16,9 +16,6 @@ import {
 
 const DOWNLOAD_PATH_KEY = 'download_path';
 const NAMING_PATTERN_KEY = 'naming_pattern';
-const AUTO_DOWNLOAD_KEY = 'auto_download';
-const WIFI_ONLY_KEY = 'wifi_only';
-const REMOVE_DRM_KEY = 'remove_drm';
 const SYNC_FREQUENCY_KEY = 'sync_frequency';
 const SYNC_WIFI_ONLY_KEY = 'sync_wifi_only';
 const AUTO_TOKEN_REFRESH_KEY = 'auto_token_refresh';
@@ -31,9 +28,6 @@ export default function SettingsScreen() {
   const { colors } = useTheme(); // For Switch components
   const [downloadPath, setDownloadPath] = useState<string | null>(null);
   const [namingPattern, setNamingPattern] = useState<NamingPattern>('author_series_book');
-  const [autoDownload, setAutoDownload] = useState(false);
-  const [wifiOnly, setWifiOnly] = useState(true);
-  const [removeDRM, setRemoveDRM] = useState(true);
   const [isLoading, setIsLoading] = useState(true);
 
   // Sync settings
@@ -48,20 +42,14 @@ export default function SettingsScreen() {
 
   const loadSettings = async () => {
     try {
-      const [savedPath, savedAuto, savedWifi, savedDRM, savedSyncFreq, savedSyncWifi, savedAutoRefresh] = await Promise.all([
+      const [savedPath, savedSyncFreq, savedSyncWifi, savedAutoRefresh] = await Promise.all([
         SecureStore.getItemAsync(DOWNLOAD_PATH_KEY),
-        SecureStore.getItemAsync(AUTO_DOWNLOAD_KEY),
-        SecureStore.getItemAsync(WIFI_ONLY_KEY),
-        SecureStore.getItemAsync(REMOVE_DRM_KEY),
         SecureStore.getItemAsync(SYNC_FREQUENCY_KEY),
         SecureStore.getItemAsync(SYNC_WIFI_ONLY_KEY),
         SecureStore.getItemAsync(AUTO_TOKEN_REFRESH_KEY),
       ]);
 
       if (savedPath) setDownloadPath(savedPath);
-      if (savedAuto !== null) setAutoDownload(savedAuto === 'true');
-      if (savedWifi !== null) setWifiOnly(savedWifi === 'true');
-      if (savedDRM !== null) setRemoveDRM(savedDRM === 'true');
       if (savedSyncFreq) setSyncFrequency(savedSyncFreq as SyncFrequency);
       if (savedSyncWifi !== null) setSyncWifiOnly(savedSyncWifi === 'true');
       if (savedAutoRefresh !== null) setAutoTokenRefresh(savedAutoRefresh === 'true');
@@ -109,21 +97,6 @@ export default function SettingsScreen() {
       console.error('[Settings] Directory picker error:', error);
       Alert.alert('Error', error.message || 'Failed to select directory');
     }
-  };
-
-  const handleAutoDownloadChange = async (value: boolean) => {
-    setAutoDownload(value);
-    await saveSettings(AUTO_DOWNLOAD_KEY, value.toString());
-  };
-
-  const handleWifiOnlyChange = async (value: boolean) => {
-    setWifiOnly(value);
-    await saveSettings(WIFI_ONLY_KEY, value.toString());
-  };
-
-  const handleRemoveDRMChange = async (value: boolean) => {
-    setRemoveDRM(value);
-    await saveSettings(REMOVE_DRM_KEY, value.toString());
   };
 
   const getSyncFrequencyLabel = (freq: SyncFrequency): string => {
@@ -518,69 +491,6 @@ export default function SettingsScreen() {
               thumbColor={autoTokenRefresh ? colors.accent : colors.textSecondary}
             />
           </View>
-        </View>
-
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Download Options</Text>
-
-          <View style={styles.settingItem}>
-            <View style={styles.settingInfo}>
-              <Text style={styles.settingLabel}>Auto-download new books</Text>
-              <Text style={styles.settingDescription}>
-                Automatically download new books when they appear in your library
-              </Text>
-            </View>
-            <Switch
-              value={autoDownload}
-              onValueChange={handleAutoDownloadChange}
-              trackColor={{ false: colors.border, true: colors.accentDim }}
-              thumbColor={autoDownload ? colors.accent : colors.textSecondary}
-            />
-          </View>
-
-          <View style={styles.settingItem}>
-            <View style={styles.settingInfo}>
-              <Text style={styles.settingLabel}>Wi-Fi only</Text>
-              <Text style={styles.settingDescription}>
-                Only download over Wi-Fi connection
-              </Text>
-            </View>
-            <Switch
-              value={wifiOnly}
-              onValueChange={handleWifiOnlyChange}
-              trackColor={{ false: colors.border, true: colors.accentDim }}
-              thumbColor={wifiOnly ? colors.accent : colors.textSecondary}
-            />
-          </View>
-        </View>
-
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>DRM Removal</Text>
-
-          <View style={styles.settingItem}>
-            <View style={styles.settingInfo}>
-              <Text style={styles.settingLabel}>Remove DRM</Text>
-              <Text style={styles.settingDescription}>
-                Remove DRM from downloaded audiobooks (requires activation bytes)
-              </Text>
-            </View>
-            <Switch
-              value={removeDRM}
-              onValueChange={handleRemoveDRMChange}
-              trackColor={{ false: colors.border, true: colors.accentDim }}
-              thumbColor={removeDRM ? colors.accent : colors.textSecondary}
-            />
-          </View>
-
-          {removeDRM && (
-            <TouchableOpacity style={styles.card}>
-              <Text style={styles.cardLabel}>Activation Bytes</Text>
-              <Text style={styles.cardValue}>Not configured</Text>
-              <Text style={styles.cardDescription}>
-                Tap to configure activation bytes for DRM removal
-              </Text>
-            </TouchableOpacity>
-          )}
         </View>
 
         <View style={styles.section}>

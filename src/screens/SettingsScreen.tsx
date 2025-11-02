@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { View, Text, TouchableOpacity, ScrollView, Switch, Alert, Platform } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as Updates from 'expo-updates';
+import Constants from 'expo-constants';
 import { useStyles } from '../hooks/useStyles';
 import { useTheme } from '../styles/theme';
 import type { Theme } from '../hooks/useStyles';
@@ -589,7 +590,7 @@ export default function SettingsScreen() {
           >
             <Text style={styles.cardLabel}>Version</Text>
             <Text style={styles.cardValue}>
-              1.0.0 {tapCount > 0 && tapCount < 10 && `(${tapCount}/10)`}
+              {Constants.expoConfig?.version || '0.0.1'}
             </Text>
           </TouchableOpacity>
 

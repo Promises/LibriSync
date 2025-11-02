@@ -1,0 +1,51 @@
+services:
+  librisync-build:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        - BUILDKIT_INLINE_CACHE=1
+    image: librisync:latest
+    container_name: librisync-builder
+    volumes:
+      # Mount output directory to get build artifacts
+      - ./build-output:/output
+      # Optional: Mount source for development (comment out for production builds)
+      # - .:/app
+    environment:
+      - ANDROID_SDK_ROOT=/opt/android-sdk
+      - ANDROID_HOME=/opt/android-sdk
+      - ANDROID_NDK_HOME=/opt/android-sdk/ndk/29.0.14033849
+      - JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+    # Override command if needed
+    # command: ["bash", "-c", "echo 'Custom build command'"]
+
+  # Development service - for interactive shell access
+  librisync-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: builder
+    image: librisync:dev
+    container_name: librisync-dev
+    volumes:
+      - .:/app
+      - build-cache:/app/android/build
+      - gradle-cache:/root/.gradle
+      - cargo-cache:/usr/local/cargo/registry
+      - rust-target-cache:/app/native/rust-core/target
+    environment:
+      - ANDROID_SDK_ROOT=/opt/android-sdk
+      - ANDROID_HOME=/opt/android-sdk
+      - ANDROID_NDK_HOME=/opt/android-sdk/ndk/29.0.14033849
+      - JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+    working_dir: /app
+    command: ["bash"]
+    stdin_open: true
+    tty: true
+
+volumes:
+  build-cache:
+  gradle-cache:
+  cargo-cache:
+  rust-target-cache:

@@ -1,0 +1,70 @@
+# Node modules - will be installed in container
+node_modules/
+npm-debug.log
+
+# Expo and React Native
+.expo/
+.expo-shared/
+web-build/
+
+# Build artifacts
+android/app/build/
+android/build/
+android/.gradle/
+ios/build/
+ios/Pods/
+*.xcworkspace
+*.xcodeproj
+
+# Rust build artifacts
+native/rust-core/target/
+**/.cargo/
+*.rs.bk
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Documentation (optional - remove if you want docs in the image)
+*.md
+!README.md
+
+# References - don't need in Docker
+references/
+
+# Test files (optional - remove if you want to run tests in Docker)
+**/__tests__/
+**/*.test.ts
+**/*.test.tsx
+**/*.spec.ts
+**/*.spec.tsx
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Docker files themselves
+Dockerfile
+.dockerignore
+docker-compose.yml

@@ -40,6 +40,9 @@ export default {
       "expo-secure-store"
     ],
     extra: {
+      eas: {
+        projectId: "2430b726-ba32-43d1-ac5b-2a88cb22e15e"
+      },
       // Enable debug screen in development mode by default
       // Override with: EXPO_PUBLIC_ENABLE_DEBUG_SCREEN=true/false
       enableDebugScreen: process.env.EXPO_PUBLIC_ENABLE_DEBUG_SCREEN === 'true' || process.env.NODE_ENV === 'development'

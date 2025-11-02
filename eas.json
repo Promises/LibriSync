@@ -11,12 +11,14 @@
       "distribution": "internal",
       "android": {
         "buildType": "apk"
-      }
+      },
+      "postPrebuild": ".eas/build/post-prebuild.sh"
     },
     "production": {
       "android": {
         "buildType": "apk"
-      }
+      },
+      "postPrebuild": ".eas/build/post-prebuild.sh"
     }
   },
   "submit": {

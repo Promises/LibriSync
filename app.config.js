@@ -2,7 +2,7 @@ export default {
   expo: {
     name: "LibriSync",
     slug: "librisync",
-    version: "0.0.1",
+    version: "0.0.2",
     orientation: "portrait",
     icon: "./assets/icon.png",
     userInterfaceStyle: "dark",

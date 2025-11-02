@@ -24,7 +24,7 @@ import {
   isBackgroundServiceRunning,
   type BackgroundTask,
 } from '../../modules/expo-rust-bridge';
-import { Paths } from 'expo-file-system';
+import { Directory, File, Paths } from 'expo-file-system';
 import Button from '../components/Button';
 
 /**
@@ -334,6 +334,93 @@ export default function TaskDebugScreen() {
     );
   };
 
+  const handleListCacheFiles = async () => {
+    try {
+      console.log('[TaskDebug] Listing cache directory recursively...');
+      console.log('[TaskDebug] Cache path:', Paths.cache.uri);
+
+      const cacheDir = new Directory(Paths.cache);
+
+      if (!cacheDir.exists) {
+        console.log('[TaskDebug] Cache directory does not exist');
+        Alert.alert('Cache Directory', 'Cache directory does not exist');
+        return;
+      }
+
+      // Recursively list all files
+      const fileDetails: string[] = [];
+      let totalSize = 0;
+      let fileCount = 0;
+      let dirCount = 0;
+
+      const listRecursive = async (dir: Directory, prefix: string = '') => {
+        const items = await dir.list();
+
+        for (const item of items) {
+          const name = item.uri.split('/').filter(Boolean).pop() || 'unknown';
+          const decodedName = decodeURIComponent(name);
+
+          // Skip system/cache folders
+          const skipFolders = ['WebView', 'http-cache', 'Crash Reports', 'image_cache'];
+          if (skipFolders.includes(decodedName) && prefix === '') {
+            continue;
+          }
+
+          // Try to treat it as a directory first
+          let isDirectory = false;
+          try {
+            const testDir = new Directory(item.uri);
+            if (testDir.exists) {
+              // It's a directory
+              isDirectory = true;
+              dirCount++;
+              const size = item.size || 0;
+              const sizeStr = `${(size / 1024 / 1024).toFixed(2)} MB`;
+              const logEntry = `${prefix}${decodedName}/ (${sizeStr})`;
+              fileDetails.push(logEntry);
+              console.log('[TaskDebug]   ', logEntry);
+
+              // Recurse into subdirectory
+              await listRecursive(testDir, `${prefix}  `);
+            }
+          } catch (error) {
+            // Not a directory, treat as file
+            isDirectory = false;
+          }
+
+          if (!isDirectory) {
+            // It's a file
+            const size = item.size || 0;
+            totalSize += size;
+            fileCount++;
+            const sizeStr = `${(size / 1024 / 1024).toFixed(2)} MB`;
+            const logEntry = `${prefix}${decodedName} (${sizeStr})`;
+            fileDetails.push(logEntry);
+            console.log('[TaskDebug]   ', logEntry);
+          }
+        }
+      };
+
+      await listRecursive(cacheDir);
+
+      console.log('[TaskDebug] ================');
+      console.log('[TaskDebug] Total:', fileCount, 'files,', dirCount, 'directories');
+      console.log('[TaskDebug] Total size:', (totalSize / 1024 / 1024).toFixed(2), 'MB');
+
+      // Show summary in alert
+      const summary = fileDetails.slice(0, 15).join('\n');
+      const more = fileDetails.length > 15 ? `\n... and ${fileDetails.length - 15} more` : '';
+      const totalSizeMB = (totalSize / 1024 / 1024).toFixed(2);
+      Alert.alert(
+        'Cache Directory',
+        `${fileCount} files, ${dirCount} dirs\nTotal: ${totalSizeMB} MB\n\n${summary}${more}\n\nCheck console for full listing.`
+      );
+    } catch (error: any) {
+      console.error('[TaskDebug] Failed to list cache files:', error);
+      Alert.alert('Error', error.message || 'Failed to list cache directory');
+    }
+  };
+
   const formatDate = (timestamp: number | undefined) => {
     if (!timestamp) return 'N/A';
     const date = new Date(timestamp);
@@ -583,6 +670,14 @@ export default function TaskDebugScreen() {
             variant="outlined"
             state="warning"
             disabled={hasAccount === false}
+            style={{ marginBottom: spacing.sm }}
+          />
+
+          <Button
+            title="List Cache Files"
+            onPress={handleListCacheFiles}
+            variant="outlined"
+            state="primary"
             style={{ marginBottom: spacing.sm }}
           />
 

@@ -311,93 +311,6 @@ export default function SettingsScreen() {
     return path;
   };
 
-  const handleListCacheFiles = async () => {
-    try {
-      console.log('[Settings] Listing cache directory recursively...');
-      console.log('[Settings] Cache path:', Paths.cache.uri);
-
-      const cacheDir = new Directory(Paths.cache);
-
-      if (!cacheDir.exists) {
-        console.log('[Settings] Cache directory does not exist');
-        Alert.alert('Cache Directory', 'Cache directory does not exist');
-        return;
-      }
-
-      // Recursively list all files
-      const fileDetails: string[] = [];
-      let totalSize = 0;
-      let fileCount = 0;
-      let dirCount = 0;
-
-      const listRecursive = async (dir: Directory, prefix: string = '') => {
-        const items = await dir.list();
-
-        for (const item of items) {
-          const name = item.uri.split('/').filter(Boolean).pop() || 'unknown';
-          const decodedName = decodeURIComponent(name);
-
-          // Skip system/cache folders
-          const skipFolders = ['WebView', 'http-cache', 'Crash Reports', 'image_cache'];
-          if (skipFolders.includes(decodedName) && prefix === '') {
-            continue;
-          }
-
-          // Try to treat it as a directory first
-          let isDirectory = false;
-          try {
-            const testDir = new Directory(item.uri);
-            if (testDir.exists) {
-              // It's a directory
-              isDirectory = true;
-              dirCount++;
-              const size = item.size || 0;
-              const sizeStr = `${(size / 1024 / 1024).toFixed(2)} MB`;
-              const logEntry = `${prefix}${decodedName}/ (${sizeStr})`;
-              fileDetails.push(logEntry);
-              console.log('[Settings]   ', logEntry);
-
-              // Recurse into subdirectory
-              await listRecursive(testDir, `${prefix}  `);
-            }
-          } catch (error) {
-            // Not a directory, treat as file
-            isDirectory = false;
-          }
-
-          if (!isDirectory) {
-            // It's a file
-            const size = item.size || 0;
-            totalSize += size;
-            fileCount++;
-            const sizeStr = `${(size / 1024 / 1024).toFixed(2)} MB`;
-            const logEntry = `${prefix}${decodedName} (${sizeStr})`;
-            fileDetails.push(logEntry);
-            console.log('[Settings]   ', logEntry);
-          }
-        }
-      };
-
-      await listRecursive(cacheDir);
-
-      console.log('[Settings] ================');
-      console.log('[Settings] Total:', fileCount, 'files,', dirCount, 'directories');
-      console.log('[Settings] Total size:', (totalSize / 1024 / 1024).toFixed(2), 'MB');
-
-      // Show summary in alert
-      const summary = fileDetails.slice(0, 15).join('\n');
-      const more = fileDetails.length > 15 ? `\n... and ${fileDetails.length - 15} more` : '';
-      const totalSizeMB = (totalSize / 1024 / 1024).toFixed(2);
-      Alert.alert(
-        'Cache Directory',
-        `${fileCount} files, ${dirCount} dirs\nTotal: ${totalSizeMB} MB\n\n${summary}${more}\n\nCheck console for full listing.`
-      );
-    } catch (error: any) {
-      console.error('[Settings] Failed to list cache files:', error);
-      Alert.alert('Error', error.message || 'Failed to list cache directory');
-    }
-  };
-
   const handleDeleteDatabase = () => {
     Alert.alert(
       'Delete Database',
@@ -552,20 +465,6 @@ export default function SettingsScreen() {
 
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Database</Text>
-
-          <TouchableOpacity
-            style={styles.button}
-            onPress={handleListCacheFiles}
-          >
-            <Text style={styles.buttonText}>
-              List Cache Files
-            </Text>
-          </TouchableOpacity>
-          <Text style={styles.settingDescription}>
-            Check cache directory for leftover download/conversion files
-          </Text>
-
-          <View style={styles.spacer} />
 
           <TouchableOpacity
             style={[styles.button, styles.dangerButton]}

@@ -20,14 +20,18 @@ export default function AppNavigator() {
     Constants.expoConfig?.extra?.enableDebugScreen ?? __DEV__
   );
 
-  // Check if debug mode is enabled via SecureStore (secret activation)
+  // Check if debug mode is enabled/disabled via SecureStore (secret activation/deactivation)
   useEffect(() => {
     const checkDebugMode = async () => {
       try {
         const debugEnabled = await SecureStore.getItemAsync(DEBUG_MODE_KEY);
+        // If user has explicitly set debug mode via secret gesture, respect that setting
         if (debugEnabled === 'true') {
           setEnableDebugScreen(true);
+        } else if (debugEnabled === 'false') {
+          setEnableDebugScreen(false);
         }
+        // Otherwise, fall back to env var / __DEV__ (initial state)
       } catch (error) {
         console.error('[AppNavigator] Failed to check debug mode:', error);
       }

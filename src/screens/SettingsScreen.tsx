@@ -117,15 +117,24 @@ export default function SettingsScreen() {
     setTapCount(recentTaps.length);
 
     if (recentTaps.length >= 10) {
-      // Enable debug mode
+      // Toggle debug mode
       try {
-        await SecureStore.setItemAsync(DEBUG_MODE_KEY, 'true');
+        const currentDebugMode = await SecureStore.getItemAsync(DEBUG_MODE_KEY);
+        const isCurrentlyEnabled = currentDebugMode === 'true';
+        const newValue = isCurrentlyEnabled ? 'false' : 'true';
+
+        await SecureStore.setItemAsync(DEBUG_MODE_KEY, newValue);
         tapTimestamps.current = [];
         setTapCount(0);
 
+        const title = isCurrentlyEnabled ? 'Debug Mode Disabled' : 'Debug Mode Enabled';
+        const message = isCurrentlyEnabled
+          ? 'The app will reload to hide the Debug tab.'
+          : 'The app will reload to show the Debug tab.';
+
         Alert.alert(
-          'Debug Mode Enabled',
-          'The app will reload to show the Debug tab.',
+          title,
+          message,
           [
             {
               text: 'OK',
@@ -134,14 +143,14 @@ export default function SettingsScreen() {
                   await Updates.reloadAsync();
                 } catch (error) {
                   console.error('[Settings] Failed to reload app:', error);
-                  Alert.alert('Please restart the app manually to see the Debug tab.');
+                  Alert.alert('Please restart the app manually.');
                 }
               }
             }
           ]
         );
       } catch (error) {
-        console.error('[Settings] Failed to enable debug mode:', error);
+        console.error('[Settings] Failed to toggle debug mode:', error);
       }
     }
   };

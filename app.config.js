@@ -45,7 +45,8 @@ export default {
       ],
       "expo-secure-store",
       "./plugins/withDownloadService",
-      "./plugins/withFFmpegKit"
+      "./plugins/withFFmpegKit",
+      "./plugins/withGradleVersioning"
     ],
     extra: {
       eas: {

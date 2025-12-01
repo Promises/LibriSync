@@ -58,7 +58,7 @@ jobs:
       - name: Rename APK with version
         run: |
           VERSION=${{ github.ref_name }}
-          mv build-output/release/app-release.apk build-output/release/librisync-${VERSION}.apk
+          sudo mv build-output/release/app-release.apk build-output/release/librisync-${VERSION}.apk
 
       - name: Upload Release APK
         uses: actions/upload-artifact@v4

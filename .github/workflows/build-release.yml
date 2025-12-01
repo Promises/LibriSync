@@ -3,7 +3,7 @@ name: Build Signed Release APK
 on:
   push:
     tags:
-      - 'v*'  # Trigger on version tags like v1.0.0
+      - 'v[0-9]+.[0-9]+.[0-9]+'  # Trigger on semantic version tags like v1.0.0, v0.0.4
   workflow_dispatch:  # Allow manual trigger
 
 jobs:
@@ -17,11 +17,21 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Extract version from tag
+        id: version
+        run: |
+          # Extract version from tag (v0.0.5 -> 0.0.5)
+          VERSION=${{ github.ref_name }}
+          VERSION=${VERSION#v}  # Remove 'v' prefix
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Building version: $VERSION"
+
       - name: Build signed release APK
         env:
           GIT_REPO: ${{ github.server_url }}/${{ github.repository }}.git
           GIT_BRANCH: ${{ github.ref_name }}
           BUILD_TYPE: release
+          APP_VERSION: ${{ steps.version.outputs.version }}
           KEYSTORE_FILE: ${{ secrets.KEYSTORE_FILE }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
@@ -30,19 +40,25 @@ jobs:
           chmod +x ./docker-build.sh
           ./docker-build.sh build
 
+      - name: Rename APK with version
+        run: |
+          VERSION=${{ github.ref_name }}
+          mv build-output/release/app-release.apk build-output/release/librisync-${VERSION}.apk
+
       - name: Upload Release APK
         uses: actions/upload-artifact@v4
         with:
-          name: librisync-release-signed
-          path: build-output/release/*.apk
+          name: librisync-${{ github.ref_name }}
+          path: build-output/release/librisync-*.apk
           retention-days: 30
 
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v1
         with:
-          files: build-output/release/*.apk
+          files: build-output/release/librisync-*.apk
           draft: false
           prerelease: false
+          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -8,6 +8,7 @@ services:
         - GIT_REPO=${GIT_REPO:-}
         - GIT_BRANCH=${GIT_BRANCH:-main}
         - BUILD_TYPE=${BUILD_TYPE:-debug}
+        - APP_VERSION=${APP_VERSION:-}
         - KEYSTORE_FILE=${KEYSTORE_FILE:-}
         - KEYSTORE_PASSWORD=${KEYSTORE_PASSWORD:-}
         - KEY_ALIAS=${KEY_ALIAS:-}

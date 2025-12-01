@@ -2,11 +2,14 @@
 // This ensures each build has a unique, incrementing version code
 const versionCode = Math.floor(Date.now() / 10000);
 
+// Use APP_VERSION from environment (set by CI/CD from git tag), or fallback to default
+const version = process.env.APP_VERSION || "0.0.4";
+
 export default {
   expo: {
     name: "LibriSync",
     slug: "librisync",
-    version: "0.0.4",
+    version: version,
     orientation: "portrait",
     icon: "./assets/icon.png",
     userInterfaceStyle: "dark",

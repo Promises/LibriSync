@@ -74,6 +74,9 @@ ARG GIT_REPO
 ARG GIT_BRANCH=main
 ARG BUILD_TYPE=debug
 
+# Build argument for app version (extracted from git tag in CI/CD)
+ARG APP_VERSION=""
+
 # Build arguments for signing (optional, only used for release builds)
 ARG KEYSTORE_FILE=""
 ARG KEYSTORE_PASSWORD=""
@@ -97,6 +100,10 @@ RUN if [ -n "$GIT_REPO" ]; then \
 
 # Install Node.js dependencies
 RUN npm ci
+
+# Set APP_VERSION as environment variable (will be read by app.config.js)
+ARG APP_VERSION
+ENV APP_VERSION=${APP_VERSION}
 
 # Save FFmpeg-Kit AAR before Expo prebuild wipes it
 RUN if [ -f android/app/libs/ffmpeg-kit.aar ]; then \

@@ -135,10 +135,12 @@ ARG KEY_PASSWORD
 RUN if [ "$BUILD_TYPE" = "release" ] && [ -n "$KEYSTORE_FILE" ]; then \
         echo "Setting up release signing..."; \
         echo "$KEYSTORE_FILE" | base64 -d > android/app/librisync-release.keystore && \
-        echo "MYAPP_UPLOAD_STORE_FILE=librisync-release.keystore" > android/keystore.properties && \
+        echo "MYAPP_UPLOAD_STORE_FILE=app/librisync-release.keystore" > android/keystore.properties && \
         echo "MYAPP_UPLOAD_STORE_PASSWORD=$KEYSTORE_PASSWORD" >> android/keystore.properties && \
         echo "MYAPP_UPLOAD_KEY_ALIAS=$KEY_ALIAS" >> android/keystore.properties && \
         echo "MYAPP_UPLOAD_KEY_PASSWORD=$KEY_PASSWORD" >> android/keystore.properties && \
+        ls -lh android/app/librisync-release.keystore && \
+        cat android/keystore.properties && \
         echo "✓ Signing configuration created"; \
     fi
 

@@ -1122,8 +1122,10 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeSearch
 ///   "search_query": "harry potter",  // optional
 ///   "series_name": "Harry Potter",   // optional
 ///   "category": "Fantasy",           // optional
-///   "sort_field": "title",           // "title" | "release_date" | "date_added" | "series" | "length"
-///   "sort_direction": "asc"          // "asc" | "desc"
+///   "sort_field": "title",           // "title" | "release_date" | "date_added" | "series" | "length" | "downloaded"
+///   "sort_direction": "asc",         // "asc" | "desc"
+///   "downloaded_group_sort_field": "title",
+///   "downloaded_group_sort_direction": "asc"
 /// }
 /// ```
 ///
@@ -1156,6 +1158,8 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetBoo
             category: Option<String>,
             sort_field: Option<String>,
             sort_direction: Option<String>,
+            downloaded_group_sort_field: Option<String>,
+            downloaded_group_sort_direction: Option<String>,
             source: Option<String>,
         }
 
@@ -1175,6 +1179,8 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetBoo
                     source: params.source,
                     sort_field: None,
                     sort_direction: None,
+                    downloaded_group_sort_field: None,
+                    downloaded_group_sort_direction: None,
                     limit: params.limit,
                     offset: params.offset,
                 };
@@ -1187,6 +1193,18 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetBoo
                         "date_added" => Some(crate::storage::SortField::DateAdded),
                         "series" => Some(crate::storage::SortField::Series),
                         "length" => Some(crate::storage::SortField::Length),
+                        "downloaded" => Some(crate::storage::SortField::Downloaded),
+                        _ => None,
+                    };
+                }
+
+                if let Some(field) = params.downloaded_group_sort_field {
+                    query_params.downloaded_group_sort_field = match field.as_str() {
+                        "title" => Some(crate::storage::SortField::Title),
+                        "release_date" => Some(crate::storage::SortField::ReleaseDate),
+                        "date_added" => Some(crate::storage::SortField::DateAdded),
+                        "series" => Some(crate::storage::SortField::Series),
+                        "length" => Some(crate::storage::SortField::Length),
                         _ => None,
                     };
                 }
@@ -1194,6 +1212,14 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetBoo
                 // Parse sort direction
                 if let Some(dir) = params.sort_direction {
                     query_params.sort_direction = match dir.as_str() {
+                        "asc" => Some(crate::storage::SortDirection::Asc),
+                        "desc" => Some(crate::storage::SortDirection::Desc),
+                        _ => None,
+                    };
+                }
+
+                if let Some(dir) = params.downloaded_group_sort_direction {
+                    query_params.downloaded_group_sort_direction = match dir.as_str() {
                         "asc" => Some(crate::storage::SortDirection::Asc),
                         "desc" => Some(crate::storage::SortDirection::Desc),
                         _ => None,

@@ -46,7 +46,8 @@ import {
 const DOWNLOAD_PATH_KEY = 'download_path';
 const LIBRARY_PREFS_KEY = 'library_preferences';
 
-type SortField = 'title' | 'release_date' | 'date_added' | 'series' | 'length';
+type SortField = 'title' | 'release_date' | 'date_added' | 'series' | 'length' | 'downloaded';
+type BookSortField = Exclude<SortField, 'downloaded'>;
 type SortDirection = 'asc' | 'desc';
 type SourceFilter = 'all' | 'audible' | 'librivox';
 type IoniconName = React.ComponentProps<typeof Ionicons>['name'];
@@ -62,6 +63,8 @@ const EXPORT_FORMAT_OPTIONS: Array<{ format: LibraryExportFormat; label: string;
 interface LibraryPreferences {
     sortField: SortField;
     sortDirection: SortDirection;
+    downloadedGroupSortField?: BookSortField;
+    downloadedGroupSortDirection?: SortDirection;
     sourceFilter?: SourceFilter;
 }
 
@@ -85,6 +88,8 @@ export default function LibraryScreen() {
     const [searchQuery, setSearchQuery] = useState('');
     const [sortField, setSortField] = useState<SortField>('title');
     const [sortDirection, setSortDirection] = useState<SortDirection>('asc');
+    const [downloadedGroupSortField, setDownloadedGroupSortField] = useState<BookSortField>('title');
+    const [downloadedGroupSortDirection, setDownloadedGroupSortDirection] = useState<SortDirection>('asc');
     const [selectedSeries, setSelectedSeries] = useState<string | null>(null);
     const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
     const [sourceFilter, setSourceFilter] = useState<SourceFilter>('all');
@@ -137,14 +142,14 @@ export default function LibraryScreen() {
                 clearTimeout(searchTimeout.current);
             }
         };
-    }, [searchQuery, sortField, sortDirection, selectedSeries, selectedCategory, sourceFilter]);
+    }, [searchQuery, sortField, sortDirection, downloadedGroupSortField, downloadedGroupSortDirection, selectedSeries, selectedCategory, sourceFilter]);
 
     // Reload books when tab is focused
     useFocusEffect(
         React.useCallback(() => {
             console.log('[LibraryScreen] Tab focused, reloading books...');
             loadBooks(true);
-        }, [searchQuery, sortField, sortDirection, selectedSeries, selectedCategory, sourceFilter])
+        }, [searchQuery, sortField, sortDirection, downloadedGroupSortField, downloadedGroupSortDirection, selectedSeries, selectedCategory, sourceFilter])
     );
 
     // Poll for download progress
@@ -183,6 +188,10 @@ export default function LibraryScreen() {
                 const prefs: LibraryPreferences = JSON.parse(prefsJson);
                 setSortField(prefs.sortField);
                 setSortDirection(prefs.sortDirection);
+                const groupField = prefs.downloadedGroupSortField || (prefs.sortField !== 'downloaded' ? prefs.sortField : 'title');
+                const groupDirection = prefs.downloadedGroupSortDirection || (prefs.sortField !== 'downloaded' ? prefs.sortDirection : 'asc');
+                setDownloadedGroupSortField(groupField);
+                setDownloadedGroupSortDirection(groupDirection);
                 if (prefs.sourceFilter) setSourceFilter(prefs.sourceFilter);
             }
         } catch (error) {
@@ -190,11 +199,18 @@ export default function LibraryScreen() {
         }
     };
 
-    const savePreferences = async (field: SortField, direction: SortDirection) => {
+    const savePreferences = async (
+        field: SortField,
+        direction: SortDirection,
+        groupField: BookSortField = downloadedGroupSortField,
+        groupDirection: SortDirection = downloadedGroupSortDirection
+    ) => {
         try {
             const prefs: LibraryPreferences = {
                 sortField: field,
                 sortDirection: direction,
+                downloadedGroupSortField: groupField,
+                downloadedGroupSortDirection: groupDirection,
             };
             await SecureStore.setItemAsync(LIBRARY_PREFS_KEY, JSON.stringify(prefs));
         } catch (error) {
@@ -248,6 +264,8 @@ export default function LibraryScreen() {
                 sortDirection,
                 selectedSeries,
                 selectedCategory,
+                downloadedGroupSortField,
+                downloadedGroupSortDirection,
             });
 
             const response = getBooksWithFilters(
@@ -259,7 +277,9 @@ export default function LibraryScreen() {
                 selectedCategory || null,
                 sortField,
                 sortDirection,
-                sourceFilter === 'all' ? null : sourceFilter
+                sourceFilter === 'all' ? null : sourceFilter,
+                sortField === 'downloaded' ? downloadedGroupSortField : null,
+                sortField === 'downloaded' ? downloadedGroupSortDirection : null
             );
 
             console.log('[LibraryScreen] Loaded books:', response.books.length, 'of', response.total_count);
@@ -301,9 +321,18 @@ export default function LibraryScreen() {
     };
 
     const handleSortChange = (field: SortField, direction: SortDirection) => {
+        let nextGroupField = downloadedGroupSortField;
+        let nextGroupDirection = downloadedGroupSortDirection;
+        if (field !== 'downloaded') {
+            nextGroupField = field;
+            nextGroupDirection = direction;
+            setDownloadedGroupSortField(nextGroupField);
+            setDownloadedGroupSortDirection(nextGroupDirection);
+        }
+
         setSortField(field);
         setSortDirection(direction);
-        savePreferences(field, direction);
+        savePreferences(field, direction, nextGroupField, nextGroupDirection);
         setShowSortModal(false);
     };
 
@@ -989,8 +1018,13 @@ export default function LibraryScreen() {
             date_added: 'Date Added',
             series: 'Series',
             length: 'Length',
+            downloaded: 'Downloaded',
         };
         const arrow = sortDirection === 'asc' ? '↑' : '↓';
+        if (sortField === 'downloaded') {
+            const groupArrow = downloadedGroupSortDirection === 'asc' ? '↑' : '↓';
+            return `Downloaded ${arrow} (${fieldLabels[downloadedGroupSortField]} ${groupArrow})`;
+        }
         return `${fieldLabels[sortField]} ${arrow}`;
     };
 
@@ -1337,6 +1371,16 @@ export default function LibraryScreen() {
                                 Length {sortField === 'length' && (sortDirection === 'asc' ? '↑' : '↓')}
                             </Text>
                             {sortField === 'length' && <Text style={styles.modalCheck}>✓</Text>}
+                        </TouchableOpacity>
+
+                        <TouchableOpacity
+                            style={styles.modalOption}
+                            onPress={() => handleSortChange('downloaded', sortField === 'downloaded' && sortDirection === 'desc' ? 'asc' : 'desc')}
+                        >
+                            <Text style={styles.modalOptionText}>
+                                Downloaded {sortField === 'downloaded' && (sortDirection === 'asc' ? '↑' : '↓')}
+                            </Text>
+                            {sortField === 'downloaded' && <Text style={styles.modalCheck}>✓</Text>}
                         </TouchableOpacity>
 
                         <TouchableOpacity

@@ -414,8 +414,8 @@ export interface ExpoRustBridgeModule {
    * @param searchQuery - Optional search query (searches title, author, narrator)
    * @param seriesName - Optional series filter
    * @param category - Optional category/genre filter
-   * @param sortField - Sort field: "title" | "release_date" | "date_added" | "series" | "length"
-   * @param sortDirection - Sort direction: "asc" | "desc"
+   * @param sortField - Sort field: "title" | "release_date" | "date_added" | "series" | "length" | "downloaded"
+   * @param extras - JSON extras: sort_direction, source, and downloaded group sort values
    * @returns Array of books and total count
    */
   getBooksWithFilters(
@@ -1281,8 +1281,10 @@ function getBooks(dbPath: string, offset: number, limit: number): { books: Book[
  * @param searchQuery - Optional search query (searches title, author, narrator)
  * @param seriesName - Optional series filter
  * @param category - Optional category/genre filter
- * @param sortField - Sort field: "title" | "release_date" | "date_added" | "series" | "length"
+ * @param sortField - Sort field: "title" | "release_date" | "date_added" | "series" | "length" | "downloaded"
  * @param sortDirection - Sort direction: "asc" | "desc"
+ * @param downloadedGroupSortField - Sort used inside downloaded/not-downloaded groups
+ * @param downloadedGroupSortDirection - Direction used inside downloaded/not-downloaded groups
  * @returns Books and total count
  */
 function getBooksWithFilters(
@@ -1294,14 +1296,18 @@ function getBooksWithFilters(
   category?: string | null,
   sortField?: string | null,
   sortDirection?: string | null,
-  source?: string | null
+  source?: string | null,
+  downloadedGroupSortField?: string | null,
+  downloadedGroupSortDirection?: string | null
 ): { books: Book[]; total_count: number } {
-  // Pack sortDirection and source into extras JSON (Kotlin Function limit: 8 params)
+  // Pack extra sort/filter values into extras JSON (Kotlin Function limit: 8 params)
   let extras: string | null = null;
-  if (sortDirection || source) {
+  if (sortDirection || source || downloadedGroupSortField || downloadedGroupSortDirection) {
     const extrasObj: Record<string, string> = {};
     if (sortDirection) extrasObj.sort_direction = sortDirection;
     if (source) extrasObj.source = source;
+    if (downloadedGroupSortField) extrasObj.downloaded_group_sort_field = downloadedGroupSortField;
+    if (downloadedGroupSortDirection) extrasObj.downloaded_group_sort_direction = downloadedGroupSortDirection;
     extras = JSON.stringify(extrasObj);
   }
 

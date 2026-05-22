@@ -204,6 +204,52 @@ class ExpoRustBridgeModule : Module() {
     }
 
     /**
+     * Persist the user-selected download directory for background sync workers.
+     */
+    Function("setDownloadDirectory") { directory: String ->
+      try {
+        val context = appContext.reactContext ?: throw Exception("Context not available")
+        ExistingDownloadScanner.saveDownloadDirectory(context, directory)
+        mapOf("success" to true, "data" to mapOf("saved" to true))
+      } catch (e: Exception) {
+        mapOf("success" to false, "error" to e.message)
+      }
+    }
+
+    /**
+     * Read the native copy of the user-selected download directory.
+     */
+    Function("getDownloadDirectory") {
+      try {
+        val context = appContext.reactContext ?: throw Exception("Context not available")
+        mapOf(
+          "success" to true,
+          "data" to mapOf("directory" to ExistingDownloadScanner.getSavedDownloadDirectory(context))
+        )
+      } catch (e: Exception) {
+        mapOf("success" to false, "error" to e.message)
+      }
+    }
+
+    /**
+     * Scan the download directory for existing audio files and link matches to synced books.
+     */
+    AsyncFunction("scanDownloadDirectory") { dbPath: String, downloadDirectory: String? ->
+      try {
+        val context = appContext.reactContext ?: throw Exception("Context not available")
+        val directory = downloadDirectory
+          ?: ExistingDownloadScanner.getSavedDownloadDirectory(context)
+          ?: throw Exception("Download directory is not set")
+
+        ExistingDownloadScanner.saveDownloadDirectory(context, directory)
+        val scanResult = ExistingDownloadScanner.scan(context, dbPath, directory)
+        mapOf("success" to true, "data" to scanResult.toMap())
+      } catch (e: Exception) {
+        mapOf("success" to false, "error" to e.message)
+      }
+    }
+
+    /**
      * Get paginated list of books from database.
      *
      * @param dbPath The path to the SQLite database file

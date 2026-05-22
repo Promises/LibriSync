@@ -872,6 +872,8 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetBoo
                 )
                 .await?;
                 let total_count = crate::storage::queries::count_books(db.pool()).await?;
+                let file_paths =
+                    crate::storage::queries::get_completed_download_paths(db.pool()).await?;
 
                 // Convert BookWithRelations to JSON with arrays for authors/narrators
                 let books_json: Vec<serde_json::Value> = books.iter().map(|book| {
@@ -898,7 +900,7 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetBoo
                         "publisher": book.publisher,
                         "series_name": book.series_name,
                         "series_sequence": book.series_sequence,
-                        "file_path": null,  // TODO: Add when download manager implemented
+                        "file_path": file_paths.get(&book.audible_product_id).cloned(),
                         "pdf_url": book.pdf_url,
                         "is_finished": book.is_finished,
                         "is_downloadable": book.is_downloadable,
@@ -978,6 +980,12 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetBoo
                 .await?;
 
                 if let Some(book) = book {
+                    let file_path = crate::storage::queries::get_book_file_path(
+                        db.pool(),
+                        &book.audible_product_id,
+                    )
+                    .await?;
+
                     let book_json = serde_json::json!({
                         "id": book.book_id,
                         "audible_product_id": book.audible_product_id,
@@ -1001,6 +1009,7 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetBoo
                         "publisher": book.publisher,
                         "series_name": book.series_name,
                         "series_sequence": book.series_sequence,
+                        "file_path": file_path,
                         "pdf_url": book.pdf_url,
                         "is_finished": book.is_finished,
                         "is_downloadable": book.is_downloadable,
@@ -1197,6 +1206,8 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetBoo
                 let total_count =
                     crate::storage::queries::count_books_with_filters(db.pool(), &query_params)
                         .await?;
+                let file_paths =
+                    crate::storage::queries::get_completed_download_paths(db.pool()).await?;
 
                 // Convert BookWithRelations to JSON with arrays for authors/narrators
                 let books_json: Vec<serde_json::Value> = books.iter().map(|book| {
@@ -1223,7 +1234,7 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetBoo
                         "publisher": book.publisher,
                         "series_name": book.series_name,
                         "series_sequence": book.series_sequence,
-                        "file_path": null,
+                        "file_path": file_paths.get(&book.audible_product_id).cloned(),
                         "pdf_url": book.pdf_url,
                         "is_finished": book.is_finished,
                         "is_downloadable": book.is_downloadable,

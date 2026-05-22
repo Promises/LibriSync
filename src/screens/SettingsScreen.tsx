@@ -73,7 +73,12 @@ export default function SettingsScreen() {
         SecureStore.getItemAsync(AUTO_TOKEN_REFRESH_KEY),
       ]);
 
-      if (savedPath) setDownloadPath(savedPath);
+      if (savedPath) {
+        setDownloadPath(savedPath);
+        if (Platform.OS === 'android') {
+          ExpoRustBridge.setDownloadDirectory(savedPath);
+        }
+      }
       if (savedSyncFreq) setSyncFrequency(savedSyncFreq as SyncFrequency);
       if (savedSyncWifi !== null) setSyncWifiOnly(savedSyncWifi === 'true');
       if (savedAutoRefresh !== null) setAutoTokenRefresh(savedAutoRefresh === 'true');
@@ -123,6 +128,9 @@ export default function SettingsScreen() {
         const selectedUri = selectedDirectory.uri;
         setDownloadPath(selectedUri);
         await saveSettings(DOWNLOAD_PATH_KEY, selectedUri);
+        if (Platform.OS === 'android') {
+          ExpoRustBridge.setDownloadDirectory(selectedUri);
+        }
         Alert.alert('Success', `Download directory updated successfully\n\n${(selectedDirectory as any).name || 'Selected directory'}`);
       }
     } catch (error: any) {

@@ -39,6 +39,7 @@ use crate::storage::models::*;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sqlx::{Executor, SqlitePool};
+use std::collections::HashMap;
 
 // ============================================================================
 // BOOK QUERIES
@@ -1377,10 +1378,33 @@ pub async fn get_book_file_path(pool: &SqlitePool, asin: &str) -> Result<Option<
     Ok(file_path)
 }
 
+/// Get latest completed download file paths keyed by ASIN.
+pub async fn get_completed_download_paths(pool: &SqlitePool) -> Result<HashMap<String, String>> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        r#"
+        SELECT dt.asin, dt.output_path
+        FROM DownloadTasks dt
+        INNER JOIN (
+            SELECT asin, MAX(completed_at) AS completed_at
+            FROM DownloadTasks
+            WHERE status = 'completed' AND output_path != ''
+            GROUP BY asin
+        ) latest
+            ON latest.asin = dt.asin
+            AND latest.completed_at = dt.completed_at
+        WHERE dt.status = 'completed' AND dt.output_path != ''
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows.into_iter().collect())
+}
+
 /// Set the file path for a book by creating a manually completed download task.
 ///
 /// This allows users to mark a book as downloaded by associating it with an
-/// existing audio file on disk. Creates a download task with status "completed".
+/// existing audio file on disk. Creates or updates a completed download task.
 ///
 /// # Arguments
 /// * `pool` - Database connection pool
@@ -1397,8 +1421,40 @@ pub async fn set_book_file_path(
     file_path: &str,
 ) -> Result<String> {
     use uuid::Uuid;
-    let task_id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
+
+    let existing_task_id: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT task_id
+        FROM DownloadTasks
+        WHERE asin = ? AND status = 'completed'
+        ORDER BY completed_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(asin)
+    .fetch_optional(pool)
+    .await?;
+
+    if let Some(task_id) = existing_task_id {
+        sqlx::query(
+            r#"
+            UPDATE DownloadTasks
+            SET title = ?, output_path = ?, completed_at = ?
+            WHERE task_id = ?
+            "#,
+        )
+        .bind(title)
+        .bind(file_path)
+        .bind(&now)
+        .bind(&task_id)
+        .execute(pool)
+        .await?;
+
+        return Ok(task_id);
+    }
+
+    let task_id = Uuid::new_v4().to_string();
 
     sqlx::query(
         r#"
@@ -1582,6 +1638,39 @@ mod tests {
             .expect("Failed to upsert contributor");
 
         assert_eq!(contributor_id, contributor_id2);
+    }
+
+    #[tokio::test]
+    async fn test_set_book_file_path_updates_existing_completed_task() {
+        let db = Database::new_in_memory().await.expect("Failed to create database");
+
+        let task_id = set_book_file_path(db.pool(), "B012345680", "Test Book", "/books/old.m4b")
+            .await
+            .expect("Failed to set file path");
+
+        let updated_task_id =
+            set_book_file_path(db.pool(), "B012345680", "Test Book", "/books/new.m4b")
+                .await
+                .expect("Failed to update file path");
+
+        assert_eq!(task_id, updated_task_id);
+
+        let task_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM DownloadTasks WHERE asin = ?")
+            .bind("B012345680")
+            .fetch_one(db.pool())
+            .await
+            .expect("Failed to count download tasks");
+        assert_eq!(task_count, 1);
+
+        let file_path = get_book_file_path(db.pool(), "B012345680")
+            .await
+            .expect("Failed to get file path");
+        assert_eq!(file_path.as_deref(), Some("/books/new.m4b"));
+
+        let paths = get_completed_download_paths(db.pool())
+            .await
+            .expect("Failed to get completed paths");
+        assert_eq!(paths.get("B012345680").map(String::as_str), Some("/books/new.m4b"));
     }
 
     #[tokio::test]

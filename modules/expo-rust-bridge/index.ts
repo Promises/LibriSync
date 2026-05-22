@@ -228,6 +228,19 @@ export interface SyncStats {
   has_more: boolean;
 }
 
+/**
+ * Existing download directory scan statistics.
+ */
+export interface DownloadDirectoryScanStats {
+  files_scanned: number;
+  books_matched: number;
+  books_linked: number;
+  books_already_linked: number;
+  files_unmatched: number;
+  ambiguous_matches: number;
+  errors: string[];
+}
+
 // ----------------------------------------------------------------------------
 // Download & Progress Types
 // ----------------------------------------------------------------------------
@@ -486,6 +499,24 @@ export interface ExpoRustBridgeModule {
    * ```
    */
   syncLibraryPage(dbPath: string, accountJson: string, page: number): Promise<RustResponse<SyncStats>>;
+
+  /**
+   * Save the selected download directory for native background workers.
+   */
+  setDownloadDirectory(directory: string): RustResponse<{ saved: boolean }>;
+
+  /**
+   * Get the native copy of the selected download directory.
+   */
+  getDownloadDirectory(): RustResponse<{ directory: string | null }>;
+
+  /**
+   * Scan the download directory and link existing files to synced audiobooks.
+   */
+  scanDownloadDirectory(
+    dbPath: string,
+    downloadDirectory?: string | null
+  ): Promise<RustResponse<DownloadDirectoryScanStats>>;
 
   // --------------------------------------------------------------------------
   // Utilities
@@ -1365,6 +1396,34 @@ async function syncLibraryPage(dbPath: string, account: Account, page: number): 
 }
 
 /**
+ * Save the selected download directory for native background workers.
+ */
+function setDownloadDirectory(directory: string): void {
+  const response = NativeModule!.setDownloadDirectory(directory);
+  unwrapResult(response);
+}
+
+/**
+ * Get the native copy of the selected download directory.
+ */
+function getDownloadDirectory(): string | null {
+  const response = NativeModule!.getDownloadDirectory();
+  const data = unwrapResult(response);
+  return data.directory;
+}
+
+/**
+ * Scan the download directory and link existing audio files to synced audiobooks.
+ */
+async function scanDownloadDirectory(
+  dbPath: string,
+  downloadDirectory?: string | null
+): Promise<DownloadDirectoryScanStats> {
+  const response = await NativeModule!.scanDownloadDirectory(dbPath, downloadDirectory ?? null);
+  return unwrapResult(response);
+}
+
+/**
  * Enqueue a download using the persistent download manager.
  *
  * This starts a background download that can be paused, resumed, and monitored.
@@ -2068,6 +2127,9 @@ export {
   initializeDatabase,
   syncLibrary,
   syncLibraryPage,
+  setDownloadDirectory,
+  getDownloadDirectory,
+  scanDownloadDirectory,
   getBooks,
   getBooksWithFilters,
   getAllSeries,

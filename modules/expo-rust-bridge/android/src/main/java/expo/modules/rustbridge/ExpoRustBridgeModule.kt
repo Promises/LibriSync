@@ -204,6 +204,52 @@ class ExpoRustBridgeModule : Module() {
     }
 
     /**
+     * Persist the user-selected download directory for background sync workers.
+     */
+    Function("setDownloadDirectory") { directory: String ->
+      try {
+        val context = appContext.reactContext ?: throw Exception("Context not available")
+        ExistingDownloadScanner.saveDownloadDirectory(context, directory)
+        mapOf("success" to true, "data" to mapOf("saved" to true))
+      } catch (e: Exception) {
+        mapOf("success" to false, "error" to e.message)
+      }
+    }
+
+    /**
+     * Read the native copy of the user-selected download directory.
+     */
+    Function("getDownloadDirectory") {
+      try {
+        val context = appContext.reactContext ?: throw Exception("Context not available")
+        mapOf(
+          "success" to true,
+          "data" to mapOf("directory" to ExistingDownloadScanner.getSavedDownloadDirectory(context))
+        )
+      } catch (e: Exception) {
+        mapOf("success" to false, "error" to e.message)
+      }
+    }
+
+    /**
+     * Scan the download directory for existing audio files and link matches to synced books.
+     */
+    AsyncFunction("scanDownloadDirectory") { dbPath: String, downloadDirectory: String? ->
+      try {
+        val context = appContext.reactContext ?: throw Exception("Context not available")
+        val directory = downloadDirectory
+          ?: ExistingDownloadScanner.getSavedDownloadDirectory(context)
+          ?: throw Exception("Download directory is not set")
+
+        ExistingDownloadScanner.saveDownloadDirectory(context, directory)
+        val scanResult = ExistingDownloadScanner.scan(context, dbPath, directory)
+        mapOf("success" to true, "data" to scanResult.toMap())
+      } catch (e: Exception) {
+        mapOf("success" to false, "error" to e.message)
+      }
+    }
+
+    /**
      * Get paginated list of books from database.
      *
      * @param dbPath The path to the SQLite database file
@@ -244,8 +290,8 @@ class ExpoRustBridgeModule : Module() {
      * @param searchQuery Optional search query (searches title, author, narrator)
      * @param seriesName Optional series filter
      * @param category Optional category/genre filter
-     * @param sortField Sort field: "title", "release_date", "date_added", "series", or "length"
-     * @param sortDirection Sort direction: "asc" or "desc"
+     * @param sortField Sort field: "title", "release_date", "date_added", "series", "length", or "downloaded"
+     * @param extras JSON with sort direction, source, and optional downloaded group sort
      * @return Map with success flag, books array, and total_count
      */
     Function("getBooksWithFilters") {
@@ -266,12 +312,14 @@ class ExpoRustBridgeModule : Module() {
         if (seriesName != null) put("series_name", seriesName)
         if (category != null) put("category", category)
         if (sortField != null) put("sort_field", sortField)
-        // extras is a JSON string with optional sort_direction and source
+        // extras is a JSON string with optional sort_direction, source, and downloaded group sort
         if (extras != null) {
           try {
             val extrasObj = JSONObject(extras)
             if (extrasObj.has("sort_direction")) put("sort_direction", extrasObj.getString("sort_direction"))
             if (extrasObj.has("source")) put("source", extrasObj.getString("source"))
+            if (extrasObj.has("downloaded_group_sort_field")) put("downloaded_group_sort_field", extrasObj.getString("downloaded_group_sort_field"))
+            if (extrasObj.has("downloaded_group_sort_direction")) put("downloaded_group_sort_direction", extrasObj.getString("downloaded_group_sort_direction"))
           } catch (_: Exception) {
             // If extras is not valid JSON, treat it as sort_direction for backward compat
             put("sort_direction", extras)

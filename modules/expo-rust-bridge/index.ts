@@ -228,6 +228,19 @@ export interface SyncStats {
   has_more: boolean;
 }
 
+/**
+ * Existing download directory scan statistics.
+ */
+export interface DownloadDirectoryScanStats {
+  files_scanned: number;
+  books_matched: number;
+  books_linked: number;
+  books_already_linked: number;
+  files_unmatched: number;
+  ambiguous_matches: number;
+  errors: string[];
+}
+
 // ----------------------------------------------------------------------------
 // Download & Progress Types
 // ----------------------------------------------------------------------------
@@ -401,8 +414,8 @@ export interface ExpoRustBridgeModule {
    * @param searchQuery - Optional search query (searches title, author, narrator)
    * @param seriesName - Optional series filter
    * @param category - Optional category/genre filter
-   * @param sortField - Sort field: "title" | "release_date" | "date_added" | "series" | "length"
-   * @param sortDirection - Sort direction: "asc" | "desc"
+   * @param sortField - Sort field: "title" | "release_date" | "date_added" | "series" | "length" | "downloaded"
+   * @param extras - JSON extras: sort_direction, source, and downloaded group sort values
    * @returns Array of books and total count
    */
   getBooksWithFilters(
@@ -486,6 +499,24 @@ export interface ExpoRustBridgeModule {
    * ```
    */
   syncLibraryPage(dbPath: string, accountJson: string, page: number): Promise<RustResponse<SyncStats>>;
+
+  /**
+   * Save the selected download directory for native background workers.
+   */
+  setDownloadDirectory(directory: string): RustResponse<{ saved: boolean }>;
+
+  /**
+   * Get the native copy of the selected download directory.
+   */
+  getDownloadDirectory(): RustResponse<{ directory: string | null }>;
+
+  /**
+   * Scan the download directory and link existing files to synced audiobooks.
+   */
+  scanDownloadDirectory(
+    dbPath: string,
+    downloadDirectory?: string | null
+  ): Promise<RustResponse<DownloadDirectoryScanStats>>;
 
   // --------------------------------------------------------------------------
   // Utilities
@@ -1250,8 +1281,10 @@ function getBooks(dbPath: string, offset: number, limit: number): { books: Book[
  * @param searchQuery - Optional search query (searches title, author, narrator)
  * @param seriesName - Optional series filter
  * @param category - Optional category/genre filter
- * @param sortField - Sort field: "title" | "release_date" | "date_added" | "series" | "length"
+ * @param sortField - Sort field: "title" | "release_date" | "date_added" | "series" | "length" | "downloaded"
  * @param sortDirection - Sort direction: "asc" | "desc"
+ * @param downloadedGroupSortField - Sort used inside downloaded/not-downloaded groups
+ * @param downloadedGroupSortDirection - Direction used inside downloaded/not-downloaded groups
  * @returns Books and total count
  */
 function getBooksWithFilters(
@@ -1263,14 +1296,18 @@ function getBooksWithFilters(
   category?: string | null,
   sortField?: string | null,
   sortDirection?: string | null,
-  source?: string | null
+  source?: string | null,
+  downloadedGroupSortField?: string | null,
+  downloadedGroupSortDirection?: string | null
 ): { books: Book[]; total_count: number } {
-  // Pack sortDirection and source into extras JSON (Kotlin Function limit: 8 params)
+  // Pack extra sort/filter values into extras JSON (Kotlin Function limit: 8 params)
   let extras: string | null = null;
-  if (sortDirection || source) {
+  if (sortDirection || source || downloadedGroupSortField || downloadedGroupSortDirection) {
     const extrasObj: Record<string, string> = {};
     if (sortDirection) extrasObj.sort_direction = sortDirection;
     if (source) extrasObj.source = source;
+    if (downloadedGroupSortField) extrasObj.downloaded_group_sort_field = downloadedGroupSortField;
+    if (downloadedGroupSortDirection) extrasObj.downloaded_group_sort_direction = downloadedGroupSortDirection;
     extras = JSON.stringify(extrasObj);
   }
 
@@ -1361,6 +1398,34 @@ async function getCustomerInformation(
 async function syncLibraryPage(dbPath: string, account: Account, page: number): Promise<SyncStats> {
   const accountJson = JSON.stringify(account);
   const response = await NativeModule!.syncLibraryPage(dbPath, accountJson, page);
+  return unwrapResult(response);
+}
+
+/**
+ * Save the selected download directory for native background workers.
+ */
+function setDownloadDirectory(directory: string): void {
+  const response = NativeModule!.setDownloadDirectory(directory);
+  unwrapResult(response);
+}
+
+/**
+ * Get the native copy of the selected download directory.
+ */
+function getDownloadDirectory(): string | null {
+  const response = NativeModule!.getDownloadDirectory();
+  const data = unwrapResult(response);
+  return data.directory;
+}
+
+/**
+ * Scan the download directory and link existing audio files to synced audiobooks.
+ */
+async function scanDownloadDirectory(
+  dbPath: string,
+  downloadDirectory?: string | null
+): Promise<DownloadDirectoryScanStats> {
+  const response = await NativeModule!.scanDownloadDirectory(dbPath, downloadDirectory ?? null);
   return unwrapResult(response);
 }
 
@@ -2068,6 +2133,9 @@ export {
   initializeDatabase,
   syncLibrary,
   syncLibraryPage,
+  setDownloadDirectory,
+  getDownloadDirectory,
+  scanDownloadDirectory,
   getBooks,
   getBooksWithFilters,
   getAllSeries,

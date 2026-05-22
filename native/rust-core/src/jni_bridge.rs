@@ -872,6 +872,8 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetBoo
                 )
                 .await?;
                 let total_count = crate::storage::queries::count_books(db.pool()).await?;
+                let file_paths =
+                    crate::storage::queries::get_completed_download_paths(db.pool()).await?;
 
                 // Convert BookWithRelations to JSON with arrays for authors/narrators
                 let books_json: Vec<serde_json::Value> = books.iter().map(|book| {
@@ -898,7 +900,7 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetBoo
                         "publisher": book.publisher,
                         "series_name": book.series_name,
                         "series_sequence": book.series_sequence,
-                        "file_path": null,  // TODO: Add when download manager implemented
+                        "file_path": file_paths.get(&book.audible_product_id).cloned(),
                         "pdf_url": book.pdf_url,
                         "is_finished": book.is_finished,
                         "is_downloadable": book.is_downloadable,
@@ -978,6 +980,12 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetBoo
                 .await?;
 
                 if let Some(book) = book {
+                    let file_path = crate::storage::queries::get_book_file_path(
+                        db.pool(),
+                        &book.audible_product_id,
+                    )
+                    .await?;
+
                     let book_json = serde_json::json!({
                         "id": book.book_id,
                         "audible_product_id": book.audible_product_id,
@@ -1001,6 +1009,7 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetBoo
                         "publisher": book.publisher,
                         "series_name": book.series_name,
                         "series_sequence": book.series_sequence,
+                        "file_path": file_path,
                         "pdf_url": book.pdf_url,
                         "is_finished": book.is_finished,
                         "is_downloadable": book.is_downloadable,
@@ -1113,8 +1122,10 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeSearch
 ///   "search_query": "harry potter",  // optional
 ///   "series_name": "Harry Potter",   // optional
 ///   "category": "Fantasy",           // optional
-///   "sort_field": "title",           // "title" | "release_date" | "date_added" | "series" | "length"
-///   "sort_direction": "asc"          // "asc" | "desc"
+///   "sort_field": "title",           // "title" | "release_date" | "date_added" | "series" | "length" | "downloaded"
+///   "sort_direction": "asc",         // "asc" | "desc"
+///   "downloaded_group_sort_field": "title",
+///   "downloaded_group_sort_direction": "asc"
 /// }
 /// ```
 ///
@@ -1147,6 +1158,8 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetBoo
             category: Option<String>,
             sort_field: Option<String>,
             sort_direction: Option<String>,
+            downloaded_group_sort_field: Option<String>,
+            downloaded_group_sort_direction: Option<String>,
             source: Option<String>,
         }
 
@@ -1166,6 +1179,8 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetBoo
                     source: params.source,
                     sort_field: None,
                     sort_direction: None,
+                    downloaded_group_sort_field: None,
+                    downloaded_group_sort_direction: None,
                     limit: params.limit,
                     offset: params.offset,
                 };
@@ -1173,6 +1188,18 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetBoo
                 // Parse sort field
                 if let Some(field) = params.sort_field {
                     query_params.sort_field = match field.as_str() {
+                        "title" => Some(crate::storage::SortField::Title),
+                        "release_date" => Some(crate::storage::SortField::ReleaseDate),
+                        "date_added" => Some(crate::storage::SortField::DateAdded),
+                        "series" => Some(crate::storage::SortField::Series),
+                        "length" => Some(crate::storage::SortField::Length),
+                        "downloaded" => Some(crate::storage::SortField::Downloaded),
+                        _ => None,
+                    };
+                }
+
+                if let Some(field) = params.downloaded_group_sort_field {
+                    query_params.downloaded_group_sort_field = match field.as_str() {
                         "title" => Some(crate::storage::SortField::Title),
                         "release_date" => Some(crate::storage::SortField::ReleaseDate),
                         "date_added" => Some(crate::storage::SortField::DateAdded),
@@ -1191,12 +1218,22 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetBoo
                     };
                 }
 
+                if let Some(dir) = params.downloaded_group_sort_direction {
+                    query_params.downloaded_group_sort_direction = match dir.as_str() {
+                        "asc" => Some(crate::storage::SortDirection::Asc),
+                        "desc" => Some(crate::storage::SortDirection::Desc),
+                        _ => None,
+                    };
+                }
+
                 let books =
                     crate::storage::queries::list_books_with_filters(db.pool(), &query_params)
                         .await?;
                 let total_count =
                     crate::storage::queries::count_books_with_filters(db.pool(), &query_params)
                         .await?;
+                let file_paths =
+                    crate::storage::queries::get_completed_download_paths(db.pool()).await?;
 
                 // Convert BookWithRelations to JSON with arrays for authors/narrators
                 let books_json: Vec<serde_json::Value> = books.iter().map(|book| {
@@ -1223,7 +1260,7 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetBoo
                         "publisher": book.publisher,
                         "series_name": book.series_name,
                         "series_sequence": book.series_sequence,
-                        "file_path": null,
+                        "file_path": file_paths.get(&book.audible_product_id).cloned(),
                         "pdf_url": book.pdf_url,
                         "is_finished": book.is_finished,
                         "is_downloadable": book.is_downloadable,

@@ -9,6 +9,7 @@ import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import expo.modules.rustbridge.AppPaths
 import expo.modules.rustbridge.ExpoRustBridgeModule
+import expo.modules.rustbridge.ExistingDownloadScanner
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -147,6 +148,23 @@ class LibrarySyncWorker(
             }
 
             Log.d(TAG, "Library sync complete: $totalItemsSynced items ($totalItemsAdded added, $totalItemsUpdated updated)")
+
+            val downloadDirectory = ExistingDownloadScanner.getSavedDownloadDirectory(applicationContext)
+            if (!downloadDirectory.isNullOrBlank()) {
+                try {
+                    val scanResult = ExistingDownloadScanner.scan(applicationContext, dbPath, downloadDirectory)
+                    Log.d(
+                        TAG,
+                        "Existing download scan complete: ${scanResult.booksLinked} linked, " +
+                            "${scanResult.booksAlreadyLinked} already linked, ${scanResult.filesUnmatched} unmatched"
+                    )
+                } catch (e: Exception) {
+                    Log.w(TAG, "Existing download scan failed after successful library sync", e)
+                }
+            } else {
+                Log.d(TAG, "No download directory configured; skipping existing download scan")
+            }
+
             return@withContext Result.success()
 
         } catch (e: Exception) {

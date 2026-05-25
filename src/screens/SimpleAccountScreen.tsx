@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, Alert, ScrollView } from 'react-native';
+import { View, Text, Alert, ScrollView, Platform } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import * as SecureStore from 'expo-secure-store';
+import { Directory, Paths } from 'expo-file-system';
 import LoginScreen from './LoginScreen';
 import Button from '../components/Button';
 import {
@@ -14,6 +15,8 @@ import {
   saveAccount,
   getPrimaryAccount,
   deleteAccount,
+  scanDownloadDirectory,
+  setDownloadDirectory,
   SyncStats,
   cancelAllBackgroundTasks,
   scheduleLibrarySync,
@@ -24,6 +27,8 @@ import { useStyles } from '../hooks/useStyles';
 import { useTheme } from '../styles/theme';
 import type { Theme } from '../hooks/useStyles';
 import { getDatabasePath } from '../utils/appPaths';
+
+const DOWNLOAD_PATH_KEY = 'download_path';
 
 export default function SimpleAccountScreen() {
   const styles = useStyles(createStyles);
@@ -411,10 +416,67 @@ export default function SimpleAccountScreen() {
     }
   };
 
+  const promptForDownloadDirectory = (): Promise<boolean> => {
+    return new Promise(resolve => {
+      let settled = false;
+      const finish = (value: boolean) => {
+        if (!settled) {
+          settled = true;
+          resolve(value);
+        }
+      };
+
+      Alert.alert(
+        'Download Directory Required',
+        'Choose a download directory before syncing your library.',
+        [
+          { text: 'Cancel', style: 'cancel', onPress: () => finish(false) },
+          { text: 'Choose', onPress: () => finish(true) },
+        ],
+        { cancelable: true, onDismiss: () => finish(false) }
+      );
+    });
+  };
+
+  const ensureDownloadDirectory = async (): Promise<string | null> => {
+    try {
+      const savedPath = await SecureStore.getItemAsync(DOWNLOAD_PATH_KEY);
+      if (savedPath) {
+        if (Platform.OS === 'android') {
+          setDownloadDirectory(savedPath);
+        }
+        return savedPath;
+      }
+
+      const shouldChoose = await promptForDownloadDirectory();
+      if (!shouldChoose) return null;
+
+      const selectedDirectory = await Directory.pickDirectoryAsync(
+        Platform.OS === 'android' ? undefined : Paths.document?.uri
+      );
+
+      if (!selectedDirectory?.uri) return null;
+
+      await SecureStore.setItemAsync(DOWNLOAD_PATH_KEY, selectedDirectory.uri);
+      if (Platform.OS === 'android') {
+        setDownloadDirectory(selectedDirectory.uri);
+      }
+
+      return selectedDirectory.uri;
+    } catch (error: any) {
+      console.error('[SimpleAccountScreen] Directory picker error:', error);
+      Alert.alert('Download Directory Required', error.message || 'Failed to select directory');
+      return null;
+    }
+  };
+
   const handleSyncLibrary = async () => {
     console.log('========== SYNC LIBRARY BUTTON PRESSED ==========');
 
     if (!account) return;
+
+    const downloadDir = await ensureDownloadDirectory();
+    if (!downloadDir) return;
 
     try {
       setIsSyncing(true);
@@ -479,15 +541,33 @@ export default function SimpleAccountScreen() {
 
       // Update UI with final stats
       setSyncStats(stats);
+
+      let existingDownloadsLinked = 0;
+      if (Platform.OS === 'android' && downloadDir) {
+        try {
+          const downloadScanStats = await scanDownloadDirectory(dbPath, downloadDir);
+          existingDownloadsLinked = downloadScanStats.books_linked;
+          if (downloadScanStats.errors.length > 0) {
+            console.warn('[SimpleAccountScreen] Existing download scan warnings:', downloadScanStats.errors);
+          }
+        } catch (scanError) {
+          console.warn('[SimpleAccountScreen] Existing download scan failed:', scanError);
+        }
+      }
+
       const now = new Date();
       setLastSyncDate(now);
 
       // Save last sync timestamp
       await SecureStore.setItemAsync('last_sync_date', now.toISOString());
 
+      const scanSummary = Platform.OS === 'android' && downloadDir
+        ? `\nExisting downloads linked: ${existingDownloadsLinked}`
+        : '';
+
       Alert.alert(
         'Sync Complete!',
-        `Synced: ${stats.total_items} / ${stats.total_library_count}\nAdded: ${stats.books_added}\nUpdated: ${stats.books_updated}`
+        `Synced: ${stats.total_items} / ${stats.total_library_count}\nAdded: ${stats.books_added}\nUpdated: ${stats.books_updated}${scanSummary}`
       );
     } catch (error: any) {
       console.error('Sync failed:', error);

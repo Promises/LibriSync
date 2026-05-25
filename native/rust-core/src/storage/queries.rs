@@ -39,6 +39,7 @@ use crate::storage::models::*;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sqlx::{Executor, SqlitePool};
+use std::collections::HashMap;
 
 // ============================================================================
 // BOOK QUERIES
@@ -433,12 +434,44 @@ pub enum SortField {
     DateAdded,
     Series,
     Length,
+    Downloaded,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortDirection {
     Asc,
     Desc,
+}
+
+fn downloaded_status_order_expression(direction: SortDirection) -> &'static str {
+    match direction {
+        SortDirection::Asc => {
+            "CASE WHEN completed_downloads.asin IS NULL THEN 0 ELSE 1 END ASC"
+        },
+        SortDirection::Desc => {
+            "CASE WHEN completed_downloads.asin IS NULL THEN 0 ELSE 1 END DESC"
+        },
+    }
+}
+
+fn grouped_order_expression(field: SortField, direction: SortDirection) -> &'static str {
+    match (field, direction) {
+        (SortField::Title, SortDirection::Asc) => "b.title ASC",
+        (SortField::Title, SortDirection::Desc) => "b.title DESC",
+        (SortField::ReleaseDate, SortDirection::Asc) => "b.date_published ASC, b.title ASC",
+        (SortField::ReleaseDate, SortDirection::Desc) => "b.date_published DESC, b.title ASC",
+        (SortField::DateAdded, SortDirection::Asc) => "lb.date_added ASC, b.title ASC",
+        (SortField::DateAdded, SortDirection::Desc) => "lb.date_added DESC, b.title ASC",
+        (SortField::Length, SortDirection::Asc) => "b.length_in_minutes ASC, b.title ASC",
+        (SortField::Length, SortDirection::Desc) => "b.length_in_minutes DESC, b.title ASC",
+        (SortField::Series, SortDirection::Asc) => {
+            "CASE WHEN book_series_first.series_name IS NULL THEN 1 ELSE 0 END, book_series_first.series_name ASC, book_series_first.series_sequence ASC, b.title ASC"
+        },
+        (SortField::Series, SortDirection::Desc) => {
+            "CASE WHEN book_series_first.series_name IS NULL THEN 1 ELSE 0 END, book_series_first.series_name DESC, book_series_first.series_sequence DESC, b.title ASC"
+        },
+        (SortField::Downloaded, _) => "b.title ASC",
+    }
 }
 
 /// Filter and search parameters for book queries
@@ -450,6 +483,8 @@ pub struct BookQueryParams {
     pub source: Option<String>,        // Filter by source (audible, librivox)
     pub sort_field: Option<SortField>,
     pub sort_direction: Option<SortDirection>,
+    pub downloaded_group_sort_field: Option<SortField>,
+    pub downloaded_group_sort_direction: Option<SortDirection>,
     pub limit: i64,
     pub offset: i64,
 }
@@ -507,21 +542,34 @@ pub async fn list_books_with_filters(
 
     // Build ORDER BY clause
     let order_clause = match (params.sort_field, params.sort_direction) {
-        (Some(SortField::Title), Some(SortDirection::Asc)) => "ORDER BY b.title ASC",
-        (Some(SortField::Title), Some(SortDirection::Desc)) => "ORDER BY b.title DESC",
-        (Some(SortField::ReleaseDate), Some(SortDirection::Asc)) => "ORDER BY b.date_published ASC",
-        (Some(SortField::ReleaseDate), Some(SortDirection::Desc)) => "ORDER BY b.date_published DESC",
-        (Some(SortField::DateAdded), Some(SortDirection::Asc)) => "ORDER BY lb.date_added ASC",
-        (Some(SortField::DateAdded), Some(SortDirection::Desc)) => "ORDER BY lb.date_added DESC",
-        (Some(SortField::Length), Some(SortDirection::Asc)) => "ORDER BY b.length_in_minutes ASC, b.title ASC",
-        (Some(SortField::Length), Some(SortDirection::Desc)) => "ORDER BY b.length_in_minutes DESC, b.title ASC",
+        (Some(SortField::Title), Some(SortDirection::Asc)) => "ORDER BY b.title ASC".to_string(),
+        (Some(SortField::Title), Some(SortDirection::Desc)) => "ORDER BY b.title DESC".to_string(),
+        (Some(SortField::ReleaseDate), Some(SortDirection::Asc)) => "ORDER BY b.date_published ASC".to_string(),
+        (Some(SortField::ReleaseDate), Some(SortDirection::Desc)) => "ORDER BY b.date_published DESC".to_string(),
+        (Some(SortField::DateAdded), Some(SortDirection::Asc)) => "ORDER BY lb.date_added ASC".to_string(),
+        (Some(SortField::DateAdded), Some(SortDirection::Desc)) => "ORDER BY lb.date_added DESC".to_string(),
+        (Some(SortField::Length), Some(SortDirection::Asc)) => "ORDER BY b.length_in_minutes ASC, b.title ASC".to_string(),
+        (Some(SortField::Length), Some(SortDirection::Desc)) => "ORDER BY b.length_in_minutes DESC, b.title ASC".to_string(),
+        (Some(SortField::Downloaded), direction) => {
+            let group_direction = direction.unwrap_or(SortDirection::Desc);
+            let field_direction = params
+                .downloaded_group_sort_direction
+                .unwrap_or(SortDirection::Asc);
+            let field = params.downloaded_group_sort_field.unwrap_or(SortField::Title);
+
+            format!(
+                "ORDER BY {}, {}",
+                downloaded_status_order_expression(group_direction),
+                grouped_order_expression(field, field_direction)
+            )
+        },
         (Some(SortField::Series), Some(SortDirection::Asc)) => {
-            "ORDER BY CASE WHEN book_series_first.series_name IS NULL THEN 1 ELSE 0 END, book_series_first.series_name ASC, book_series_first.series_sequence ASC"
+            "ORDER BY CASE WHEN book_series_first.series_name IS NULL THEN 1 ELSE 0 END, book_series_first.series_name ASC, book_series_first.series_sequence ASC".to_string()
         },
         (Some(SortField::Series), Some(SortDirection::Desc)) => {
-            "ORDER BY CASE WHEN book_series_first.series_name IS NULL THEN 1 ELSE 0 END, book_series_first.series_name DESC, book_series_first.series_sequence DESC"
+            "ORDER BY CASE WHEN book_series_first.series_name IS NULL THEN 1 ELSE 0 END, book_series_first.series_name DESC, book_series_first.series_sequence DESC".to_string()
         },
-        _ => "ORDER BY b.title ASC", // Default
+        _ => "ORDER BY b.title ASC".to_string(), // Default
     };
 
     // Build complete query
@@ -567,6 +615,12 @@ pub async fn list_books_with_filters(
             SELECT book_id, series_name, series_sequence
             FROM book_series
             WHERE rn = 1
+        ),
+        completed_downloads AS (
+            SELECT asin, MAX(completed_at) as completed_at
+            FROM DownloadTasks
+            WHERE status = 'completed' AND output_path != ''
+            GROUP BY asin
         )
         SELECT
             b.book_id,
@@ -608,6 +662,7 @@ pub async fn list_books_with_filters(
         LEFT JOIN book_narrators ON b.book_id = book_narrators.book_id
         LEFT JOIN book_publishers ON b.book_id = book_publishers.book_id
         LEFT JOIN book_series_first ON b.book_id = book_series_first.book_id
+        LEFT JOIN completed_downloads ON completed_downloads.asin = b.audible_product_id
         {}
         {}
         LIMIT ? OFFSET ?
@@ -1377,10 +1432,33 @@ pub async fn get_book_file_path(pool: &SqlitePool, asin: &str) -> Result<Option<
     Ok(file_path)
 }
 
+/// Get latest completed download file paths keyed by ASIN.
+pub async fn get_completed_download_paths(pool: &SqlitePool) -> Result<HashMap<String, String>> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        r#"
+        SELECT dt.asin, dt.output_path
+        FROM DownloadTasks dt
+        INNER JOIN (
+            SELECT asin, MAX(completed_at) AS completed_at
+            FROM DownloadTasks
+            WHERE status = 'completed' AND output_path != ''
+            GROUP BY asin
+        ) latest
+            ON latest.asin = dt.asin
+            AND latest.completed_at = dt.completed_at
+        WHERE dt.status = 'completed' AND dt.output_path != ''
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows.into_iter().collect())
+}
+
 /// Set the file path for a book by creating a manually completed download task.
 ///
 /// This allows users to mark a book as downloaded by associating it with an
-/// existing audio file on disk. Creates a download task with status "completed".
+/// existing audio file on disk. Creates or updates a completed download task.
 ///
 /// # Arguments
 /// * `pool` - Database connection pool
@@ -1397,8 +1475,40 @@ pub async fn set_book_file_path(
     file_path: &str,
 ) -> Result<String> {
     use uuid::Uuid;
-    let task_id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
+
+    let existing_task_id: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT task_id
+        FROM DownloadTasks
+        WHERE asin = ? AND status = 'completed'
+        ORDER BY completed_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(asin)
+    .fetch_optional(pool)
+    .await?;
+
+    if let Some(task_id) = existing_task_id {
+        sqlx::query(
+            r#"
+            UPDATE DownloadTasks
+            SET title = ?, output_path = ?, completed_at = ?
+            WHERE task_id = ?
+            "#,
+        )
+        .bind(title)
+        .bind(file_path)
+        .bind(&now)
+        .bind(&task_id)
+        .execute(pool)
+        .await?;
+
+        return Ok(task_id);
+    }
+
+    let task_id = Uuid::new_v4().to_string();
 
     sqlx::query(
         r#"
@@ -1585,6 +1695,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_set_book_file_path_updates_existing_completed_task() {
+        let db = Database::new_in_memory().await.expect("Failed to create database");
+
+        let task_id = set_book_file_path(db.pool(), "B012345680", "Test Book", "/books/old.m4b")
+            .await
+            .expect("Failed to set file path");
+
+        let updated_task_id =
+            set_book_file_path(db.pool(), "B012345680", "Test Book", "/books/new.m4b")
+                .await
+                .expect("Failed to update file path");
+
+        assert_eq!(task_id, updated_task_id);
+
+        let task_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM DownloadTasks WHERE asin = ?")
+            .bind("B012345680")
+            .fetch_one(db.pool())
+            .await
+            .expect("Failed to count download tasks");
+        assert_eq!(task_count, 1);
+
+        let file_path = get_book_file_path(db.pool(), "B012345680")
+            .await
+            .expect("Failed to get file path");
+        assert_eq!(file_path.as_deref(), Some("/books/new.m4b"));
+
+        let paths = get_completed_download_paths(db.pool())
+            .await
+            .expect("Failed to get completed paths");
+        assert_eq!(paths.get("B012345680").map(String::as_str), Some("/books/new.m4b"));
+    }
+
+    #[tokio::test]
     async fn test_list_books_with_filters_sorts_by_length() {
         let db = Database::new_in_memory().await.expect("Failed to create database");
 
@@ -1642,6 +1785,96 @@ mod tests {
         assert_eq!(
             descending.iter().map(|book| book.title.as_str()).collect::<Vec<_>>(),
             vec!["Long Book", "Medium Book", "Short Book"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_list_books_with_filters_sorts_by_downloaded_status() {
+        let db = Database::new_in_memory()
+            .await
+            .expect("Failed to create database");
+
+        let books = [
+            ("B000000001", "Missing Long", 300),
+            ("B000000002", "Downloaded Short", 30),
+            ("B000000003", "Missing Short", 60),
+            ("B000000004", "Downloaded Long", 240),
+        ];
+
+        for (asin, title, length_in_minutes) in books {
+            let mut book = NewBook::new(asin.to_string(), title.to_string(), "us".to_string());
+            book.length_in_minutes = length_in_minutes;
+
+            let book_id = insert_book(db.pool(), &book)
+                .await
+                .expect("Failed to insert book");
+
+            insert_library_book(
+                db.pool(),
+                &NewLibraryBook {
+                    book_id,
+                    account: "test@example.com".to_string(),
+                },
+            )
+            .await
+            .expect("Failed to insert library book");
+        }
+
+        set_book_file_path(
+            db.pool(),
+            "B000000002",
+            "Downloaded Short",
+            "/books/downloaded-short.m4b",
+        )
+        .await
+        .expect("Failed to mark book downloaded");
+
+        set_book_file_path(
+            db.pool(),
+            "B000000004",
+            "Downloaded Long",
+            "/books/downloaded-long.m4b",
+        )
+        .await
+        .expect("Failed to mark book downloaded");
+
+        let params = BookQueryParams {
+            sort_field: Some(SortField::Downloaded),
+            sort_direction: Some(SortDirection::Desc),
+            downloaded_group_sort_field: Some(SortField::Length),
+            downloaded_group_sort_direction: Some(SortDirection::Asc),
+            limit: 10,
+            offset: 0,
+            ..Default::default()
+        };
+
+        let downloaded_first = list_books_with_filters(db.pool(), &params)
+            .await
+            .expect("Failed to list books");
+
+        assert_eq!(
+            downloaded_first
+                .iter()
+                .map(|book| book.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Downloaded Short", "Downloaded Long", "Missing Short", "Missing Long"]
+        );
+
+        let params = BookQueryParams {
+            sort_direction: Some(SortDirection::Asc),
+            ..params
+        };
+
+        let downloaded_last = list_books_with_filters(db.pool(), &params)
+            .await
+            .expect("Failed to list books");
+
+        assert_eq!(
+            downloaded_last
+                .iter()
+                .map(|book| book.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Missing Short", "Missing Long", "Downloaded Short", "Downloaded Long"]
         );
     }
 }

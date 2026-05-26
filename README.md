@@ -39,6 +39,8 @@ No tracking. No analytics. No ads. No accounts required for LibriVox browsing. A
 
 **GitHub Releases**: Download the latest APK from [Releases](https://github.com/Promises/LibriSync/releases)
 
+**Looking for testers**: [Sign up for closed Google Play testing](https://github.com/Promises/LibriSync/issues/15)
+
 ---
 
 ## Development

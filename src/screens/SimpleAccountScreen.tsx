@@ -17,6 +17,7 @@ import {
   deleteAccount,
   scanDownloadDirectory,
   setDownloadDirectory,
+  copyTextToClipboard,
   SyncStats,
   cancelAllBackgroundTasks,
   scheduleLibrarySync,
@@ -193,6 +194,47 @@ export default function SimpleAccountScreen() {
     const minutes = Math.floor((seconds % 3600) / 60);
     if (hours > 0) return `${hours}h ${minutes}m`;
     return `${minutes}m`;
+  };
+
+  const getErrorMessage = (error: any, fallback: string): string => {
+    return error?.message || error?.rustError || fallback;
+  };
+
+  const getCopyableErrorText = (title: string, error: any, fallback: string): string => {
+    const message = getErrorMessage(error, fallback);
+    const details = [
+      title,
+      '',
+      `Message: ${message}`,
+      error?.rustError && error.rustError !== message ? `Rust error: ${error.rustError}` : null,
+      error?.stack ? `Stack:\n${error.stack}` : null,
+    ].filter(Boolean);
+
+    return details.join('\n\n');
+  };
+
+  const showCopyableErrorAlert = (title: string, error: any, fallback: string) => {
+    const message = getErrorMessage(error, fallback);
+    const copyText = getCopyableErrorText(title, error, fallback);
+
+    Alert.alert(
+      title,
+      message,
+      [
+        {
+          text: 'Copy Error',
+          onPress: () => {
+            try {
+              copyTextToClipboard(copyText);
+              Alert.alert('Copied', 'Error text copied to clipboard.');
+            } catch (copyError: any) {
+              Alert.alert('Copy Failed', copyError.message || 'Failed to copy error text.');
+            }
+          },
+        },
+        { text: 'OK', style: 'cancel' },
+      ]
+    );
   };
 
   const testConnection = async () => {
@@ -571,10 +613,7 @@ export default function SimpleAccountScreen() {
       );
     } catch (error: any) {
       console.error('Sync failed:', error);
-      Alert.alert(
-        'Sync Failed',
-        error.message || 'Failed to sync library from Audible'
-      );
+      showCopyableErrorAlert('Sync Failed', error, 'Failed to sync library from Audible');
     } finally {
       setIsSyncing(false);
     }

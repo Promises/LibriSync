@@ -4,12 +4,16 @@ const versionCode = Math.floor(Date.now() / 10000);
 
 // Use APP_VERSION from environment (set by CI/CD from git tag), or fallback to default
 const version = process.env.APP_VERSION || "0.0.4";
+const sideBySideDebug = process.env.EXPO_SIDE_BY_SIDE_DEBUG === "true";
+const appName = sideBySideDebug ? "LibriSync Debug" : "LibriSync";
+const androidPackage = sideBySideDebug ? "tech.henning.librisync.debug" : "tech.henning.librisync";
+const appVersion = sideBySideDebug ? `${version}-debug` : version;
 
 export default {
   expo: {
-    name: "LibriSync",
+    name: appName,
     slug: "librisync",
-    version: version,
+    version: appVersion,
     orientation: "portrait",
     icon: "./assets/icon.png",
     userInterfaceStyle: "dark",
@@ -28,7 +32,7 @@ export default {
         foregroundImage: "./assets/adaptive-icon.png",
         backgroundColor: "#5E81AC"
       },
-      package: "tech.henning.librisync",
+      package: androidPackage,
       versionCode: versionCode,
       edgeToEdgeEnabled: true,
       predictiveBackGestureEnabled: false,

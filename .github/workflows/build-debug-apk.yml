@@ -1,0 +1,90 @@
+name: Build Debug APK
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27b
+          link-to-sdk: true
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Android project
+        run: npx expo prebuild --platform android --clean
+        env:
+          EXPO_SIDE_BY_SIDE_DEBUG: "true"
+          GITHUB_RELEASE: "true"
+
+      - name: Build Rust Android libraries
+        run: npm run build:rust:android
+
+      - name: Build side-by-side debug APK
+        run: ./gradlew :app:assembleDebug
+        working-directory: android
+        env:
+          EXPO_SIDE_BY_SIDE_DEBUG: "true"
+          GITHUB_RELEASE: "true"
+
+      - name: Prepare APK
+        id: package
+        run: |
+          set -euo pipefail
+          short_sha="${GITHUB_SHA::7}"
+          tag="debug-${GITHUB_RUN_NUMBER}-${short_sha}"
+          mkdir -p release-assets
+          cp android/app/build/outputs/apk/debug/app-debug.apk "release-assets/librisync-debug-${short_sha}.apk"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "apk=release-assets/librisync-debug-${short_sha}.apk" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: librisync-debug-apk
+          path: ${{ steps.package.outputs.apk }}
+          retention-days: 30
+
+      - name: Create debug release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.package.outputs.tag }}
+          name: LibriSync Debug APK ${{ github.run_number }}
+          body: |
+            Manual debug APK build for `${{ github.ref_name }}` at `${{ github.sha }}`.
+
+            This APK uses application id `tech.henning.librisync.debug`, so it can be installed beside the regular LibriSync app.
+          files: ${{ steps.package.outputs.apk }}
+          prerelease: true
+          make_latest: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

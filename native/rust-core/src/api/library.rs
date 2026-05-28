@@ -80,6 +80,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use chrono::{DateTime, NaiveDate, Utc};
 
+fn null_to_default<'de, D, T>(deserializer: D) -> std::result::Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 // ============================================================================
 // API REQUEST/RESPONSE STRUCTURES
 // ============================================================================
@@ -150,7 +158,7 @@ impl Default for LibraryOptions {
 #[derive(Debug, Clone, Deserialize)]
 pub struct LibraryResponse {
     /// List of library items
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub items: Vec<LibraryItem>,
 
     /// Total number of items in library (optional - not always included)
@@ -238,20 +246,20 @@ pub struct LibraryItem {
     pub is_abridged: Option<bool>,
 
     /// Available audio codecs
-    #[serde(rename = "available_codecs", default)]
+    #[serde(rename = "available_codecs", default, deserialize_with = "null_to_default")]
     pub available_codecs: Vec<CodecInfo>,
 
     /// Asset details (includes is_spatial for Dolby Atmos)
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub asset_details: Vec<AssetDetail>,
 
     // === CONTRIBUTORS ===
     /// Authors
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub authors: Vec<Person>,
 
     /// Narrators
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub narrators: Vec<Person>,
 
     // === RATING ===
@@ -278,12 +286,12 @@ pub struct LibraryItem {
 
     // === CATEGORIES ===
     /// Category ladders (hierarchical category paths)
-    #[serde(rename = "category_ladders", default)]
+    #[serde(rename = "category_ladders", default, deserialize_with = "null_to_default")]
     pub category_ladders: Vec<CategoryLadder>,
 
     // === IMAGES ===
     /// Product images at various sizes
-    #[serde(rename = "product_images", default)]
+    #[serde(rename = "product_images", default, deserialize_with = "null_to_default")]
     pub product_images: HashMap<String, String>,
 
     // === SUPPLEMENTS ===
@@ -480,7 +488,7 @@ pub struct SeriesInfo {
 #[derive(Debug, Clone, Deserialize)]
 pub struct CategoryLadder {
     /// Ladder structure (array of category nodes)
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub ladder: Vec<CategoryNode>,
 }
 
@@ -488,8 +496,8 @@ pub struct CategoryLadder {
 #[derive(Debug, Clone, Deserialize)]
 pub struct CategoryNode {
     /// Category ID
-    #[serde(rename = "id")]
-    pub category_id: String,
+    #[serde(rename = "id", default)]
+    pub category_id: Option<String>,
 
     /// Category name
     #[serde(default)]
@@ -1570,6 +1578,33 @@ mod tests {
         let item: LibraryItem = serde_json::from_str(json).unwrap();
         assert_eq!(item.asin, "B002TEST");
         assert!(item.plans.is_none());
+    }
+
+    #[test]
+    fn test_library_item_nullable_collections() {
+        let json = r#"{
+            "items": [{
+                "asin": "B08KBQQD15",
+                "title": "Nullable Collections",
+                "purchase_date": "2024-01-01T00:00:00Z",
+                "available_codecs": null,
+                "asset_details": null,
+                "authors": null,
+                "narrators": null,
+                "category_ladders": null,
+                "product_images": null
+            }]
+        }"#;
+
+        let response: LibraryResponse = serde_json::from_str(json).unwrap();
+        let item = &response.items[0];
+        assert_eq!(item.asin, "B08KBQQD15");
+        assert!(item.available_codecs.is_empty());
+        assert!(item.asset_details.is_empty());
+        assert!(item.authors.is_empty());
+        assert!(item.narrators.is_empty());
+        assert!(item.category_ladders.is_empty());
+        assert!(item.product_images.is_empty());
     }
 
     #[test]

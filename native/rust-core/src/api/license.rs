@@ -461,6 +461,7 @@ impl KeyData {
     pub fn file_type(&self, drm_type: DrmType) -> FileType {
         match drm_type {
             DrmType::Widevine => FileType::Dash,
+            DrmType::Mpeg => FileType::Mp3,
             DrmType::Adrm => {
                 // AAX: 4-byte key, no IV
                 if self.key_part_1.len() == 4 && self.key_part_2.is_none() {
@@ -505,6 +506,25 @@ pub enum FileType {
 // ============================================================================
 
 impl AudibleClient {
+    fn download_license_request(quality: DownloadQuality, drm_type: DrmType) -> LicenseRequest {
+        LicenseRequest {
+            quality,
+            consumption_type: ConsumptionType::Download,
+            chapter_titles_type: Some(ChapterTitlesType::Tree),
+            request_spatial: Some(false),
+            aac_codec: Some(Codec::AacLc),
+            spatial_codec: Some(Codec::Ec3),
+            drm_type: Some(drm_type),
+        }
+    }
+
+    fn should_retry_license_as_mpeg(error: &LibationError) -> bool {
+        let message = error.to_string();
+        message.contains("Sable(AssetInfos)")
+            || message.contains("Unable to retrieve asset details")
+            || message.contains("non_audio asset")
+    }
+
     /// Request download license for an audiobook
     ///
     /// # Reference
@@ -591,26 +611,27 @@ impl AudibleClient {
         quality: DownloadQuality,
         prefer_widevine: bool,
     ) -> Result<DownloadLicense> {
-        // Build license request
-        // Reference: DownloadOptions.Factory.cs:59-84
-        let request = LicenseRequest {
-            quality,
-            consumption_type: ConsumptionType::Download,
-            chapter_titles_type: Some(ChapterTitlesType::Tree),
-            request_spatial: Some(false),
-            aac_codec: Some(Codec::AacLc),
-            spatial_codec: Some(Codec::Ec3),
-            // API requires drm_type to be specified
-            // Reference: DownloadOptions.Factory.cs:68-112
-            drm_type: Some(if prefer_widevine {
-                DrmType::Widevine
-            } else {
-                DrmType::Adrm // Default to Audible DRM (AAX/AAXC)
-            }),
+        let drm_type = if prefer_widevine {
+            DrmType::Widevine
+        } else {
+            DrmType::Adrm
         };
+        let request = Self::download_license_request(quality, drm_type);
 
-        // Request license
-        let license = self.get_download_license(asin, &request).await?;
+        // Podcast episodes are plain MP3 assets. Audible rejects ADRM for them
+        // with a Sable asset-details error, then accepts a Download+Mpeg request.
+        let license = match self.get_download_license(asin, &request).await {
+            Ok(license) => license,
+            Err(error)
+                if !prefer_widevine
+                    && drm_type == DrmType::Adrm
+                    && Self::should_retry_license_as_mpeg(&error) =>
+            {
+                let mpeg_request = Self::download_license_request(quality, DrmType::Mpeg);
+                self.get_download_license(asin, &mpeg_request).await?
+            }
+            Err(error) => return Err(error),
+        };
 
         // Extract download URL
         // Reference: DownloadOptions.cs:61-62
@@ -627,26 +648,30 @@ impl AudibleClient {
             // Structured voucher with key/iv fields (already decrypted)
             let key_data = KeyData::from_base64(&voucher.key, voucher.iv.as_deref())?;
             Some(vec![key_data])
-        } else if let Some(ref license_response) = license.license_response {
-            // For AAXC files, the license_response is AES-encrypted
-            // Need device info to decrypt
-            // Reference: ContentLicenseDtoV10.cs:13-14, 19-47
-            let account_lock = self.account();
-            let account = account_lock.lock().await;
-            let identity = account.identity.as_ref().ok_or_else(|| {
-                LibationError::InvalidState(
-                    "No identity in account - cannot decrypt license_response".to_string(),
-                )
-            })?;
+        } else if license.drm_type.is_encrypted() {
+            if let Some(ref license_response) = license.license_response {
+                // For AAXC files, the license_response is AES-encrypted
+                // Need device info to decrypt
+                // Reference: ContentLicenseDtoV10.cs:13-14, 19-47
+                let account_lock = self.account();
+                let account = account_lock.lock().await;
+                let identity = account.identity.as_ref().ok_or_else(|| {
+                    LibationError::InvalidState(
+                        "No identity in account - cannot decrypt license_response".to_string(),
+                    )
+                })?;
 
-            let key_data = KeyData::from_license_response(
-                license_response,
-                &identity.device_type,
-                &identity.device_serial_number,
-                &identity.amazon_account_id,
-                asin,
-            )?;
-            Some(vec![key_data])
+                let key_data = KeyData::from_license_response(
+                    license_response,
+                    &identity.device_type,
+                    &identity.device_serial_number,
+                    &identity.amazon_account_id,
+                    asin,
+                )?;
+                Some(vec![key_data])
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -713,6 +738,7 @@ impl AudibleClient {
         // No keys - check DRM type
         match license.drm_type {
             DrmType::Widevine => FileType::Dash,
+            DrmType::Mpeg => FileType::Mp3,
             DrmType::None => FileType::Mp3,
             _ => FileType::Unknown,
         }

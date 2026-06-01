@@ -17,7 +17,6 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-
 //! Library management and synchronization
 //!
 //! This module implements library sync functionality to retrieve and synchronize audiobook
@@ -68,17 +67,17 @@
 //! 5. Link categories via ladders
 //! 6. Mark absent books (removed from library)
 
-use crate::error::{LibationError, Result};
-use crate::api::client::AudibleClient;
 use crate::api::auth::Account;
-use crate::storage::Database;
+use crate::api::client::AudibleClient;
+use crate::error::{LibationError, Result};
 use crate::storage::models::{
-    Book, NewBook, NewLibraryBook, NewContributor, NewSeries, NewCategory, NewCategoryLadder,
-    ContentType, Role, LibraryBook,
+    Book, ContentType, LibraryBook, NewBook, NewCategory, NewCategoryLadder, NewContributor,
+    NewLibraryBook, NewSeries, Role,
 };
+use crate::storage::Database;
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use chrono::{DateTime, NaiveDate, Utc};
 
 fn null_to_default<'de, D, T>(deserializer: D) -> std::result::Result<T, D::Error>
 where
@@ -129,7 +128,7 @@ impl Default for LibraryOptions {
     /// Reference: ApplicationServices/LibraryCommands.cs:122-133
     fn default() -> Self {
         Self {
-            number_of_results_per_page: 50,  // Back to normal size
+            number_of_results_per_page: 50, // Back to normal size
             page_number: 1,
             purchased_after: None,
             response_groups: [
@@ -146,7 +145,8 @@ impl Default for LibraryOptions {
                 "pdf_url",
                 "origin_asin",
                 "is_finished",
-            ].join(","),
+            ]
+            .join(","),
             sort_by: "PurchaseDate".to_string(),
             image_sizes: Some("500,1215".to_string()),
         }
@@ -246,7 +246,11 @@ pub struct LibraryItem {
     pub is_abridged: Option<bool>,
 
     /// Available audio codecs
-    #[serde(rename = "available_codecs", default, deserialize_with = "null_to_default")]
+    #[serde(
+        rename = "available_codecs",
+        default,
+        deserialize_with = "null_to_default"
+    )]
     pub available_codecs: Vec<CodecInfo>,
 
     /// Asset details (includes is_spatial for Dolby Atmos)
@@ -286,12 +290,20 @@ pub struct LibraryItem {
 
     // === CATEGORIES ===
     /// Category ladders (hierarchical category paths)
-    #[serde(rename = "category_ladders", default, deserialize_with = "null_to_default")]
+    #[serde(
+        rename = "category_ladders",
+        default,
+        deserialize_with = "null_to_default"
+    )]
     pub category_ladders: Vec<CategoryLadder>,
 
     // === IMAGES ===
     /// Product images at various sizes
-    #[serde(rename = "product_images", default, deserialize_with = "null_to_default")]
+    #[serde(
+        rename = "product_images",
+        default,
+        deserialize_with = "null_to_default"
+    )]
     pub product_images: HashMap<String, String>,
 
     // === SUPPLEMENTS ===
@@ -362,11 +374,24 @@ impl LibraryItem {
         matches!(self.get_content_type(), ContentType::Parent)
     }
 
+    /// Podcast and periodical parents do not carry downloadable audio.
+    pub fn is_podcast_parent(&self) -> bool {
+        if self.is_series_parent() {
+            return true;
+        }
+
+        matches!(
+            self.content_delivery_type.as_deref(),
+            Some("Periodical") | Some("PodcastParent") | Some("PodcastSeries")
+        )
+    }
+
     /// Get picture ID (highest quality image)
     /// Reference: BookImporter.cs:156-160
     pub fn get_picture_id(&self) -> Option<String> {
         // Try to get largest image (1215, then 500)
-        self.product_images.get("1215")
+        self.product_images
+            .get("1215")
             .or_else(|| self.product_images.get("500"))
             .cloned()
     }
@@ -379,7 +404,9 @@ impl LibraryItem {
     /// Check if spatial audio (Dolby Atmos)
     /// Reference: BookImporter.cs:169
     pub fn is_spatial(&self) -> bool {
-        self.asset_details.iter().any(|a| a.is_spatial.unwrap_or(false))
+        self.asset_details
+            .iter()
+            .any(|a| a.is_spatial.unwrap_or(false))
     }
 
     /// Get publication date (tries multiple date fields)
@@ -631,11 +658,7 @@ impl AudibleClient {
     /// - API request fails
     /// - Database operations fail
     /// - Validation errors prevent import
-    pub async fn sync_library(
-        &mut self,
-        db: &Database,
-        account: &Account,
-    ) -> Result<SyncStats> {
+    pub async fn sync_library(&mut self, db: &Database, account: &Account) -> Result<SyncStats> {
         let mut stats = SyncStats::new();
 
         // Fetch all library items from API
@@ -650,14 +673,18 @@ impl AudibleClient {
         }
 
         // Import items into database
-        let (new_count, updated_count, errors) = self.import_items_to_db(db, &items, &account.account_id).await?;
+        let (new_count, updated_count, errors) = self
+            .import_items_to_db(db, &items, &account.account_id)
+            .await?;
 
         stats.books_added = new_count;
         stats.books_updated = updated_count;
         stats.errors = errors;
 
         // Mark absent books (removed from library)
-        let absent_count = self.mark_absent_books(db, &items, &account.account_id).await?;
+        let absent_count = self
+            .mark_absent_books(db, &items, &account.account_id)
+            .await?;
         stats.books_absent = absent_count;
 
         Ok(stats)
@@ -700,9 +727,7 @@ impl AudibleClient {
         let mut options = LibraryOptions::default();
         options.page_number = page;
 
-        let response: LibraryResponse = self
-            .get_with_query("/1.0/library", &options)
-            .await?;
+        let response: LibraryResponse = self.get_with_query("/1.0/library", &options).await?;
 
         stats.total_items = response.items.len() as i32;
 
@@ -722,8 +747,9 @@ impl AudibleClient {
         }
 
         // Import items into database
-        let (new_count, updated_count, errors) =
-            self.import_items_to_db(db, &response.items, &account.account_id).await?;
+        let (new_count, updated_count, errors) = self
+            .import_items_to_db(db, &response.items, &account.account_id)
+            .await?;
 
         stats.books_added = new_count;
         stats.books_updated = updated_count;
@@ -733,6 +759,107 @@ impl AudibleClient {
         // Individual pages don't mark absent books
 
         Ok(stats)
+    }
+
+    /// Fetch and import one page of episodes for a podcast or periodical parent.
+    pub async fn sync_podcast_episodes_page(
+        &self,
+        db: &Database,
+        account: &Account,
+        parent_asin: &str,
+        offset: i32,
+        limit: i32,
+    ) -> Result<SyncStats> {
+        let mut stats = SyncStats::new();
+        let child_asins = self.fetch_podcast_episode_asins(parent_asin).await?;
+
+        stats.total_library_count = child_asins.len() as i32;
+
+        if child_asins.is_empty() {
+            return Ok(stats);
+        }
+
+        let page_offset = offset.max(0) as usize;
+        if page_offset >= child_asins.len() {
+            return Ok(stats);
+        }
+
+        let page_limit = limit.clamp(1, 100) as usize;
+        let page_end = (page_offset + page_limit).min(child_asins.len());
+        let page_asins = child_asins[page_offset..page_end].to_vec();
+
+        stats.total_items = page_asins.len() as i32;
+        stats.has_more = page_end < child_asins.len();
+
+        let new_count = self
+            .import_episodes(db, parent_asin, &page_asins, &account.account_id)
+            .await?;
+
+        stats.books_added = new_count;
+        stats.books_updated = stats.total_items.saturating_sub(new_count);
+
+        Ok(stats)
+    }
+
+    async fn fetch_podcast_episode_asins(&self, parent_asin: &str) -> Result<Vec<String>> {
+        let response_groups = "relationships,product_desc,media,product_extended_attrs";
+        let endpoint = format!(
+            "/1.0/catalog/products/{}?response_groups={}&image_sizes=500",
+            parent_asin,
+            urlencoding::encode(response_groups)
+        );
+        let response: serde_json::Value = self.get(&endpoint).await?;
+        let relationships = response
+            .get("product")
+            .and_then(|product| product.get("relationships"))
+            .and_then(|relationships| relationships.as_array());
+
+        let Some(relationships) = relationships else {
+            return Ok(Vec::new());
+        };
+
+        let mut seen = HashSet::new();
+        let mut child_asins: Vec<(String, i32)> = Vec::new();
+
+        for relationship in relationships {
+            let relationship_to_product = relationship
+                .get("relationship_to_product")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let relationship_type = relationship
+                .get("relationship_type")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+
+            let is_child = relationship_to_product.eq_ignore_ascii_case("child")
+                || relationship_type.eq_ignore_ascii_case("episode");
+
+            if !is_child {
+                continue;
+            }
+
+            let Some(asin) = relationship.get("asin").and_then(|value| value.as_str()) else {
+                continue;
+            };
+
+            if asin.is_empty() || asin == parent_asin || !seen.insert(asin.to_string()) {
+                continue;
+            }
+
+            let sort = relationship
+                .get("sort")
+                .and_then(|value| {
+                    value
+                        .as_i64()
+                        .or_else(|| value.as_str().and_then(|text| text.parse::<i64>().ok()))
+                })
+                .unwrap_or(0) as i32;
+            child_asins.push((asin.to_string(), sort));
+        }
+
+        child_asins.sort_by(|left, right| right.1.cmp(&left.1));
+
+        Ok(child_asins.into_iter().map(|(asin, _sort)| asin).collect())
     }
 
     /// Fetch all library items from Audible API with pagination
@@ -762,9 +889,7 @@ impl AudibleClient {
 
         // Fetch first page
         options.page_number = 1;
-        let first_response: LibraryResponse = self
-            .get_with_query("/1.0/library", &options)
-            .await?;
+        let first_response: LibraryResponse = self.get_with_query("/1.0/library", &options).await?;
 
         all_items.extend(first_response.items);
 
@@ -776,9 +901,8 @@ impl AudibleClient {
             // Fetch remaining pages
             for page_num in 2..=total_pages {
                 options.page_number = page_num;
-                let response: LibraryResponse = self
-                    .get_with_query("/1.0/library", &options)
-                    .await?;
+                let response: LibraryResponse =
+                    self.get_with_query("/1.0/library", &options).await?;
 
                 all_items.extend(response.items);
             }
@@ -791,9 +915,8 @@ impl AudibleClient {
 
             loop {
                 options.page_number = page_num;
-                let response: LibraryResponse = self
-                    .get_with_query("/1.0/library", &options)
-                    .await?;
+                let response: LibraryResponse =
+                    self.get_with_query("/1.0/library", &options).await?;
 
                 if response.items.is_empty() {
                     break;
@@ -845,18 +968,33 @@ impl AudibleClient {
         for item in items {
             for author in &item.authors {
                 if !contributor_cache.contains_key(&author.name) {
-                    match self.upsert_contributor(db, &author.name, author.asin.as_deref()).await {
-                        Ok(id) => { contributor_cache.insert(author.name.clone(), id); },
-                        Err(e) => errors.push(format!("Failed to import author '{}': {}", author.name, e)),
+                    match self
+                        .upsert_contributor(db, &author.name, author.asin.as_deref())
+                        .await
+                    {
+                        Ok(id) => {
+                            contributor_cache.insert(author.name.clone(), id);
+                        }
+                        Err(e) => {
+                            errors.push(format!("Failed to import author '{}': {}", author.name, e))
+                        }
                     }
                 }
             }
 
             for narrator in &item.narrators {
                 if !contributor_cache.contains_key(&narrator.name) {
-                    match self.upsert_contributor(db, &narrator.name, narrator.asin.as_deref()).await {
-                        Ok(id) => { contributor_cache.insert(narrator.name.clone(), id); },
-                        Err(e) => errors.push(format!("Failed to import narrator '{}': {}", narrator.name, e)),
+                    match self
+                        .upsert_contributor(db, &narrator.name, narrator.asin.as_deref())
+                        .await
+                    {
+                        Ok(id) => {
+                            contributor_cache.insert(narrator.name.clone(), id);
+                        }
+                        Err(e) => errors.push(format!(
+                            "Failed to import narrator '{}': {}",
+                            narrator.name, e
+                        )),
                     }
                 }
             }
@@ -864,8 +1002,11 @@ impl AudibleClient {
             if let Some(ref publisher) = item.publisher {
                 if !contributor_cache.contains_key(publisher) {
                     match self.upsert_contributor(db, publisher, None).await {
-                        Ok(id) => { contributor_cache.insert(publisher.clone(), id); },
-                        Err(e) => errors.push(format!("Failed to import publisher '{}': {}", publisher, e)),
+                        Ok(id) => {
+                            contributor_cache.insert(publisher.clone(), id);
+                        }
+                        Err(e) => errors
+                            .push(format!("Failed to import publisher '{}': {}", publisher, e)),
                     }
                 }
             }
@@ -876,9 +1017,17 @@ impl AudibleClient {
             if let Some(series_list) = &item.series {
                 for series_info in series_list {
                     if !series_cache.contains_key(&series_info.series_id) {
-                        match self.upsert_series(db, &series_info.series_id, series_info.title.as_deref()).await {
-                            Ok(id) => { series_cache.insert(series_info.series_id.clone(), id); },
-                            Err(e) => errors.push(format!("Failed to import series '{}': {}", series_info.series_id, e)),
+                        match self
+                            .upsert_series(db, &series_info.series_id, series_info.title.as_deref())
+                            .await
+                        {
+                            Ok(id) => {
+                                series_cache.insert(series_info.series_id.clone(), id);
+                            }
+                            Err(e) => errors.push(format!(
+                                "Failed to import series '{}': {}",
+                                series_info.series_id, e
+                            )),
                         }
                     }
                 }
@@ -887,21 +1036,299 @@ impl AudibleClient {
 
         // Import books and link relationships
         for item in items {
-            match self.import_book(db, item, account_id, &contributor_cache, &series_cache).await {
+            match self
+                .import_book(db, item, account_id, &contributor_cache, &series_cache)
+                .await
+            {
                 Ok(is_new) => {
                     if is_new {
                         new_count += 1;
                     } else {
                         updated_count += 1;
                     }
-                },
+                }
                 Err(e) => {
                     errors.push(format!("Failed to import book '{}': {}", item.asin, e));
                 }
             }
         }
 
+        for item in items {
+            if !item.is_podcast_parent() {
+                continue;
+            }
+
+            let child_asins: Vec<String> = item
+                .relationships
+                .as_ref()
+                .map(|relationships| {
+                    relationships
+                        .iter()
+                        .filter(|relationship| {
+                            relationship
+                                .relationship_to_product
+                                .as_deref()
+                                .map(|value| value.eq_ignore_ascii_case("child"))
+                                .unwrap_or(false)
+                        })
+                        .map(|relationship| relationship.asin.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            if child_asins.is_empty() {
+                continue;
+            }
+
+            match self
+                .import_episodes(db, &item.asin, &child_asins, account_id)
+                .await
+            {
+                Ok(count) => new_count += count,
+                Err(e) => errors.push(format!(
+                    "Failed to import episodes for '{}': {}",
+                    item.asin, e
+                )),
+            }
+        }
+
         Ok((new_count, updated_count, errors))
+    }
+
+    async fn import_episodes(
+        &self,
+        db: &Database,
+        parent_asin: &str,
+        child_asins: &[String],
+        account_id: &str,
+    ) -> Result<i32> {
+        let mut new_count = 0;
+
+        for chunk in child_asins.chunks(crate::api::client::BATCH_SIZE) {
+            let mut products = self.get_catalog_products_batch(chunk.to_vec()).await?;
+            let mut loaded_asins: HashSet<String> = products
+                .iter()
+                .map(|product| product.asin.clone())
+                .collect();
+
+            let missing_asins: Vec<String> = chunk
+                .iter()
+                .filter(|asin| !loaded_asins.contains(*asin))
+                .cloned()
+                .collect();
+
+            if !missing_asins.is_empty() {
+                use futures_util::stream::{self, StreamExt};
+
+                let fallback_products = stream::iter(missing_asins)
+                    .map(|asin| async move {
+                        let result = self.get_catalog_product(&asin).await;
+                        (asin, result)
+                    })
+                    .buffer_unordered(8)
+                    .collect::<Vec<_>>()
+                    .await;
+
+                for (asin, result) in fallback_products {
+                    match result {
+                        Ok(product) => {
+                            loaded_asins.insert(product.asin.clone());
+                            products.push(product);
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "Warning: Failed to fetch podcast episode '{}': {}",
+                                asin, error
+                            );
+                        }
+                    }
+                }
+            }
+
+            for product in &products {
+                if self
+                    .import_episode(db, product, parent_asin, account_id)
+                    .await?
+                {
+                    new_count += 1;
+                }
+            }
+        }
+
+        Ok(new_count)
+    }
+
+    async fn import_episode(
+        &self,
+        db: &Database,
+        product: &crate::api::content::CatalogProduct,
+        parent_asin: &str,
+        account_id: &str,
+    ) -> Result<bool> {
+        let pool = db.pool();
+
+        let existing: Option<(i64,)> =
+            sqlx::query_as("SELECT book_id FROM Books WHERE audible_product_id = ?")
+                .bind(&product.asin)
+                .fetch_optional(pool)
+                .await?;
+        let is_new = existing.is_none();
+
+        let description = product.publisher_summary.as_deref().unwrap_or("");
+        let is_abridged = product.format_type.eq_ignore_ascii_case("abridged");
+        let date_published = product
+            .release_date
+            .or_else(|| product.publication_datetime.map(|dt| dt.date_naive()));
+        let picture = product
+            .product_images
+            .as_ref()
+            .and_then(|images| images.get("500").cloned());
+        let rating_overall = product
+            .rating
+            .as_ref()
+            .and_then(|rating| rating.overall_distribution.as_ref())
+            .map(|distribution| distribution.average_rating)
+            .unwrap_or(0.0);
+        let locale = if product.language.is_empty() {
+            "en_US"
+        } else {
+            product.language.as_str()
+        };
+
+        let book_id = match existing {
+            Some((id,)) => {
+                sqlx::query(
+                    r#"
+                    UPDATE Books
+                    SET title = ?, subtitle = ?, description = ?, length_in_minutes = ?,
+                        content_type = ?, picture_id = ?, picture_large = ?, is_abridged = ?,
+                        date_published = ?, language = ?, rating_overall = ?,
+                        is_downloadable = 1, origin_asin = ?, episode_number = ?,
+                        content_delivery_type = 'PodcastEpisode', updated_at = datetime('now')
+                    WHERE book_id = ?
+                    "#,
+                )
+                .bind(&product.title)
+                .bind(&product.subtitle)
+                .bind(description)
+                .bind(product.runtime_length_min)
+                .bind(ContentType::Episode as i32)
+                .bind(&picture)
+                .bind(&picture)
+                .bind(is_abridged)
+                .bind(date_published)
+                .bind(locale)
+                .bind(rating_overall)
+                .bind(parent_asin)
+                .bind(product.episode_number)
+                .bind(id)
+                .execute(pool)
+                .await?;
+                id
+            }
+            None => {
+                let result = sqlx::query(
+                    r#"
+                    INSERT INTO Books (
+                        audible_product_id, title, subtitle, description, length_in_minutes,
+                        content_type, locale, picture_id, picture_large, is_abridged, is_spatial,
+                        date_published, language, rating_overall, rating_performance, rating_story,
+                        pdf_url, is_finished, is_downloadable, is_ayce, origin_asin, episode_number,
+                        content_delivery_type, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 0, 0, NULL, 0, 1, 0, ?, ?, 'PodcastEpisode', datetime('now'), datetime('now'))
+                    "#,
+                )
+                .bind(&product.asin)
+                .bind(&product.title)
+                .bind(&product.subtitle)
+                .bind(description)
+                .bind(product.runtime_length_min)
+                .bind(ContentType::Episode as i32)
+                .bind(locale)
+                .bind(&picture)
+                .bind(&picture)
+                .bind(is_abridged)
+                .bind(date_published)
+                .bind(locale)
+                .bind(rating_overall)
+                .bind(parent_asin)
+                .bind(product.episode_number)
+                .execute(pool)
+                .await?;
+                result.last_insert_rowid()
+            }
+        };
+
+        let date_added = product
+            .publication_datetime
+            .unwrap_or_else(chrono::Utc::now);
+        self.upsert_library_book(db, book_id, account_id, &date_added)
+            .await?;
+
+        let user_item_exists: Option<(i64,)> =
+            sqlx::query_as("SELECT book_id FROM UserDefinedItems WHERE book_id = ?")
+                .bind(book_id)
+                .fetch_optional(pool)
+                .await?;
+
+        if user_item_exists.is_none() {
+            sqlx::query(
+                r#"
+                INSERT INTO UserDefinedItems (
+                    book_id, tags, user_rating_overall, user_rating_performance, user_rating_story,
+                    book_status, pdf_status, is_finished
+                )
+                VALUES (?, '', 0, 0, 0, 0, NULL, 0)
+                "#,
+            )
+            .bind(book_id)
+            .execute(pool)
+            .await?;
+        }
+
+        sqlx::query("DELETE FROM BookContributors WHERE book_id = ?")
+            .bind(book_id)
+            .execute(pool)
+            .await?;
+
+        for (order, author) in product.authors.iter().enumerate() {
+            let contributor_id = self
+                .upsert_contributor(db, &author.name, Some(author.asin.as_str()))
+                .await?;
+            sqlx::query(
+                r#"INSERT OR IGNORE INTO BookContributors (book_id, contributor_id, role, "order") VALUES (?, ?, ?, ?)"#,
+            )
+            .bind(book_id)
+            .bind(contributor_id)
+            .bind(Role::Author as i32)
+            .bind(order as i16)
+            .execute(pool)
+            .await?;
+        }
+
+        let narrators = if product.narrators.is_empty() {
+            &product.authors
+        } else {
+            &product.narrators
+        };
+
+        for (order, narrator) in narrators.iter().enumerate() {
+            let contributor_id = self
+                .upsert_contributor(db, &narrator.name, Some(narrator.asin.as_str()))
+                .await?;
+            sqlx::query(
+                r#"INSERT OR IGNORE INTO BookContributors (book_id, contributor_id, role, "order") VALUES (?, ?, ?, ?)"#,
+            )
+            .bind(book_id)
+            .bind(contributor_id)
+            .bind(Role::Narrator as i32)
+            .bind(order as i16)
+            .execute(pool)
+            .await?;
+        }
+
+        Ok(is_new)
     }
 
     /// Import a single book into database
@@ -929,19 +1356,18 @@ impl AudibleClient {
         let pool = db.pool();
 
         // Check if book exists
-        let existing: Option<(i64,)> = sqlx::query_as(
-            "SELECT book_id FROM Books WHERE audible_product_id = ?"
-        )
-        .bind(&item.asin)
-        .fetch_optional(pool)
-        .await?;
+        let existing: Option<(i64,)> =
+            sqlx::query_as("SELECT book_id FROM Books WHERE audible_product_id = ?")
+                .bind(&item.asin)
+                .fetch_optional(pool)
+                .await?;
 
         let (book_id, is_new) = match existing {
             Some((id,)) => {
                 // Update existing book
                 self.update_book(db, id, item).await?;
                 (id, false)
-            },
+            }
             None => {
                 // Create new book
                 let id = self.create_book(db, item).await?;
@@ -950,10 +1376,12 @@ impl AudibleClient {
         };
 
         // Upsert LibraryBook record
-        self.upsert_library_book(db, book_id, account_id, &item.purchase_date).await?;
+        self.upsert_library_book(db, book_id, account_id, &item.purchase_date)
+            .await?;
 
         // Link contributors (authors, narrators, publisher)
-        self.link_contributors(db, book_id, item, contributor_cache).await?;
+        self.link_contributors(db, book_id, item, contributor_cache)
+            .await?;
 
         // Link series
         self.link_series(db, book_id, item, series_cache).await?;
@@ -1002,7 +1430,11 @@ impl AudibleClient {
         // Extract new fields
         let pdf_url = item.pdf_url.as_deref();
         let is_finished = item.is_finished.unwrap_or(false);
-        let is_downloadable = item.is_downloadable.unwrap_or(true);
+        let is_downloadable = if item.is_podcast_parent() {
+            false
+        } else {
+            item.is_downloadable.unwrap_or(true)
+        };
         let is_ayce = item.is_ayce.unwrap_or(false);
         let origin_asin = item.origin_asin.as_deref();
         let episode_number = item.episode_number;
@@ -1082,7 +1514,11 @@ impl AudibleClient {
         // Extract new fields
         let pdf_url = item.pdf_url.as_deref();
         let is_finished = item.is_finished.unwrap_or(false);
-        let is_downloadable = item.is_downloadable.unwrap_or(true);
+        let is_downloadable = if item.is_podcast_parent() {
+            false
+        } else {
+            item.is_downloadable.unwrap_or(true)
+        };
         let is_ayce = item.is_ayce.unwrap_or(false);
         let origin_asin = item.origin_asin.as_deref();
         let episode_number = item.episode_number;
@@ -1098,7 +1534,7 @@ impl AudibleClient {
                 origin_asin = ?, episode_number = ?, content_delivery_type = ?,
                 updated_at = datetime('now')
             WHERE book_id = ?
-            "#
+            "#,
         )
         .bind(&item.title)
         .bind(&item.subtitle)
@@ -1139,29 +1575,43 @@ impl AudibleClient {
     ) -> Result<()> {
         let pool = db.pool();
 
-        // Check if LibraryBook exists
-        let exists: Option<(bool,)> = sqlx::query_as(
-            "SELECT is_deleted FROM LibraryBooks WHERE book_id = ?"
+        sqlx::query(
+            r#"
+            INSERT INTO BookAccounts (book_id, account, date_added, is_deleted, absent_from_last_scan)
+            VALUES (?, ?, ?, 0, 0)
+            ON CONFLICT(book_id, account) DO UPDATE SET
+                date_added = excluded.date_added,
+                is_deleted = 0,
+                absent_from_last_scan = 0
+            "#
         )
         .bind(book_id)
-        .fetch_optional(pool)
+        .bind(account_id)
+        .bind(date_added)
+        .execute(pool)
         .await?;
+
+        // Check if LibraryBook exists
+        let exists: Option<(bool,)> =
+            sqlx::query_as("SELECT is_deleted FROM LibraryBooks WHERE book_id = ?")
+                .bind(book_id)
+                .fetch_optional(pool)
+                .await?;
 
         match exists {
             Some(_) => {
-                // Update existing - mark as not absent, not deleted
+                // Keep the legacy single-account row alive without replacing ownership.
                 sqlx::query(
                     r#"
                     UPDATE LibraryBooks
-                    SET account = ?, absent_from_last_scan = 0, is_deleted = 0
+                    SET absent_from_last_scan = 0, is_deleted = 0
                     WHERE book_id = ?
-                    "#
+                    "#,
                 )
-                .bind(account_id)
                 .bind(book_id)
                 .execute(pool)
                 .await?;
-            },
+            }
             None => {
                 // Insert new LibraryBook
                 sqlx::query(
@@ -1207,7 +1657,7 @@ impl AudibleClient {
                     r#"
                     INSERT INTO BookContributors (book_id, contributor_id, role, "order")
                     VALUES (?, ?, ?, ?)
-                    "#
+                    "#,
                 )
                 .bind(book_id)
                 .bind(contributor_id)
@@ -1232,7 +1682,7 @@ impl AudibleClient {
                     r#"
                     INSERT INTO BookContributors (book_id, contributor_id, role, "order")
                     VALUES (?, ?, ?, ?)
-                    "#
+                    "#,
                 )
                 .bind(book_id)
                 .bind(contributor_id)
@@ -1250,7 +1700,7 @@ impl AudibleClient {
                     r#"
                     INSERT INTO BookContributors (book_id, contributor_id, role, "order")
                     VALUES (?, ?, ?, 0)
-                    "#
+                    "#,
                 )
                 .bind(book_id)
                 .bind(contributor_id)
@@ -1293,7 +1743,7 @@ impl AudibleClient {
                         r#"
                         INSERT INTO SeriesBooks (series_id, book_id, "order", "index")
                         VALUES (?, ?, ?, ?)
-                        "#
+                        "#,
                     )
                     .bind(series_id)
                     .bind(book_id)
@@ -1321,12 +1771,11 @@ impl AudibleClient {
         let pool = db.pool();
 
         // Check if UserDefinedItem exists
-        let exists: Option<(i64,)> = sqlx::query_as(
-            "SELECT book_id FROM UserDefinedItems WHERE book_id = ?"
-        )
-        .bind(book_id)
-        .fetch_optional(pool)
-        .await?;
+        let exists: Option<(i64,)> =
+            sqlx::query_as("SELECT book_id FROM UserDefinedItems WHERE book_id = ?")
+                .bind(book_id)
+                .fetch_optional(pool)
+                .await?;
 
         if exists.is_none() {
             // Create new UserDefinedItem
@@ -1337,7 +1786,7 @@ impl AudibleClient {
                     book_status, pdf_status, is_finished
                 )
                 VALUES (?, '', 0, 0, 0, 0, NULL, ?)
-                "#
+                "#,
             )
             .bind(book_id)
             .bind(item.is_finished.unwrap_or(false))
@@ -1375,22 +1824,26 @@ impl AudibleClient {
     }
 
     /// Upsert contributor
-    async fn upsert_contributor(&self, db: &Database, name: &str, asin: Option<&str>) -> Result<i64> {
+    async fn upsert_contributor(
+        &self,
+        db: &Database,
+        name: &str,
+        asin: Option<&str>,
+    ) -> Result<i64> {
         let pool = db.pool();
 
         // Check if exists
-        let existing: Option<(i64,)> = sqlx::query_as(
-            "SELECT contributor_id FROM Contributors WHERE name = ?"
-        )
-        .bind(name)
-        .fetch_optional(pool)
-        .await?;
+        let existing: Option<(i64,)> =
+            sqlx::query_as("SELECT contributor_id FROM Contributors WHERE name = ?")
+                .bind(name)
+                .fetch_optional(pool)
+                .await?;
 
         match existing {
             Some((id,)) => Ok(id),
             None => {
                 let result = sqlx::query(
-                    "INSERT INTO Contributors (name, audible_contributor_id) VALUES (?, ?)"
+                    "INSERT INTO Contributors (name, audible_contributor_id) VALUES (?, ?)",
                 )
                 .bind(name)
                 .bind(asin)
@@ -1403,16 +1856,20 @@ impl AudibleClient {
     }
 
     /// Upsert series
-    async fn upsert_series(&self, db: &Database, series_id: &str, name: Option<&str>) -> Result<i64> {
+    async fn upsert_series(
+        &self,
+        db: &Database,
+        series_id: &str,
+        name: Option<&str>,
+    ) -> Result<i64> {
         let pool = db.pool();
 
         // Check if exists
-        let existing: Option<(i64,)> = sqlx::query_as(
-            "SELECT series_id FROM Series WHERE audible_series_id = ?"
-        )
-        .bind(series_id)
-        .fetch_optional(pool)
-        .await?;
+        let existing: Option<(i64,)> =
+            sqlx::query_as("SELECT series_id FROM Series WHERE audible_series_id = ?")
+                .bind(series_id)
+                .fetch_optional(pool)
+                .await?;
 
         match existing {
             Some((id,)) => {
@@ -1425,15 +1882,14 @@ impl AudibleClient {
                         .await?;
                 }
                 Ok(id)
-            },
+            }
             None => {
-                let result = sqlx::query(
-                    "INSERT INTO Series (audible_series_id, name) VALUES (?, ?)"
-                )
-                .bind(series_id)
-                .bind(name)
-                .execute(pool)
-                .await?;
+                let result =
+                    sqlx::query("INSERT INTO Series (audible_series_id, name) VALUES (?, ?)")
+                        .bind(series_id)
+                        .bind(name)
+                        .execute(pool)
+                        .await?;
 
                 Ok(result.last_insert_rowid())
             }
@@ -1445,12 +1901,11 @@ impl AudibleClient {
         let pool = db.pool();
 
         // Check if exists
-        let existing: Option<(i64,)> = sqlx::query_as(
-            "SELECT supplement_id FROM Supplements WHERE book_id = ?"
-        )
-        .bind(book_id)
-        .fetch_optional(pool)
-        .await?;
+        let existing: Option<(i64,)> =
+            sqlx::query_as("SELECT supplement_id FROM Supplements WHERE book_id = ?")
+                .bind(book_id)
+                .fetch_optional(pool)
+                .await?;
 
         match existing {
             Some((id,)) => {
@@ -1459,7 +1914,7 @@ impl AudibleClient {
                     .bind(id)
                     .execute(pool)
                     .await?;
-            },
+            }
             None => {
                 sqlx::query("INSERT INTO Supplements (book_id, url) VALUES (?, ?)")
                     .bind(book_id)
@@ -1484,17 +1939,33 @@ impl AudibleClient {
     ) -> Result<i32> {
         let pool = db.pool();
 
-        // Get all ASINs from current sync
-        let current_asins: HashSet<String> = items.iter().map(|i| i.asin.clone()).collect();
+        // Get all ASINs from current sync, including podcast children referenced by parents.
+        let mut current_asins: HashSet<String> = HashSet::new();
+        for item in items {
+            current_asins.insert(item.asin.clone());
+
+            if let Some(relationships) = &item.relationships {
+                for relationship in relationships {
+                    if relationship
+                        .relationship_to_product
+                        .as_deref()
+                        .map(|value| value.eq_ignore_ascii_case("child"))
+                        .unwrap_or(false)
+                    {
+                        current_asins.insert(relationship.asin.clone());
+                    }
+                }
+            }
+        }
 
         // Get all ASINs in database for this account
         let db_books: Vec<(i64, String)> = sqlx::query_as(
             r#"
             SELECT b.book_id, b.audible_product_id
             FROM Books b
-            INNER JOIN LibraryBooks lb ON lb.book_id = b.book_id
-            WHERE lb.account = ? AND lb.is_deleted = 0
-            "#
+            INNER JOIN BookAccounts ba ON ba.book_id = b.book_id
+            WHERE ba.account = ? AND ba.is_deleted = 0
+            "#,
         )
         .bind(account_id)
         .fetch_all(pool)
@@ -1504,8 +1975,9 @@ impl AudibleClient {
         let mut absent_count = 0;
         for (book_id, asin) in db_books {
             if !current_asins.contains(&asin) {
-                sqlx::query("UPDATE LibraryBooks SET absent_from_last_scan = 1 WHERE book_id = ?")
+                sqlx::query("UPDATE BookAccounts SET absent_from_last_scan = 1 WHERE book_id = ? AND account = ?")
                     .bind(book_id)
+                    .bind(account_id)
                     .execute(pool)
                     .await?;
 
@@ -1527,7 +1999,10 @@ impl AudibleClient {
 /// Falls back to 0.0 if parsing fails.
 fn parse_series_index(order: &str) -> f32 {
     // Try to extract first number from string
-    let numbers: String = order.chars().filter(|c| c.is_ascii_digit() || *c == '.').collect();
+    let numbers: String = order
+        .chars()
+        .filter(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
     numbers.parse::<f32>().unwrap_or(0.0)
 }
 

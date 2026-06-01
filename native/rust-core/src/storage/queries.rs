@@ -17,7 +17,6 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-
 //! Database query functions
 //!
 //! This module implements repository pattern for database operations.
@@ -136,13 +135,11 @@ pub async fn update_book(pool: &SqlitePool, book: &Book) -> Result<()> {
 
 /// List all books with pagination (basic - no relations)
 pub async fn list_books(pool: &SqlitePool, limit: i64, offset: i64) -> Result<Vec<Book>> {
-    let books = sqlx::query_as::<_, Book>(
-        "SELECT * FROM Books ORDER BY title LIMIT ? OFFSET ?",
-    )
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await?;
+    let books = sqlx::query_as::<_, Book>("SELECT * FROM Books ORDER BY title LIMIT ? OFFSET ?")
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await?;
 
     Ok(books)
 }
@@ -189,6 +186,8 @@ pub struct BookWithRelations {
     pub series_name: Option<String>,
     pub series_sequence: Option<f32>,
     pub purchase_date: Option<String>,
+    #[sqlx(default)]
+    pub account: Option<String>,
 }
 
 impl BookWithRelations {
@@ -196,11 +195,15 @@ impl BookWithRelations {
     pub fn to_audio_metadata(&self) -> crate::audio::metadata::AudioMetadata {
         use crate::audio::metadata::{AudioMetadata, SeriesInfo};
 
-        let authors = self.authors_str.as_ref()
+        let authors = self
+            .authors_str
+            .as_ref()
             .map(|s| s.split(", ").map(String::from).collect())
             .unwrap_or_else(Vec::new);
 
-        let narrators = self.narrators_str.as_ref()
+        let narrators = self
+            .narrators_str
+            .as_ref()
             .map(|s| s.split(", ").map(String::from).collect())
             .unwrap_or_else(Vec::new);
 
@@ -238,7 +241,11 @@ impl BookWithRelations {
 }
 
 /// List books with all related data (authors, narrators, series, etc.)
-pub async fn list_books_with_relations(pool: &SqlitePool, limit: i64, offset: i64) -> Result<Vec<BookWithRelations>> {
+pub async fn list_books_with_relations(
+    pool: &SqlitePool,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<BookWithRelations>> {
     let books = sqlx::query_as::<_, BookWithRelations>(
         r#"
         WITH book_authors AS (
@@ -329,7 +336,10 @@ pub async fn list_books_with_relations(pool: &SqlitePool, limit: i64, offset: i6
 }
 
 /// Get a single book with all related data by ASIN
-pub async fn find_book_with_relations_by_asin(pool: &SqlitePool, asin: &str) -> Result<Option<BookWithRelations>> {
+pub async fn find_book_with_relations_by_asin(
+    pool: &SqlitePool,
+    asin: &str,
+) -> Result<Option<BookWithRelations>> {
     let book = sqlx::query_as::<_, BookWithRelations>(
         r#"
         WITH book_authors AS (
@@ -445,12 +455,8 @@ pub enum SortDirection {
 
 fn downloaded_status_order_expression(direction: SortDirection) -> &'static str {
     match direction {
-        SortDirection::Asc => {
-            "CASE WHEN completed_downloads.asin IS NULL THEN 0 ELSE 1 END ASC"
-        },
-        SortDirection::Desc => {
-            "CASE WHEN completed_downloads.asin IS NULL THEN 0 ELSE 1 END DESC"
-        },
+        SortDirection::Asc => "CASE WHEN completed_downloads.asin IS NULL THEN 0 ELSE 1 END ASC",
+        SortDirection::Desc => "CASE WHEN completed_downloads.asin IS NULL THEN 0 ELSE 1 END DESC",
     }
 }
 
@@ -460,8 +466,8 @@ fn grouped_order_expression(field: SortField, direction: SortDirection) -> &'sta
         (SortField::Title, SortDirection::Desc) => "b.title DESC",
         (SortField::ReleaseDate, SortDirection::Asc) => "b.date_published ASC, b.title ASC",
         (SortField::ReleaseDate, SortDirection::Desc) => "b.date_published DESC, b.title ASC",
-        (SortField::DateAdded, SortDirection::Asc) => "lb.date_added ASC, b.title ASC",
-        (SortField::DateAdded, SortDirection::Desc) => "lb.date_added DESC, b.title ASC",
+        (SortField::DateAdded, SortDirection::Asc) => "COALESCE(book_accounts.date_added, lb.date_added) ASC, b.title ASC",
+        (SortField::DateAdded, SortDirection::Desc) => "COALESCE(book_accounts.date_added, lb.date_added) DESC, b.title ASC",
         (SortField::Length, SortDirection::Asc) => "b.length_in_minutes ASC, b.title ASC",
         (SortField::Length, SortDirection::Desc) => "b.length_in_minutes DESC, b.title ASC",
         (SortField::Series, SortDirection::Asc) => {
@@ -477,16 +483,28 @@ fn grouped_order_expression(field: SortField, direction: SortDirection) -> &'sta
 /// Filter and search parameters for book queries
 #[derive(Debug, Clone, Default)]
 pub struct BookQueryParams {
-    pub search_query: Option<String>,  // Search in title, author, narrator
-    pub series_name: Option<String>,   // Filter by series
-    pub category: Option<String>,      // Filter by genre/category
-    pub source: Option<String>,        // Filter by source (audible, librivox)
+    pub search_query: Option<String>, // Search in title, author, narrator
+    pub series_name: Option<String>,  // Filter by series
+    pub category: Option<String>,     // Filter by genre/category
+    pub source: Option<String>,       // Filter by source (audible, librivox)
+    pub account: Option<String>,      // Filter by owning account/marketplace
+    pub origin_asin: Option<String>,  // Filter by podcast/periodical parent ASIN
+    pub include_podcasts: bool,
     pub sort_field: Option<SortField>,
     pub sort_direction: Option<SortDirection>,
     pub downloaded_group_sort_field: Option<SortField>,
     pub downloaded_group_sort_direction: Option<SortDirection>,
     pub limit: i64,
     pub offset: i64,
+}
+
+impl BookQueryParams {
+    pub fn with_defaults() -> Self {
+        Self {
+            include_podcasts: true,
+            ..Default::default()
+        }
+    }
 }
 
 /// List books with relations, supporting search, filter, and sort
@@ -503,7 +521,7 @@ pub async fn list_books_with_filters(
         let pattern = format!("%{}%", search);
         where_clauses.push(
             "(b.title LIKE ? OR b.subtitle LIKE ? OR book_authors.authors LIKE ? \
-             OR book_narrators.narrators LIKE ? OR book_series_first.series_name LIKE ?)"
+             OR book_narrators.narrators LIKE ? OR book_series_first.series_name LIKE ?)",
         );
         bind_values.push(pattern.clone());
         bind_values.push(pattern.clone());
@@ -523,7 +541,7 @@ pub async fn list_books_with_filters(
         where_clauses.push(
             "EXISTS (SELECT 1 FROM BookCategories bc \
              JOIN CategoryLadders cl ON bc.category_ladder_id = cl.category_ladder_id \
-             WHERE bc.book_id = b.book_id AND cl.ladder LIKE ?)"
+             WHERE bc.book_id = b.book_id AND cl.ladder LIKE ?)",
         );
         bind_values.push(format!("%{}%", category));
     }
@@ -532,6 +550,34 @@ pub async fn list_books_with_filters(
     if let Some(ref source) = params.source {
         where_clauses.push("COALESCE(b.source, 'audible') = ?");
         bind_values.push(source.clone());
+    }
+
+    if let Some(ref account) = params.account {
+        if !account.trim().is_empty() {
+            where_clauses.push(
+                "EXISTS (SELECT 1 FROM BookAccounts ba_filter WHERE ba_filter.book_id = b.book_id AND ba_filter.account = ? AND ba_filter.is_deleted = 0)"
+            );
+            bind_values.push(account.clone());
+        }
+    }
+
+    let mut has_origin_filter = false;
+    if let Some(ref origin_asin) = params.origin_asin {
+        if !origin_asin.trim().is_empty() {
+            has_origin_filter = true;
+            where_clauses.push("b.origin_asin = ?");
+            bind_values.push(origin_asin.clone());
+            where_clauses.push("b.audible_product_id != ?");
+            bind_values.push(origin_asin.clone());
+        }
+    }
+
+    if !has_origin_filter {
+        where_clauses.push("b.content_type != 2");
+    }
+
+    if !params.include_podcasts {
+        where_clauses.push("b.content_type NOT IN (2, 4)");
     }
 
     let where_clause = if where_clauses.is_empty() {
@@ -546,8 +592,8 @@ pub async fn list_books_with_filters(
         (Some(SortField::Title), Some(SortDirection::Desc)) => "ORDER BY b.title DESC".to_string(),
         (Some(SortField::ReleaseDate), Some(SortDirection::Asc)) => "ORDER BY b.date_published ASC".to_string(),
         (Some(SortField::ReleaseDate), Some(SortDirection::Desc)) => "ORDER BY b.date_published DESC".to_string(),
-        (Some(SortField::DateAdded), Some(SortDirection::Asc)) => "ORDER BY lb.date_added ASC".to_string(),
-        (Some(SortField::DateAdded), Some(SortDirection::Desc)) => "ORDER BY lb.date_added DESC".to_string(),
+        (Some(SortField::DateAdded), Some(SortDirection::Asc)) => "ORDER BY COALESCE(book_accounts.date_added, lb.date_added) ASC".to_string(),
+        (Some(SortField::DateAdded), Some(SortDirection::Desc)) => "ORDER BY COALESCE(book_accounts.date_added, lb.date_added) DESC".to_string(),
         (Some(SortField::Length), Some(SortDirection::Asc)) => "ORDER BY b.length_in_minutes ASC, b.title ASC".to_string(),
         (Some(SortField::Length), Some(SortDirection::Desc)) => "ORDER BY b.length_in_minutes DESC, b.title ASC".to_string(),
         (Some(SortField::Downloaded), direction) => {
@@ -621,6 +667,15 @@ pub async fn list_books_with_filters(
             FROM DownloadTasks
             WHERE status = 'completed' AND output_path != ''
             GROUP BY asin
+        ),
+        book_accounts AS (
+            SELECT
+                book_id,
+                GROUP_CONCAT(account, ',') as accounts,
+                MIN(date_added) as date_added
+            FROM BookAccounts
+            WHERE is_deleted = 0
+            GROUP BY book_id
         )
         SELECT
             b.book_id,
@@ -655,9 +710,11 @@ pub async fn list_books_with_filters(
             book_publishers.publisher,
             book_series_first.series_name,
             book_series_first.series_sequence,
-            lb.date_added as purchase_date
+            COALESCE(book_accounts.date_added, lb.date_added) as purchase_date,
+            book_accounts.accounts as account
         FROM Books b
         LEFT JOIN LibraryBooks lb ON b.book_id = lb.book_id
+        LEFT JOIN book_accounts ON b.book_id = book_accounts.book_id
         LEFT JOIN book_authors ON b.book_id = book_authors.book_id
         LEFT JOIN book_narrators ON b.book_id = book_narrators.book_id
         LEFT JOIN book_publishers ON b.book_id = book_publishers.book_id
@@ -667,8 +724,7 @@ pub async fn list_books_with_filters(
         {}
         LIMIT ? OFFSET ?
         "#,
-        where_clause,
-        order_clause
+        where_clause, order_clause
     );
 
     // Build query with bindings
@@ -686,10 +742,7 @@ pub async fn list_books_with_filters(
 }
 
 /// Count books matching filter criteria
-pub async fn count_books_with_filters(
-    pool: &SqlitePool,
-    params: &BookQueryParams,
-) -> Result<i64> {
+pub async fn count_books_with_filters(pool: &SqlitePool, params: &BookQueryParams) -> Result<i64> {
     // Build the WHERE clause dynamically
     let mut where_clauses = Vec::new();
     let mut bind_values: Vec<String> = Vec::new();
@@ -699,7 +752,7 @@ pub async fn count_books_with_filters(
         let pattern = format!("%{}%", search);
         where_clauses.push(
             "(b.title LIKE ? OR b.subtitle LIKE ? OR book_authors.authors LIKE ? \
-             OR book_narrators.narrators LIKE ? OR book_series.series_name LIKE ?)"
+             OR book_narrators.narrators LIKE ? OR book_series.series_name LIKE ?)",
         );
         bind_values.push(pattern.clone());
         bind_values.push(pattern.clone());
@@ -719,7 +772,7 @@ pub async fn count_books_with_filters(
         where_clauses.push(
             "EXISTS (SELECT 1 FROM BookCategories bc \
              JOIN CategoryLadders cl ON bc.category_ladder_id = cl.category_ladder_id \
-             WHERE bc.book_id = b.book_id AND cl.ladder LIKE ?)"
+             WHERE bc.book_id = b.book_id AND cl.ladder LIKE ?)",
         );
         bind_values.push(format!("%{}%", category));
     }
@@ -728,6 +781,34 @@ pub async fn count_books_with_filters(
     if let Some(ref source) = params.source {
         where_clauses.push("COALESCE(b.source, 'audible') = ?");
         bind_values.push(source.clone());
+    }
+
+    if let Some(ref account) = params.account {
+        if !account.trim().is_empty() {
+            where_clauses.push(
+                "EXISTS (SELECT 1 FROM BookAccounts ba_filter WHERE ba_filter.book_id = b.book_id AND ba_filter.account = ? AND ba_filter.is_deleted = 0)"
+            );
+            bind_values.push(account.clone());
+        }
+    }
+
+    let mut has_origin_filter = false;
+    if let Some(ref origin_asin) = params.origin_asin {
+        if !origin_asin.trim().is_empty() {
+            has_origin_filter = true;
+            where_clauses.push("b.origin_asin = ?");
+            bind_values.push(origin_asin.clone());
+            where_clauses.push("b.audible_product_id != ?");
+            bind_values.push(origin_asin.clone());
+        }
+    }
+
+    if !has_origin_filter {
+        where_clauses.push("b.content_type != 2");
+    }
+
+    if !params.include_podcasts {
+        where_clauses.push("b.content_type NOT IN (2, 4)");
     }
 
     let where_clause = if where_clauses.is_empty() {
@@ -790,7 +871,7 @@ pub async fn list_all_series(pool: &SqlitePool) -> Result<Vec<String>> {
     let series: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT s.name FROM Series s \
          JOIN SeriesBooks sb ON s.series_id = sb.series_id \
-         ORDER BY s.name"
+         ORDER BY s.name",
     )
     .fetch_all(pool)
     .await?;
@@ -805,7 +886,7 @@ pub async fn list_all_categories(pool: &SqlitePool) -> Result<Vec<String>> {
          JOIN CategoryLadders cl ON c.audible_category_id = cl.ladder \
          JOIN BookCategories bc ON cl.category_ladder_id = bc.category_ladder_id \
          WHERE c.name IS NOT NULL \
-         ORDER BY c.name"
+         ORDER BY c.name",
     )
     .fetch_all(pool)
     .await?;
@@ -814,7 +895,11 @@ pub async fn list_all_categories(pool: &SqlitePool) -> Result<Vec<String>> {
 }
 
 /// Search books by title
-pub async fn search_books_by_title(pool: &SqlitePool, query: &str, limit: i64) -> Result<Vec<Book>> {
+pub async fn search_books_by_title(
+    pool: &SqlitePool,
+    query: &str,
+    limit: i64,
+) -> Result<Vec<Book>> {
     let search_pattern = format!("%{}%", query);
     let books = sqlx::query_as::<_, Book>(
         "SELECT * FROM Books WHERE title LIKE ? OR subtitle LIKE ? ORDER BY title LIMIT ?",
@@ -855,6 +940,20 @@ pub async fn insert_library_book(pool: &SqlitePool, library_book: &NewLibraryBoo
     .execute(pool)
     .await?;
 
+    sqlx::query(
+        r#"
+        INSERT INTO BookAccounts (book_id, account)
+        VALUES (?, ?)
+        ON CONFLICT(book_id, account) DO UPDATE SET
+            is_deleted = 0,
+            absent_from_last_scan = 0
+        "#,
+    )
+    .bind(library_book.book_id)
+    .bind(&library_book.account)
+    .execute(pool)
+    .await?;
+
     Ok(())
 }
 
@@ -869,7 +968,10 @@ pub async fn find_library_book(pool: &SqlitePool, book_id: i64) -> Result<Option
 }
 
 /// List all library books for an account
-pub async fn list_library_books_by_account(pool: &SqlitePool, account: &str) -> Result<Vec<LibraryBook>> {
+pub async fn list_library_books_by_account(
+    pool: &SqlitePool,
+    account: &str,
+) -> Result<Vec<LibraryBook>> {
     let books = sqlx::query_as::<_, LibraryBook>(
         "SELECT * FROM LibraryBooks WHERE account = ? AND is_deleted = 0 ORDER BY date_added DESC",
     )
@@ -900,11 +1002,15 @@ pub async fn insert_user_defined_item(pool: &SqlitePool, item: &NewUserDefinedIt
 }
 
 /// Find user defined item by book_id
-pub async fn find_user_defined_item(pool: &SqlitePool, book_id: i64) -> Result<Option<UserDefinedItem>> {
-    let item = sqlx::query_as::<_, UserDefinedItem>("SELECT * FROM UserDefinedItems WHERE book_id = ?")
-        .bind(book_id)
-        .fetch_optional(pool)
-        .await?;
+pub async fn find_user_defined_item(
+    pool: &SqlitePool,
+    book_id: i64,
+) -> Result<Option<UserDefinedItem>> {
+    let item =
+        sqlx::query_as::<_, UserDefinedItem>("SELECT * FROM UserDefinedItems WHERE book_id = ?")
+            .bind(book_id)
+            .fetch_optional(pool)
+            .await?;
 
     Ok(item)
 }
@@ -963,19 +1069,22 @@ pub async fn upsert_contributor(pool: &SqlitePool, contributor: &NewContributor)
     }
 
     // Insert new contributor
-    let result = sqlx::query(
-        "INSERT INTO Contributors (name, audible_contributor_id) VALUES (?, ?)",
-    )
-    .bind(&contributor.name)
-    .bind(&contributor.audible_contributor_id)
-    .execute(pool)
-    .await?;
+    let result =
+        sqlx::query("INSERT INTO Contributors (name, audible_contributor_id) VALUES (?, ?)")
+            .bind(&contributor.name)
+            .bind(&contributor.audible_contributor_id)
+            .execute(pool)
+            .await?;
 
     Ok(result.last_insert_rowid())
 }
 
 /// Find contributors by book ID and role
-pub async fn find_contributors_by_book(pool: &SqlitePool, book_id: i64, role: i32) -> Result<Vec<Contributor>> {
+pub async fn find_contributors_by_book(
+    pool: &SqlitePool,
+    book_id: i64,
+    role: i32,
+) -> Result<Vec<Contributor>> {
     let contributors = sqlx::query_as::<_, Contributor>(
         r#"
         SELECT c.* FROM Contributors c
@@ -1017,7 +1126,11 @@ pub async fn add_book_contributor(
 }
 
 /// Remove all contributors of a specific role from a book
-pub async fn remove_book_contributors_by_role(pool: &SqlitePool, book_id: i64, role: i32) -> Result<()> {
+pub async fn remove_book_contributors_by_role(
+    pool: &SqlitePool,
+    book_id: i64,
+    role: i32,
+) -> Result<()> {
     sqlx::query("DELETE FROM BookContributors WHERE book_id = ? AND role = ?")
         .bind(book_id)
         .bind(role)
@@ -1034,12 +1147,11 @@ pub async fn remove_book_contributors_by_role(pool: &SqlitePool, book_id: i64, r
 /// Insert or find series by audible series ID
 pub async fn upsert_series(pool: &SqlitePool, series: &NewSeries) -> Result<i64> {
     // Try to find existing series
-    let existing: Option<i64> = sqlx::query_scalar(
-        "SELECT series_id FROM Series WHERE audible_series_id = ?",
-    )
-    .bind(&series.audible_series_id)
-    .fetch_optional(pool)
-    .await?;
+    let existing: Option<i64> =
+        sqlx::query_scalar("SELECT series_id FROM Series WHERE audible_series_id = ?")
+            .bind(&series.audible_series_id)
+            .fetch_optional(pool)
+            .await?;
 
     if let Some(id) = existing {
         // Update name if provided
@@ -1054,13 +1166,11 @@ pub async fn upsert_series(pool: &SqlitePool, series: &NewSeries) -> Result<i64>
     }
 
     // Insert new series
-    let result = sqlx::query(
-        "INSERT INTO Series (audible_series_id, name) VALUES (?, ?)",
-    )
-    .bind(&series.audible_series_id)
-    .bind(&series.name)
-    .execute(pool)
-    .await?;
+    let result = sqlx::query("INSERT INTO Series (audible_series_id, name) VALUES (?, ?)")
+        .bind(&series.audible_series_id)
+        .bind(&series.name)
+        .execute(pool)
+        .await?;
 
     Ok(result.last_insert_rowid())
 }
@@ -1090,9 +1200,13 @@ pub async fn add_book_to_series(
 }
 
 /// Find series for a book
-pub async fn find_series_by_book(pool: &SqlitePool, book_id: i64) -> Result<Vec<(Series, SeriesBook)>> {
-    let results = sqlx::query_as::<_, (i64, String, Option<String>, i64, i64, Option<String>, f32)>(
-        r#"
+pub async fn find_series_by_book(
+    pool: &SqlitePool,
+    book_id: i64,
+) -> Result<Vec<(Series, SeriesBook)>> {
+    let results =
+        sqlx::query_as::<_, (i64, String, Option<String>, i64, i64, Option<String>, f32)>(
+            r#"
         SELECT s.series_id, s.audible_series_id, s.name,
                sb.series_id, sb.book_id, sb."order", sb."index"
         FROM Series s
@@ -1100,27 +1214,29 @@ pub async fn find_series_by_book(pool: &SqlitePool, book_id: i64) -> Result<Vec<
         WHERE sb.book_id = ?
         ORDER BY sb."index"
         "#,
-    )
-    .bind(book_id)
-    .fetch_all(pool)
-    .await?;
+        )
+        .bind(book_id)
+        .fetch_all(pool)
+        .await?;
 
     let series_books = results
         .into_iter()
-        .map(|(series_id, audible_series_id, name, sb_series_id, sb_book_id, order, index)| {
-            let series = Series {
-                series_id,
-                audible_series_id,
-                name,
-            };
-            let series_book = SeriesBook {
-                series_id: sb_series_id,
-                book_id: sb_book_id,
-                order,
-                index,
-            };
-            (series, series_book)
-        })
+        .map(
+            |(series_id, audible_series_id, name, sb_series_id, sb_book_id, order, index)| {
+                let series = Series {
+                    series_id,
+                    audible_series_id,
+                    name,
+                };
+                let series_book = SeriesBook {
+                    series_id: sb_series_id,
+                    book_id: sb_book_id,
+                    order,
+                    index,
+                };
+                (series, series_book)
+            },
+        )
         .collect();
 
     Ok(series_books)
@@ -1134,12 +1250,11 @@ pub async fn find_series_by_book(pool: &SqlitePool, book_id: i64) -> Result<Vec<
 pub async fn upsert_category(pool: &SqlitePool, category: &NewCategory) -> Result<i64> {
     // Try to find existing category
     if let Some(ref audible_id) = category.audible_category_id {
-        let existing: Option<i64> = sqlx::query_scalar(
-            "SELECT category_id FROM Categories WHERE audible_category_id = ?",
-        )
-        .bind(audible_id)
-        .fetch_optional(pool)
-        .await?;
+        let existing: Option<i64> =
+            sqlx::query_scalar("SELECT category_id FROM Categories WHERE audible_category_id = ?")
+                .bind(audible_id)
+                .fetch_optional(pool)
+                .await?;
 
         if let Some(id) = existing {
             return Ok(id);
@@ -1147,13 +1262,11 @@ pub async fn upsert_category(pool: &SqlitePool, category: &NewCategory) -> Resul
     }
 
     // Insert new category
-    let result = sqlx::query(
-        "INSERT INTO Categories (audible_category_id, name) VALUES (?, ?)",
-    )
-    .bind(&category.audible_category_id)
-    .bind(&category.name)
-    .execute(pool)
-    .await?;
+    let result = sqlx::query("INSERT INTO Categories (audible_category_id, name) VALUES (?, ?)")
+        .bind(&category.audible_category_id)
+        .bind(&category.name)
+        .execute(pool)
+        .await?;
 
     Ok(result.last_insert_rowid())
 }
@@ -1173,26 +1286,27 @@ pub async fn upsert_category_ladder(pool: &SqlitePool, ladder: &NewCategoryLadde
     }
 
     // Insert new ladder
-    let result = sqlx::query(
-        "INSERT INTO CategoryLadders (audible_ladder_id, ladder) VALUES (?, ?)",
-    )
-    .bind(&ladder.audible_ladder_id)
-    .bind(&ladder.ladder)
-    .execute(pool)
-    .await?;
+    let result =
+        sqlx::query("INSERT INTO CategoryLadders (audible_ladder_id, ladder) VALUES (?, ?)")
+            .bind(&ladder.audible_ladder_id)
+            .bind(&ladder.ladder)
+            .execute(pool)
+            .await?;
 
     Ok(result.last_insert_rowid())
 }
 
 /// Link book to category ladder
-pub async fn add_book_category(pool: &SqlitePool, book_id: i64, category_ladder_id: i64) -> Result<()> {
-    sqlx::query(
-        "INSERT OR IGNORE INTO BookCategories (book_id, category_ladder_id) VALUES (?, ?)",
-    )
-    .bind(book_id)
-    .bind(category_ladder_id)
-    .execute(pool)
-    .await?;
+pub async fn add_book_category(
+    pool: &SqlitePool,
+    book_id: i64,
+    category_ladder_id: i64,
+) -> Result<()> {
+    sqlx::query("INSERT OR IGNORE INTO BookCategories (book_id, category_ladder_id) VALUES (?, ?)")
+        .bind(book_id)
+        .bind(category_ladder_id)
+        .execute(pool)
+        .await?;
 
     Ok(())
 }
@@ -1203,25 +1317,22 @@ pub async fn add_book_category(pool: &SqlitePool, book_id: i64, category_ladder_
 
 /// Add supplement to book
 pub async fn add_supplement(pool: &SqlitePool, book_id: i64, url: &str) -> Result<i64> {
-    let result = sqlx::query(
-        "INSERT INTO Supplements (book_id, url) VALUES (?, ?)",
-    )
-    .bind(book_id)
-    .bind(url)
-    .execute(pool)
-    .await?;
+    let result = sqlx::query("INSERT INTO Supplements (book_id, url) VALUES (?, ?)")
+        .bind(book_id)
+        .bind(url)
+        .execute(pool)
+        .await?;
 
     Ok(result.last_insert_rowid())
 }
 
 /// Find supplements for a book
 pub async fn find_supplements_by_book(pool: &SqlitePool, book_id: i64) -> Result<Vec<Supplement>> {
-    let supplements = sqlx::query_as::<_, Supplement>(
-        "SELECT * FROM Supplements WHERE book_id = ?",
-    )
-    .bind(book_id)
-    .fetch_all(pool)
-    .await?;
+    let supplements =
+        sqlx::query_as::<_, Supplement>("SELECT * FROM Supplements WHERE book_id = ?")
+            .bind(book_id)
+            .fetch_all(pool)
+            .await?;
 
     Ok(supplements)
 }
@@ -1362,7 +1473,10 @@ pub async fn clear_book_download_state(
                     Some(path.clone())
                 }
                 Err(e) => {
-                    eprintln!("[clear_book_download_state] Failed to delete file {}: {}", path, e);
+                    eprintln!(
+                        "[clear_book_download_state] Failed to delete file {}: {}",
+                        path, e
+                    );
                     None
                 }
             }
@@ -1535,17 +1649,29 @@ pub async fn set_book_file_path(
 
 pub async fn clear_library(pool: &SqlitePool) -> Result<()> {
     // Delete in correct order to respect foreign keys
-    sqlx::query("DELETE FROM LibraryBooks").execute(pool).await?;
+    sqlx::query("DELETE FROM LibraryBooks")
+        .execute(pool)
+        .await?;
     sqlx::query("DELETE FROM SeriesBooks").execute(pool).await?;
-    sqlx::query("DELETE FROM BookContributors").execute(pool).await?;
-    sqlx::query("DELETE FROM BookCategories").execute(pool).await?;
-    sqlx::query("DELETE FROM UserDefinedItems").execute(pool).await?;
+    sqlx::query("DELETE FROM BookContributors")
+        .execute(pool)
+        .await?;
+    sqlx::query("DELETE FROM BookCategories")
+        .execute(pool)
+        .await?;
+    sqlx::query("DELETE FROM UserDefinedItems")
+        .execute(pool)
+        .await?;
     sqlx::query("DELETE FROM Supplements").execute(pool).await?;
     sqlx::query("DELETE FROM Books").execute(pool).await?;
     sqlx::query("DELETE FROM Series").execute(pool).await?;
-    sqlx::query("DELETE FROM Contributors").execute(pool).await?;
+    sqlx::query("DELETE FROM Contributors")
+        .execute(pool)
+        .await?;
     sqlx::query("DELETE FROM Categories").execute(pool).await?;
-    sqlx::query("DELETE FROM CategoryLadders").execute(pool).await?;
+    sqlx::query("DELETE FROM CategoryLadders")
+        .execute(pool)
+        .await?;
 
     Ok(())
 }
@@ -1617,7 +1743,14 @@ pub async fn insert_librivox_book(
     for (i, narrator) in narrators.iter().enumerate() {
         let contributor = NewContributor::new(narrator.clone());
         let contributor_id = upsert_contributor(pool, &contributor).await?;
-        add_book_contributor(pool, book_id, contributor_id, Role::Narrator as i32, i as i16).await?;
+        add_book_contributor(
+            pool,
+            book_id,
+            contributor_id,
+            Role::Narrator as i32,
+            i as i16,
+        )
+        .await?;
     }
 
     Ok(book_id)
@@ -1630,7 +1763,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_insert_and_find_book() {
-        let db = Database::new_in_memory().await.expect("Failed to create database");
+        let db = Database::new_in_memory()
+            .await
+            .expect("Failed to create database");
 
         let new_book = NewBook::new(
             "B012345678".to_string(),
@@ -1638,7 +1773,9 @@ mod tests {
             "us".to_string(),
         );
 
-        let book_id = insert_book(db.pool(), &new_book).await.expect("Failed to insert book");
+        let book_id = insert_book(db.pool(), &new_book)
+            .await
+            .expect("Failed to insert book");
         assert!(book_id > 0);
 
         let found = find_book_by_asin(db.pool(), "B012345678")
@@ -1653,7 +1790,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_upsert_book() {
-        let db = Database::new_in_memory().await.expect("Failed to create database");
+        let db = Database::new_in_memory()
+            .await
+            .expect("Failed to create database");
 
         let new_book = NewBook::new(
             "B012345679".to_string(),
@@ -1662,22 +1801,30 @@ mod tests {
         );
 
         // First upsert - should insert
-        let book_id1 = upsert_book(db.pool(), &new_book).await.expect("Failed to upsert book");
+        let book_id1 = upsert_book(db.pool(), &new_book)
+            .await
+            .expect("Failed to upsert book");
 
         // Second upsert with same ASIN - should update
         let mut updated_book = new_book.clone();
         updated_book.title = "Test Book Updated".to_string();
-        let book_id2 = upsert_book(db.pool(), &updated_book).await.expect("Failed to upsert book");
+        let book_id2 = upsert_book(db.pool(), &updated_book)
+            .await
+            .expect("Failed to upsert book");
 
         assert_eq!(book_id1, book_id2, "Book ID should be the same on update");
 
-        let found = find_book_by_id(db.pool(), book_id1).await.expect("Failed to find book");
+        let found = find_book_by_id(db.pool(), book_id1)
+            .await
+            .expect("Failed to find book");
         assert_eq!(found.unwrap().title, "Test Book Updated");
     }
 
     #[tokio::test]
     async fn test_contributor_operations() {
-        let db = Database::new_in_memory().await.expect("Failed to create database");
+        let db = Database::new_in_memory()
+            .await
+            .expect("Failed to create database");
 
         let contributor = NewContributor::new("Test Author".to_string());
         let contributor_id = upsert_contributor(db.pool(), &contributor)
@@ -1696,7 +1843,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_set_book_file_path_updates_existing_completed_task() {
-        let db = Database::new_in_memory().await.expect("Failed to create database");
+        let db = Database::new_in_memory()
+            .await
+            .expect("Failed to create database");
 
         let task_id = set_book_file_path(db.pool(), "B012345680", "Test Book", "/books/old.m4b")
             .await
@@ -1709,11 +1858,12 @@ mod tests {
 
         assert_eq!(task_id, updated_task_id);
 
-        let task_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM DownloadTasks WHERE asin = ?")
-            .bind("B012345680")
-            .fetch_one(db.pool())
-            .await
-            .expect("Failed to count download tasks");
+        let task_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM DownloadTasks WHERE asin = ?")
+                .bind("B012345680")
+                .fetch_one(db.pool())
+                .await
+                .expect("Failed to count download tasks");
         assert_eq!(task_count, 1);
 
         let file_path = get_book_file_path(db.pool(), "B012345680")
@@ -1724,12 +1874,17 @@ mod tests {
         let paths = get_completed_download_paths(db.pool())
             .await
             .expect("Failed to get completed paths");
-        assert_eq!(paths.get("B012345680").map(String::as_str), Some("/books/new.m4b"));
+        assert_eq!(
+            paths.get("B012345680").map(String::as_str),
+            Some("/books/new.m4b")
+        );
     }
 
     #[tokio::test]
     async fn test_list_books_with_filters_sorts_by_length() {
-        let db = Database::new_in_memory().await.expect("Failed to create database");
+        let db = Database::new_in_memory()
+            .await
+            .expect("Failed to create database");
 
         let books = [
             ("B000000001", "Medium Book", 120),
@@ -1761,7 +1916,7 @@ mod tests {
             sort_direction: Some(SortDirection::Asc),
             limit: 10,
             offset: 0,
-            ..Default::default()
+            ..BookQueryParams::with_defaults()
         };
 
         let ascending = list_books_with_filters(db.pool(), &params)
@@ -1769,7 +1924,10 @@ mod tests {
             .expect("Failed to list books");
 
         assert_eq!(
-            ascending.iter().map(|book| book.title.as_str()).collect::<Vec<_>>(),
+            ascending
+                .iter()
+                .map(|book| book.title.as_str())
+                .collect::<Vec<_>>(),
             vec!["Short Book", "Medium Book", "Long Book"]
         );
 
@@ -1783,7 +1941,10 @@ mod tests {
             .expect("Failed to list books");
 
         assert_eq!(
-            descending.iter().map(|book| book.title.as_str()).collect::<Vec<_>>(),
+            descending
+                .iter()
+                .map(|book| book.title.as_str())
+                .collect::<Vec<_>>(),
             vec!["Long Book", "Medium Book", "Short Book"]
         );
     }
@@ -1845,7 +2006,7 @@ mod tests {
             downloaded_group_sort_direction: Some(SortDirection::Asc),
             limit: 10,
             offset: 0,
-            ..Default::default()
+            ..BookQueryParams::with_defaults()
         };
 
         let downloaded_first = list_books_with_filters(db.pool(), &params)
@@ -1857,7 +2018,12 @@ mod tests {
                 .iter()
                 .map(|book| book.title.as_str())
                 .collect::<Vec<_>>(),
-            vec!["Downloaded Short", "Downloaded Long", "Missing Short", "Missing Long"]
+            vec![
+                "Downloaded Short",
+                "Downloaded Long",
+                "Missing Short",
+                "Missing Long"
+            ]
         );
 
         let params = BookQueryParams {
@@ -1874,7 +2040,12 @@ mod tests {
                 .iter()
                 .map(|book| book.title.as_str())
                 .collect::<Vec<_>>(),
-            vec!["Missing Short", "Missing Long", "Downloaded Short", "Downloaded Long"]
+            vec![
+                "Missing Short",
+                "Missing Long",
+                "Downloaded Short",
+                "Downloaded Long"
+            ]
         );
     }
 }

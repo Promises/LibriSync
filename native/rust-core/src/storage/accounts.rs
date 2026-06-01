@@ -30,7 +30,12 @@ pub async fn save_account(pool: &SqlitePool, account_id: &str, account_json: &st
 
     let account_name = account["account_name"].as_str().unwrap_or(account_id);
 
-    let locale_code = account["locale"]["country_code"]
+    let locale = account
+        .get("locale")
+        .or_else(|| account.get("identity").and_then(|identity| identity.get("locale")))
+        .ok_or_else(|| LibationError::InvalidInput("Missing locale".to_string()))?;
+
+    let locale_code = locale["country_code"]
         .as_str()
         .ok_or_else(|| LibationError::InvalidInput("Missing locale country_code".to_string()))?;
 
@@ -158,6 +163,28 @@ pub async fn get_primary_account(pool: &SqlitePool) -> Result<Option<String>> {
     }
 }
 
+/// Get all accounts in creation order.
+pub async fn get_all_accounts(pool: &SqlitePool) -> Result<Vec<String>> {
+    let account_ids: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT account_id
+        FROM Accounts
+        ORDER BY created_at ASC
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut accounts = Vec::with_capacity(account_ids.len());
+    for account_id in account_ids {
+        if let Some(account) = get_account(pool, &account_id).await? {
+            accounts.push(account);
+        }
+    }
+
+    Ok(accounts)
+}
+
 /// Update token expiry timestamp
 ///
 /// # Arguments
@@ -211,6 +238,16 @@ pub async fn update_last_sync(pool: &SqlitePool, account_id: &str) -> Result<()>
 /// * `pool` - Database connection pool
 /// * `account_id` - Account identifier
 pub async fn delete_account(pool: &SqlitePool, account_id: &str) -> Result<()> {
+    sqlx::query("DELETE FROM BookAccounts WHERE account = ?")
+        .bind(account_id)
+        .execute(pool)
+        .await?;
+
+    sqlx::query("DELETE FROM LibraryBooks WHERE account = ?")
+        .bind(account_id)
+        .execute(pool)
+        .await?;
+
     sqlx::query("DELETE FROM Accounts WHERE account_id = ?")
         .bind(account_id)
         .execute(pool)

@@ -21,14 +21,17 @@ import { checkForUpdate, isGithubReleaseBuild, type UpdateInfo } from '../utils/
 
 const DOWNLOAD_PATH_KEY = 'download_path';
 const NAMING_PATTERN_KEY = 'naming_pattern';
+const PODCAST_NAMING_PATTERN_KEY = 'podcast_naming_pattern';
 const SMART_PLAYER_COVER_KEY = 'smart_player_cover_enabled';
 const SYNC_FREQUENCY_KEY = 'sync_frequency';
 const SYNC_WIFI_ONLY_KEY = 'sync_wifi_only';
 const AUTO_TOKEN_REFRESH_KEY = 'auto_token_refresh';
 const DEBUG_MODE_KEY = 'debug_mode_enabled';
+const INCLUDE_PODCASTS_KEY = 'include_podcasts';
 
 type SyncFrequency = 'manual' | '1h' | '6h' | '12h' | '24h';
 type NamingPattern = 'flat_file' | 'author_book_folder' | 'author_series_book';
+type PodcastNamingPattern = 'podcast_episode_folder' | 'podcast_flat_file';
 
 export default function SettingsScreen() {
   const styles = useStyles(createStyles);
@@ -36,6 +39,7 @@ export default function SettingsScreen() {
   const { providers, setProvider } = useProviders();
   const [downloadPath, setDownloadPath] = useState<string | null>(null);
   const [namingPattern, setNamingPattern] = useState<NamingPattern>('author_series_book');
+  const [podcastNamingPattern, setPodcastNamingPattern] = useState<PodcastNamingPattern>('podcast_episode_folder');
   const [smartPlayerCover, setSmartPlayerCover] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
 
@@ -43,6 +47,7 @@ export default function SettingsScreen() {
   const [syncFrequency, setSyncFrequency] = useState<SyncFrequency>('manual');
   const [syncWifiOnly, setSyncWifiOnly] = useState(true);
   const [autoTokenRefresh, setAutoTokenRefresh] = useState(true);
+  const [includePodcasts, setIncludePodcasts] = useState(true);
 
   // Secret debug mode activation
   const tapTimestamps = useRef<number[]>([]);
@@ -66,11 +71,12 @@ export default function SettingsScreen() {
 
   const loadSettings = async () => {
     try {
-      const [savedPath, savedSyncFreq, savedSyncWifi, savedAutoRefresh] = await Promise.all([
+      const [savedPath, savedSyncFreq, savedSyncWifi, savedAutoRefresh, savedIncludePodcasts] = await Promise.all([
         SecureStore.getItemAsync(DOWNLOAD_PATH_KEY),
         SecureStore.getItemAsync(SYNC_FREQUENCY_KEY),
         SecureStore.getItemAsync(SYNC_WIFI_ONLY_KEY),
         SecureStore.getItemAsync(AUTO_TOKEN_REFRESH_KEY),
+        SecureStore.getItemAsync(INCLUDE_PODCASTS_KEY),
       ]);
 
       if (savedPath) {
@@ -82,17 +88,23 @@ export default function SettingsScreen() {
       if (savedSyncFreq) setSyncFrequency(savedSyncFreq as SyncFrequency);
       if (savedSyncWifi !== null) setSyncWifiOnly(savedSyncWifi === 'true');
       if (savedAutoRefresh !== null) setAutoTokenRefresh(savedAutoRefresh === 'true');
+      if (savedIncludePodcasts !== null) setIncludePodcasts(savedIncludePodcasts !== 'false');
 
       // Load naming pattern and Smart Player cover from native SharedPreferences
       if (Platform.OS === 'android') {
         try {
-          const [namingResult, coverResult] = await Promise.all([
+          const [namingResult, podcastNamingResult, coverResult] = await Promise.all([
             ExpoRustBridge.getNamingPattern(),
+            ExpoRustBridge.getPodcastNamingPattern(),
             ExpoRustBridge.getSmartPlayerCover(),
           ]);
 
           if (namingResult.success && namingResult.data) {
             setNamingPattern((namingResult.data as any).pattern as NamingPattern);
+          }
+
+          if (podcastNamingResult.success && podcastNamingResult.data) {
+            setPodcastNamingPattern((podcastNamingResult.data as any).pattern as PodcastNamingPattern);
           }
 
           if (coverResult.success && coverResult.data) {
@@ -280,6 +292,11 @@ export default function SettingsScreen() {
     }
   };
 
+  const handleIncludePodcastsChange = async (value: boolean) => {
+    setIncludePodcasts(value);
+    await saveSettings(INCLUDE_PODCASTS_KEY, value.toString());
+  };
+
   const handleSmartPlayerCoverChange = async (value: boolean) => {
     setSmartPlayerCover(value);
 
@@ -339,6 +356,61 @@ export default function SettingsScreen() {
     } catch (error: any) {
       console.error('[Settings] Failed to save naming pattern:', error);
       Alert.alert('Error', error.message || 'Failed to update naming pattern');
+    }
+  };
+
+  const getPodcastNamingPatternLabel = (pattern: PodcastNamingPattern): string => {
+    switch (pattern) {
+      case 'podcast_episode_folder': return 'Episode Folder';
+      case 'podcast_flat_file': return 'Flat Episode Files';
+    }
+  };
+
+  const getPodcastNamingPatternExample = (pattern: PodcastNamingPattern): string => {
+    switch (pattern) {
+      case 'podcast_episode_folder': return 'Podcast/2026-05-31 - Episode/2026-05-31 - Episode.mp3';
+      case 'podcast_flat_file': return 'Podcast/2026-05-31 - Episode.mp3';
+    }
+  };
+
+  const handlePodcastNamingPatternPress = () => {
+    const options = [
+      {
+        label: 'Episode Folder',
+        value: 'podcast_episode_folder' as PodcastNamingPattern,
+        example: 'Podcast/2026-05-31 - Episode/2026-05-31 - Episode.mp3',
+      },
+      {
+        label: 'Flat Episode Files',
+        value: 'podcast_flat_file' as PodcastNamingPattern,
+        example: 'Podcast/2026-05-31 - Episode.mp3',
+      },
+    ];
+
+    Alert.alert(
+      'Podcast Naming Pattern',
+      'Choose how downloaded podcast episodes should be organized:',
+      [
+        ...options.map(opt => ({
+          text: `${opt.label}\n${opt.example}`,
+          onPress: () => handlePodcastNamingPatternChange(opt.value),
+        })),
+        { text: 'Cancel', style: 'cancel' },
+      ]
+    );
+  };
+
+  const handlePodcastNamingPatternChange = async (value: PodcastNamingPattern) => {
+    setPodcastNamingPattern(value);
+
+    try {
+      await ExpoRustBridge.setPodcastNamingPattern(value);
+      await saveSettings(PODCAST_NAMING_PATTERN_KEY, value);
+      console.log(`[Settings] Podcast naming pattern changed to: ${value}`);
+      Alert.alert('Success', `Podcast naming pattern updated to: ${getPodcastNamingPatternLabel(value)}\n\n${getPodcastNamingPatternExample(value)}`);
+    } catch (error: any) {
+      console.error('[Settings] Failed to save podcast naming pattern:', error);
+      Alert.alert('Error', error.message || 'Failed to update podcast naming pattern');
     }
   };
 
@@ -452,6 +524,25 @@ export default function SettingsScreen() {
 
           <View style={styles.settingItem}>
             <View style={styles.settingInfo}>
+              <Text style={styles.settingLabel}>Podcast Naming Pattern</Text>
+              <Text style={styles.settingDescription}>
+                How downloaded podcast episodes should be organized
+              </Text>
+              <Text style={styles.settingHint}>
+                Example: {getPodcastNamingPatternExample(podcastNamingPattern)}
+              </Text>
+            </View>
+            <TouchableOpacity
+              style={styles.button}
+              onPress={handlePodcastNamingPatternPress}
+              disabled={isLoading}
+            >
+              <Text style={styles.buttonText}>{getPodcastNamingPatternLabel(podcastNamingPattern)}</Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.settingItem}>
+            <View style={styles.settingInfo}>
               <Text style={styles.settingLabel}>Smart Audiobook Player Cover</Text>
               <Text style={styles.settingDescription}>
                 Save EmbeddedCover.jpg (500x500) for Smart Audiobook Player compatibility
@@ -513,6 +604,21 @@ export default function SettingsScreen() {
               onValueChange={handleAutoTokenRefreshChange}
               trackColor={{ false: colors.border, true: colors.accentDim }}
               thumbColor={autoTokenRefresh ? colors.accent : colors.textSecondary}
+            />
+          </View>
+
+          <View style={styles.settingItem}>
+            <View style={styles.settingInfo}>
+              <Text style={styles.settingLabel}>Include Podcasts</Text>
+              <Text style={styles.settingDescription}>
+                Show podcasts, periodicals, and episodes in the library
+              </Text>
+            </View>
+            <Switch
+              value={includePodcasts}
+              onValueChange={handleIncludePodcastsChange}
+              trackColor={{ false: colors.border, true: colors.accentDim }}
+              thumbColor={includePodcasts ? colors.accent : colors.textSecondary}
             />
           </View>
         </View>

@@ -17,6 +17,7 @@ import android.graphics.RectF
 import android.graphics.Typeface
 import android.net.Uri
 import android.provider.DocumentsContract
+import androidx.documentfile.provider.DocumentFile
 import expo.modules.rustbridge.workers.WorkerScheduler
 import java.io.File
 import java.io.FileOutputStream
@@ -204,6 +205,34 @@ class ExpoRustBridgeModule : Module() {
     }
 
     /**
+     * Sync one page of episodes for a podcast or periodical parent.
+     */
+    AsyncFunction("syncPodcastEpisodes") {
+      dbPath: String,
+      accountJson: String,
+      parentAsin: String,
+      offset: Int,
+      limit: Int
+    ->
+      try {
+        val params = JSONObject().apply {
+          put("db_path", dbPath)
+          put("account_json", accountJson)
+          put("parent_asin", parentAsin)
+          put("offset", offset)
+          put("limit", limit)
+        }
+        val result = nativeSyncPodcastEpisodes(params.toString())
+        parseJsonResponse(result)
+      } catch (e: Exception) {
+        mapOf(
+          "success" to false,
+          "error" to "Sync podcast episodes error: ${e.message}"
+        )
+      }
+    }
+
+    /**
      * Persist the user-selected download directory for background sync workers.
      */
     Function("setDownloadDirectory") { directory: String ->
@@ -320,6 +349,9 @@ class ExpoRustBridgeModule : Module() {
             if (extrasObj.has("source")) put("source", extrasObj.getString("source"))
             if (extrasObj.has("downloaded_group_sort_field")) put("downloaded_group_sort_field", extrasObj.getString("downloaded_group_sort_field"))
             if (extrasObj.has("downloaded_group_sort_direction")) put("downloaded_group_sort_direction", extrasObj.getString("downloaded_group_sort_direction"))
+            if (extrasObj.has("account")) put("account", extrasObj.getString("account"))
+            if (extrasObj.has("origin_asin")) put("origin_asin", extrasObj.getString("origin_asin"))
+            if (extrasObj.has("include_podcasts")) put("include_podcasts", extrasObj.getBoolean("include_podcasts"))
           } catch (_: Exception) {
             // If extras is not valid JSON, treat it as sort_direction for backward compat
             put("sort_direction", extras)
@@ -736,6 +768,37 @@ class ExpoRustBridgeModule : Module() {
           put("db_path", dbPath)
         }
         val result = nativeGetPrimaryAccount(params.toString())
+        parseJsonResponse(result)
+      } catch (e: Exception) {
+        mapOf("success" to false, "error" to e.message)
+      }
+    }
+
+    /**
+     * Get one account from SQLite database.
+     */
+    AsyncFunction("getAccount") { dbPath: String, accountId: String ->
+      try {
+        val params = JSONObject().apply {
+          put("db_path", dbPath)
+          put("account_id", accountId)
+        }
+        val result = nativeGetAccount(params.toString())
+        parseJsonResponse(result)
+      } catch (e: Exception) {
+        mapOf("success" to false, "error" to e.message)
+      }
+    }
+
+    /**
+     * Get all accounts from SQLite database.
+     */
+    AsyncFunction("getAllAccounts") { dbPath: String ->
+      try {
+        val params = JSONObject().apply {
+          put("db_path", dbPath)
+        }
+        val result = nativeGetAllAccounts(params.toString())
         parseJsonResponse(result)
       } catch (e: Exception) {
         mapOf("success" to false, "error" to e.message)
@@ -1383,6 +1446,29 @@ class ExpoRustBridgeModule : Module() {
       }
     }
 
+    Function("setPodcastNamingPattern") { pattern: String ->
+      try {
+        val context = appContext.reactContext ?: throw Exception("Context not available")
+        val prefs = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
+        prefs.edit().putString("podcast_naming_pattern", pattern).apply()
+        mapOf("success" to true)
+      } catch (e: Exception) {
+        mapOf("success" to false, "error" to e.message)
+      }
+    }
+
+    Function("getPodcastNamingPattern") {
+      try {
+        val context = appContext.reactContext ?: throw Exception("Context not available")
+        val prefs = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
+        val pattern = prefs.getString("podcast_naming_pattern", "podcast_episode_folder")
+          ?: "podcast_episode_folder"
+        mapOf("success" to true, "data" to mapOf("pattern" to pattern))
+      } catch (e: Exception) {
+        mapOf("success" to false, "error" to e.message)
+      }
+    }
+
     Function("setSmartPlayerCover") { enabled: Boolean ->
       try {
         val context = appContext.reactContext ?: throw Exception("Context not available")
@@ -1864,7 +1950,13 @@ class ExpoRustBridgeModule : Module() {
     var fileDeleted = false
 
     try {
-      if (DocumentsContract.isDocumentUri(context, uri) && DocumentsContract.deleteDocument(resolver, uri)) {
+      fileDeleted = DocumentFile.fromSingleUri(context, uri)?.delete() == true
+    } catch (e: Exception) {
+      android.util.Log.d("ExpoRustBridge", "Single document delete failed for $uri: ${e.message}")
+    }
+
+    try {
+      if (!fileDeleted && DocumentsContract.isDocumentUri(context, uri) && DocumentsContract.deleteDocument(resolver, uri)) {
         fileDeleted = true
       }
     } catch (e: Exception) {
@@ -1876,6 +1968,14 @@ class ExpoRustBridgeModule : Module() {
         fileDeleted = deleteDocumentById(context, treeContext.treeUri, treeContext.documentId)
       } catch (e: Exception) {
         android.util.Log.d("ExpoRustBridge", "Tree document delete failed for $uri: ${e.message}")
+      }
+    }
+
+    if (!fileDeleted && treeContext != null) {
+      try {
+        fileDeleted = deleteDocumentByTreeWalk(context, treeContext)
+      } catch (e: Exception) {
+        android.util.Log.d("ExpoRustBridge", "Tree walk delete failed for $uri: ${e.message}")
       }
     }
 
@@ -2037,6 +2137,31 @@ class ExpoRustBridgeModule : Module() {
   private fun deleteDocumentById(context: Context, treeUri: Uri, documentId: String): Boolean {
     val documentUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, documentId)
     return DocumentsContract.deleteDocument(context.contentResolver, documentUri)
+  }
+
+  private fun deleteDocumentByTreeWalk(context: Context, treeContext: TreeDocumentContext): Boolean {
+    val root = DocumentFile.fromTreeUri(context, treeContext.treeUri) ?: return false
+    val relativePath = relativeDocumentPath(treeContext.documentId, treeContext.treeDocumentId)
+      ?: return false
+    val parts = relativePath.split('/').filter { it.isNotBlank() }
+    if (parts.isEmpty()) return false
+
+    var current = root
+    for (part in parts.dropLast(1)) {
+      current = current.findFile(part)?.takeIf { it.isDirectory } ?: return false
+    }
+
+    return current.findFile(parts.last())?.delete() == true
+  }
+
+  private fun relativeDocumentPath(documentId: String, treeDocumentId: String): String? {
+    return when {
+      documentId == treeDocumentId -> null
+      documentId.startsWith("$treeDocumentId/") -> documentId.removePrefix("$treeDocumentId/")
+      treeDocumentId.endsWith(":") && documentId.startsWith(treeDocumentId) ->
+        documentId.removePrefix(treeDocumentId).trimStart('/')
+      else -> null
+    }
   }
 
   private fun isAudioFile(displayName: String, mimeType: String?): Boolean {
@@ -2203,6 +2328,7 @@ class ExpoRustBridgeModule : Module() {
     @JvmStatic external fun nativeInitDatabase(paramsJson: String): String
     @JvmStatic external fun nativeSyncLibrary(paramsJson: String): String
     @JvmStatic external fun nativeSyncLibraryPage(paramsJson: String): String
+    @JvmStatic external fun nativeSyncPodcastEpisodes(paramsJson: String): String
     @JvmStatic external fun nativeGetBooks(paramsJson: String): String
     @JvmStatic external fun nativeGetBookByAsin(paramsJson: String): String
     @JvmStatic external fun nativeSearchBooks(paramsJson: String): String
@@ -2233,6 +2359,8 @@ class ExpoRustBridgeModule : Module() {
     // Account functions
     @JvmStatic external fun nativeSaveAccount(paramsJson: String): String
     @JvmStatic external fun nativeGetPrimaryAccount(paramsJson: String): String
+    @JvmStatic external fun nativeGetAccount(paramsJson: String): String
+    @JvmStatic external fun nativeGetAllAccounts(paramsJson: String): String
     @JvmStatic external fun nativeDeleteAccount(paramsJson: String): String
 
     // Testing functions

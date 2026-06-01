@@ -115,21 +115,32 @@ class DownloadOrchestrator(
             val licenseData = parsedLicense["data"] as? Map<*, *> ?: throw Exception("No license data")
             val downloadUrl = licenseData["download_url"] as? String ?: throw Exception("No download URL")
             val totalBytes = (licenseData["total_bytes"] as? Number)?.toLong() ?: 0L
-            val aaxcKey = licenseData["aaxc_key"] as? String ?: throw Exception("No AAXC key")
-            val aaxcIv = licenseData["aaxc_iv"] as? String ?: throw Exception("No AAXC IV")
+            val fileType = ((licenseData["file_type"] as? String) ?: "aaxc").lowercase()
+            val fileExtension = ((licenseData["file_extension"] as? String)?.takeIf { it.isNotBlank() }
+                ?: if (fileType == "mp3") "mp3" else "aax").lowercase()
+            val isPlainAudio = fileType == "mp3"
+            val aaxcKey = licenseData["aaxc_key"] as? String
+            val aaxcIv = licenseData["aaxc_iv"] as? String
+            if (!isPlainAudio && (aaxcKey.isNullOrEmpty() || aaxcIv.isNullOrEmpty())) {
+                throw Exception("No AAXC key")
+            }
             @Suppress("UNCHECKED_CAST")
             val requestHeaders = licenseData["request_headers"] as? Map<String, String>
                 ?: mapOf("User-Agent" to "Audible/671 CFNetwork/1240.0.4 Darwin/20.6.0")
 
-            Log.d(TAG, "License obtained. Size: ${totalBytes / 1024 / 1024} MB")
+            Log.d(TAG, "License obtained. Type: $fileType, size: ${totalBytes / 1024 / 1024} MB")
 
             // Step 2: Prepare paths
             val cacheDir = context.cacheDir
             val audiobooksDir = File(cacheDir, "audiobooks")
             audiobooksDir.mkdirs()
 
-            val encryptedPath = File(audiobooksDir, "$asin.aax").absolutePath
-            val decryptedCachePath = File(audiobooksDir, "$asin.m4b").absolutePath
+            val encryptedPath = File(audiobooksDir, "$asin.$fileExtension").absolutePath
+            val decryptedCachePath = if (isPlainAudio) {
+                encryptedPath
+            } else {
+                File(audiobooksDir, "$asin.m4b").absolutePath
+            }
 
             // Step 3: Enqueue download in Rust manager
             val enqueueParams = JSONObject().apply {
@@ -156,7 +167,7 @@ class DownloadOrchestrator(
             Log.d(TAG, "Download enqueued: $taskId")
 
             // Step 4: Store conversion keys in DB for retry capability
-            storeConversionKeysInDb(taskId, aaxcKey, aaxcIv, outputDirectory)
+            storeConversionKeysInDb(taskId, aaxcKey.orEmpty(), aaxcIv.orEmpty(), outputDirectory)
 
             // Step 5: Start monitoring this download
             startMonitoringDownload(
@@ -166,9 +177,10 @@ class DownloadOrchestrator(
                 encryptedPath = encryptedPath,
                 decryptedCachePath = decryptedCachePath,
                 outputDirectory = outputDirectory,
-                aaxcKey = aaxcKey,
-                aaxcIv = aaxcIv,
-                totalBytes = totalBytes
+                aaxcKey = aaxcKey.orEmpty(),
+                aaxcIv = aaxcIv.orEmpty(),
+                totalBytes = totalBytes,
+                plainAudio = isPlainAudio
             )
 
             taskId
@@ -530,7 +542,8 @@ class DownloadOrchestrator(
         outputDirectory: String,
         aaxcKey: String,
         aaxcIv: String,
-        totalBytes: Long
+        totalBytes: Long,
+        plainAudio: Boolean = false
     ) {
         // Cancel any existing monitoring for this ASIN
         monitoringJobs[asin]?.cancel()
@@ -557,7 +570,11 @@ class DownloadOrchestrator(
                         val status = taskData?.get("status") as? String
                         val bytesDownloaded = (taskData?.get("bytes_downloaded") as? Number)?.toLong() ?: 0L
                         val taskTotalBytes = (taskData?.get("total_bytes") as? Number)?.toLong() ?: totalBytes
-                        val percentage = (bytesDownloaded.toDouble() / taskTotalBytes) * 100.0
+                        val percentage = if (taskTotalBytes > 0) {
+                            (bytesDownloaded.toDouble() / taskTotalBytes) * 100.0
+                        } else {
+                            0.0
+                        }
 
                         Log.d(TAG, "Download $asin: $status ($percentage%)")
 
@@ -572,16 +589,20 @@ class DownloadOrchestrator(
                                 // This allows detection of resume events
                             }
                             "completed" -> {
-                                Log.d(TAG, "Download completed! Triggering conversion for $asin")
+                                Log.d(TAG, "Download completed! Finalizing $asin")
 
-                                // Trigger conversion (cancellable via coroutine scope)
+                                // Trigger conversion or plain MP3 copy (cancellable via coroutine scope)
                                 try {
-                                    triggerConversion(
-                                        asin, title, encryptedPath, decryptedCachePath,
-                                        outputDirectory, aaxcKey, aaxcIv, taskId
-                                    )
+                                    if (plainAudio) {
+                                        triggerPlainAudioCopy(asin, title, encryptedPath, outputDirectory, taskId)
+                                    } else {
+                                        triggerConversion(
+                                            asin, title, encryptedPath, decryptedCachePath,
+                                            outputDirectory, aaxcKey, aaxcIv, taskId
+                                        )
+                                    }
                                 } catch (e: CancellationException) {
-                                    Log.d(TAG, "Conversion cancelled for $asin")
+                                    Log.d(TAG, "Finalization cancelled for $asin")
                                     throw e // Re-throw to exit the monitoring loop
                                 }
 
@@ -612,6 +633,32 @@ class DownloadOrchestrator(
         }
 
         monitoringJobs[asin] = job
+    }
+
+    /**
+     * Copy a completed plain Audible MP3 download to the final destination.
+     */
+    private suspend fun triggerPlainAudioCopy(
+        asin: String,
+        title: String,
+        downloadPath: String,
+        outputDirectory: String,
+        taskId: String
+    ) = withContext(Dispatchers.IO) {
+        try {
+            updateTaskStatusInDb(taskId, "copying")
+            progressCallback?.invoke(asin, "copying", 0.0, 0, 0)
+
+            val finalPath = copyLibrivoxToFinalDestination(asin, title, downloadPath, outputDirectory)
+
+            updateTaskStatusInDb(taskId, "completed", finalPath)
+            clearManuallyPaused(asin)
+            completionCallback?.invoke(asin, title, finalPath)
+        } catch (e: Exception) {
+            Log.e(TAG, "Plain audio copy failed for $asin", e)
+            updateTaskStatusWithError(taskId, "failed", e.message ?: "Copy failed")
+            errorCallback?.invoke(asin, title, e.message ?: "Copy failed")
+        }
     }
 
     /**
@@ -875,6 +922,17 @@ class DownloadOrchestrator(
             val pathParts = filePath.split('/')
             val fileName = pathParts.last()
             val directories = pathParts.dropLast(1)
+            val sourceExtension = cachedFile.extension.lowercase().ifBlank { "m4b" }
+            val targetFileName = if (fileName.contains('.')) {
+                fileName.replaceAfterLast('.', sourceExtension)
+            } else {
+                "$fileName.$sourceExtension"
+            }
+            val mimeType = when (sourceExtension) {
+                "mp3" -> "audio/mpeg"
+                "m4a", "m4b", "mp4" -> "audio/mp4"
+                else -> "audio/*"
+            }
 
             // Navigate/create subdirectories
             var currentDir = docDir
@@ -889,12 +947,11 @@ class DownloadOrchestrator(
             }
 
             // Delete existing file
-            currentDir.findFile(fileName)?.delete()
+            currentDir.findFile(targetFileName)?.delete()
 
             // Create new file
-            val outputFile = currentDir.createFile("audio/mp4", fileName)
-                ?: currentDir.createFile("audio/x-m4b", fileName)
-                ?: currentDir.createFile("audio/*", fileName)
+            val outputFile = currentDir.createFile(mimeType, targetFileName)
+                ?: currentDir.createFile("audio/*", targetFileName)
                 ?: throw Exception("Failed to create file in SAF directory")
 
             Log.d(TAG, "Copying to SAF: ${outputFile.uri}")
@@ -1293,11 +1350,14 @@ class DownloadOrchestrator(
             // Get naming pattern from SharedPreferences (default to author_series_book)
             val prefs = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
             val namingPattern = prefs.getString("naming_pattern", "author_series_book") ?: "author_series_book"
+            val podcastNamingPattern = prefs.getString("podcast_naming_pattern", "podcast_episode_folder")
+                ?: "podcast_episode_folder"
 
             val params = JSONObject().apply {
                 put("db_path", dbPath)
                 put("asin", asin)
                 put("naming_pattern", namingPattern)
+                put("podcast_naming_pattern", podcastNamingPattern)
             }
 
             val result = ExpoRustBridgeModule.nativeBuildFilePath(params.toString())

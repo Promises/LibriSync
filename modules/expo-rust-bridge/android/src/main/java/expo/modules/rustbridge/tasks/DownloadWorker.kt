@@ -66,29 +66,42 @@ class DownloadWorker(
             val licenseData = parsedLicense["data"] as? Map<*, *> ?: throw Exception("No license data")
             val downloadUrl = licenseData["download_url"] as? String ?: throw Exception("No download URL")
             val totalBytes = (licenseData["total_bytes"] as? Number)?.toLong() ?: 0L
-            val aaxcKey = licenseData["aaxc_key"] as? String ?: throw Exception("No AAXC key")
-            val aaxcIv = licenseData["aaxc_iv"] as? String ?: throw Exception("No AAXC IV")
+            val fileType = ((licenseData["file_type"] as? String) ?: "aaxc").lowercase()
+            val fileExtension = ((licenseData["file_extension"] as? String)?.takeIf { it.isNotBlank() }
+                ?: if (fileType == "mp3") "mp3" else "aax").lowercase()
+            val isPlainAudio = fileType == "mp3"
+            val aaxcKey = licenseData["aaxc_key"] as? String
+            val aaxcIv = licenseData["aaxc_iv"] as? String
+            if (!isPlainAudio && (aaxcKey.isNullOrEmpty() || aaxcIv.isNullOrEmpty())) {
+                throw Exception("No AAXC key")
+            }
             @Suppress("UNCHECKED_CAST")
             val requestHeaders = licenseData["request_headers"] as? Map<String, String>
                 ?: mapOf("User-Agent" to "Audible/671 CFNetwork/1240.0.4 Darwin/20.6.0")
 
-            Log.d(TAG, "License obtained. Size: ${totalBytes / 1024 / 1024} MB")
+            Log.d(TAG, "License obtained. Type: $fileType, size: ${totalBytes / 1024 / 1024} MB")
 
             // Step 2: Prepare paths
             val cacheDir = context.cacheDir
             val audiobooksDir = File(cacheDir, "audiobooks")
             audiobooksDir.mkdirs()
 
-            val encryptedPath = File(audiobooksDir, "$asin.aax").absolutePath
-            val decryptedCachePath = File(audiobooksDir, "$asin.m4b").absolutePath
+            val encryptedPath = File(audiobooksDir, "$asin.$fileExtension").absolutePath
+            val decryptedCachePath = if (isPlainAudio) {
+                encryptedPath
+            } else {
+                File(audiobooksDir, "$asin.m4b").absolutePath
+            }
 
             // Update task metadata
             manager.updateTaskMetadata(task.id, mapOf(
                 DownloadTaskMetadata.TOTAL_BYTES to totalBytes,
                 DownloadTaskMetadata.ENCRYPTED_PATH to encryptedPath,
                 DownloadTaskMetadata.DECRYPTED_PATH to decryptedCachePath,
-                DownloadTaskMetadata.AAXC_KEY to aaxcKey,
-                DownloadTaskMetadata.AAXC_IV to aaxcIv
+                DownloadTaskMetadata.FILE_TYPE to fileType,
+                DownloadTaskMetadata.FILE_EXTENSION to fileExtension,
+                DownloadTaskMetadata.AAXC_KEY to aaxcKey.orEmpty(),
+                DownloadTaskMetadata.AAXC_IV to aaxcIv.orEmpty()
             ))
 
             // Step 3: Enqueue download in Rust manager
@@ -121,7 +134,17 @@ class DownloadWorker(
             Log.d(TAG, "Download enqueued in Rust: $rustTaskId")
 
             // Step 4: Start monitoring
-            startMonitoring(task, rustTaskId, encryptedPath, decryptedCachePath, outputDir, aaxcKey, aaxcIv, totalBytes)
+            startMonitoring(
+                task,
+                rustTaskId,
+                encryptedPath,
+                decryptedCachePath,
+                outputDir,
+                aaxcKey.orEmpty(),
+                aaxcIv.orEmpty(),
+                totalBytes,
+                isPlainAudio
+            )
 
         } catch (e: Exception) {
             Log.e(TAG, "Failed to execute download task", e)
@@ -144,7 +167,8 @@ class DownloadWorker(
         outputDirectory: String,
         aaxcKey: String,
         aaxcIv: String,
-        totalBytes: Long
+        totalBytes: Long,
+        plainAudio: Boolean = false
     ) {
         val asin = task.getMetadataString(DownloadTaskMetadata.ASIN) ?: return
         val title = task.getMetadataString(DownloadTaskMetadata.TITLE) ?: return
@@ -217,10 +241,14 @@ class DownloadWorker(
                                 // Continue monitoring to detect resume
                             }
                             "completed" -> {
-                                Log.d(TAG, "Download completed! Triggering conversion for $asin")
+                                Log.d(TAG, "Download completed! Finalizing $asin")
 
-                                // Trigger conversion
-                                triggerConversion(task, encryptedPath, decryptedCachePath, outputDirectory, aaxcKey, aaxcIv)
+                                // Trigger conversion or plain MP3 copy
+                                if (plainAudio) {
+                                    completePlainAudioDownload(task, encryptedPath, outputDirectory)
+                                } else {
+                                    triggerConversion(task, encryptedPath, decryptedCachePath, outputDirectory, aaxcKey, aaxcIv)
+                                }
 
                                 // Stop monitoring
                                 break
@@ -259,6 +287,60 @@ class DownloadWorker(
         }
 
         monitoringJobs[task.id] = job
+    }
+
+    /**
+     * Complete a plain MP3 download without FFmpeg decryption.
+     */
+    private suspend fun completePlainAudioDownload(
+        task: Task,
+        downloadPath: String,
+        outputDirectory: String
+    ) = withContext(Dispatchers.IO) {
+        val asin = task.getMetadataString(DownloadTaskMetadata.ASIN) ?: return@withContext
+        val title = task.getMetadataString(DownloadTaskMetadata.TITLE) ?: return@withContext
+
+        try {
+            manager.updateTaskMetadata(task.id, mapOf(
+                DownloadTaskMetadata.STAGE to "copying"
+            ))
+            manager.emitEvent(TaskEvent.DownloadProgress(
+                taskId = task.id,
+                asin = asin,
+                title = title,
+                stage = "copying",
+                percentage = 0,
+                bytesDownloaded = 0,
+                totalBytes = 0
+            ))
+
+            val finalPath = copyToFinalDestination(asin, title, downloadPath, outputDirectory, null)
+
+            task.getMetadataString(DownloadTaskMetadata.RUST_TASK_ID)?.let { rustTaskId ->
+                updateRustTaskStatusInDb(rustTaskId, "completed", finalPath)
+            }
+            task.status = TaskStatus.COMPLETED
+            task.completedAt = java.util.Date()
+            manager.emitEvent(TaskEvent.DownloadComplete(
+                taskId = task.id,
+                asin = asin,
+                title = title,
+                outputPath = finalPath
+            ))
+            manager.emitEvent(TaskEvent.TaskCompleted(task))
+            manager.unregisterActiveTask(task.id)
+
+            clearManuallyPaused(asin)
+
+            Log.d(TAG, "Plain audio download complete: $asin")
+        } catch (e: Exception) {
+            Log.e(TAG, "Plain audio copy failed for $asin", e)
+            task.status = TaskStatus.FAILED
+            task.error = e.message
+            task.completedAt = java.util.Date()
+            manager.emitEvent(TaskEvent.TaskFailed(task, e.message ?: "Copy failed"))
+            manager.unregisterActiveTask(task.id)
+        }
     }
 
     /**
@@ -579,6 +661,17 @@ class DownloadWorker(
             val pathParts = filePath.split('/')
             val fileName = pathParts.last()
             val directories = pathParts.dropLast(1)
+            val sourceExtension = cachedFile.extension.lowercase().ifBlank { "m4b" }
+            val targetFileName = if (fileName.contains('.')) {
+                fileName.replaceAfterLast('.', sourceExtension)
+            } else {
+                "$fileName.$sourceExtension"
+            }
+            val mimeType = when (sourceExtension) {
+                "mp3" -> "audio/mpeg"
+                "m4a", "m4b", "mp4" -> "audio/mp4"
+                else -> "audio/*"
+            }
 
             // Navigate/create subdirectories
             var currentDir = docDir
@@ -593,12 +686,11 @@ class DownloadWorker(
             }
 
             // Delete existing file
-            currentDir.findFile(fileName)?.delete()
+            currentDir.findFile(targetFileName)?.delete()
 
             // Create new file
-            val outputFile = currentDir.createFile("audio/mp4", fileName)
-                ?: currentDir.createFile("audio/x-m4b", fileName)
-                ?: currentDir.createFile("audio/*", fileName)
+            val outputFile = currentDir.createFile(mimeType, targetFileName)
+                ?: currentDir.createFile("audio/*", targetFileName)
                 ?: throw Exception("Failed to create file in SAF directory")
 
             Log.d(TAG, "Copying to SAF: ${outputFile.uri}")
@@ -875,11 +967,14 @@ class DownloadWorker(
             // Get naming pattern from SharedPreferences (default to author_series_book)
             val prefs = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
             val namingPattern = prefs.getString("naming_pattern", "author_series_book") ?: "author_series_book"
+            val podcastNamingPattern = prefs.getString("podcast_naming_pattern", "podcast_episode_folder")
+                ?: "podcast_episode_folder"
 
             val params = JSONObject().apply {
                 put("db_path", manager.getDbPath())
                 put("asin", asin)
                 put("naming_pattern", namingPattern)
+                put("podcast_naming_pattern", podcastNamingPattern)
             }
 
             val result = ExpoRustBridgeModule.nativeBuildFilePath(params.toString())

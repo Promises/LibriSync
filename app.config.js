@@ -51,6 +51,7 @@ export default {
         }
       ],
       "expo-secure-store",
+      "./plugins/withDebugApplicationId",
       "./plugins/withDownloadService",
       "./plugins/withFFmpegKit",
       "./plugins/withReleaseSigning"

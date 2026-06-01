@@ -14,6 +14,8 @@ import type { Theme } from '../hooks/useStyles';
 
 interface LoginScreenProps {
   onLoginSuccess: (account: Account) => void;
+  onCancel?: () => void;
+  title?: string;
 }
 
 interface Region {
@@ -37,7 +39,7 @@ const REGIONS: Region[] = [
   { code: 'br', name: 'Brazil', domain: 'audible.com.br', flag: '🇧🇷' },
 ];
 
-export default function LoginScreen({ onLoginSuccess }: LoginScreenProps) {
+export default function LoginScreen({ onLoginSuccess, onCancel, title = 'Log in to Audible' }: LoginScreenProps) {
   const styles = useStyles(createStyles);
   const { colors, spacing } = useTheme();
   const [isLoading, setIsLoading] = useState(false);
@@ -151,9 +153,14 @@ export default function LoginScreen({ onLoginSuccess }: LoginScreenProps) {
           cookiesMap[cookie.Name] = cookie.Value;
         });
 
+        const customerName = tokens.customer_info.name?.trim()
+          || tokens.customer_info.given_name?.trim()
+          || 'Audible Account';
+        const regionCode = locale.country_code.toUpperCase();
+
         const account: Account = {
-          account_id: tokens.customer_info.user_id,
-          account_name: tokens.customer_info.name,
+          account_id: `${tokens.customer_info.user_id}:${locale.country_code}`,
+          account_name: `${customerName} (${regionCode})`,
           library_scan: true,
           decrypt_key: '',  // Will be filled by getActivationBytes
           locale,
@@ -250,8 +257,18 @@ export default function LoginScreen({ onLoginSuccess }: LoginScreenProps) {
         </>
       ) : (
         <ScrollView contentContainerStyle={styles.regionPickerContainer}>
-          <Text style={styles.title}>Log in to Audible</Text>
+          <Text style={styles.title}>{title}</Text>
           <Text style={styles.subtitle}>Select your region to continue</Text>
+
+          {onCancel && (
+            <TouchableOpacity
+              style={styles.cancelButton}
+              onPress={onCancel}
+              disabled={isLoading}
+            >
+              <Text style={styles.cancelButtonText}>Back to Accounts</Text>
+            </TouchableOpacity>
+          )}
 
           <View style={styles.regionGrid}>
             {REGIONS.map((region) => (
@@ -340,6 +357,16 @@ const createStyles = (theme: Theme) => ({
   },
   regionGrid: {
     gap: theme.spacing.md,
+  },
+  cancelButton: {
+    padding: theme.spacing.md,
+    marginBottom: theme.spacing.md,
+    alignItems: 'center' as const,
+  },
+  cancelButtonText: {
+    ...theme.typography.body,
+    color: theme.colors.accent,
+    fontWeight: '600' as const,
   },
   regionCard: {
     backgroundColor: theme.colors.backgroundSecondary,

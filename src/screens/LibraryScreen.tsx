@@ -7,10 +7,11 @@ import {useStyles} from '../hooks/useStyles';
 import {useTheme} from '../styles/theme';
 import type {Theme} from '../hooks/useStyles';
 import {
-    getBooks,
     getBooksWithFilters,
+    syncPodcastEpisodes,
     getAllSeries,
     getAllCategories,
+    getAllAccounts,
     initializeDatabase,
     refreshToken,
     enqueueDownloadNew,
@@ -25,6 +26,7 @@ import {
     createCoverArtFile,
     requestNotificationPermission,
     getPrimaryAccount,
+    getAccount,
     saveAccount,
     downloadLibrivoxFile,
     copyTextToClipboard,
@@ -45,6 +47,8 @@ import {
 
 const DOWNLOAD_PATH_KEY = 'download_path';
 const LIBRARY_PREFS_KEY = 'library_preferences';
+const INCLUDE_PODCASTS_KEY = 'include_podcasts';
+const PAGE_SIZE = 100;
 
 type SortField = 'title' | 'release_date' | 'date_added' | 'series' | 'length' | 'downloaded';
 type BookSortField = Exclude<SortField, 'downloaded'>;
@@ -93,16 +97,26 @@ export default function LibraryScreen() {
     const [selectedSeries, setSelectedSeries] = useState<string | null>(null);
     const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
     const [sourceFilter, setSourceFilter] = useState<SourceFilter>('all');
+    const [accountFilter, setAccountFilter] = useState<string | null>(null);
+    const [includePodcasts, setIncludePodcasts] = useState(true);
 
     // Filter options
     const [allSeries, setAllSeries] = useState<string[]>([]);
     const [allCategories, setAllCategories] = useState<string[]>([]);
+    const [allAccounts, setAllAccounts] = useState<Account[]>([]);
 
     // Modal state
     const [showFilterModal, setShowFilterModal] = useState(false);
     const [showSortModal, setShowSortModal] = useState(false);
     const [showContextMenu, setShowContextMenu] = useState(false);
     const [selectedBook, setSelectedBook] = useState<Book | null>(null);
+    const [selectedPodcast, setSelectedPodcast] = useState<Book | null>(null);
+    const [podcastEpisodes, setPodcastEpisodes] = useState<Book[]>([]);
+    const [podcastEpisodeCount, setPodcastEpisodeCount] = useState(0);
+    const [isLoadingPodcastEpisodes, setIsLoadingPodcastEpisodes] = useState(false);
+    const [isRefreshingPodcastEpisodes, setIsRefreshingPodcastEpisodes] = useState(false);
+    const [isLoadingMorePodcastEpisodes, setIsLoadingMorePodcastEpisodes] = useState(false);
+    const [hasMorePodcastEpisodes, setHasMorePodcastEpisodes] = useState(false);
 
     // Controls visibility
     const [showControls, setShowControls] = useState(false);
@@ -142,14 +156,23 @@ export default function LibraryScreen() {
                 clearTimeout(searchTimeout.current);
             }
         };
-    }, [searchQuery, sortField, sortDirection, downloadedGroupSortField, downloadedGroupSortDirection, selectedSeries, selectedCategory, sourceFilter]);
+    }, [searchQuery, sortField, sortDirection, downloadedGroupSortField, downloadedGroupSortDirection, selectedSeries, selectedCategory, sourceFilter, accountFilter, includePodcasts]);
 
     // Reload books when tab is focused
     useFocusEffect(
         React.useCallback(() => {
             console.log('[LibraryScreen] Tab focused, reloading books...');
             loadBooks(true);
-        }, [searchQuery, sortField, sortDirection, downloadedGroupSortField, downloadedGroupSortDirection, selectedSeries, selectedCategory, sourceFilter])
+        }, [searchQuery, sortField, sortDirection, downloadedGroupSortField, downloadedGroupSortDirection, selectedSeries, selectedCategory, sourceFilter, accountFilter, includePodcasts])
+    );
+
+    useFocusEffect(
+        React.useCallback(() => {
+            SecureStore.getItemAsync(INCLUDE_PODCASTS_KEY).then(value => {
+                setIncludePodcasts(value !== 'false');
+            });
+            loadFilterOptions();
+        }, [])
     );
 
     // Poll for download progress
@@ -226,9 +249,11 @@ export default function LibraryScreen() {
                 initializeDatabase(dbPath);
                 const series = getAllSeries(dbPath);
                 const categories = getAllCategories(dbPath);
+                const accounts = await getAllAccounts(dbPath);
 
                 setAllSeries(series);
                 setAllCategories(categories);
+                setAllAccounts(accounts);
             } catch (error) {
                 console.log('[LibraryScreen] Database not ready yet');
             }
@@ -254,7 +279,7 @@ export default function LibraryScreen() {
             }
 
             const offset = reset ? 0 : audiobooks.length;
-            const limit = 100;
+            const limit = PAGE_SIZE;
 
             console.log('[LibraryScreen] Fetching books:', {
                 offset,
@@ -264,6 +289,8 @@ export default function LibraryScreen() {
                 sortDirection,
                 selectedSeries,
                 selectedCategory,
+                accountFilter,
+                includePodcasts,
                 downloadedGroupSortField,
                 downloadedGroupSortDirection,
             });
@@ -279,7 +306,9 @@ export default function LibraryScreen() {
                 sortDirection,
                 sourceFilter === 'all' ? null : sourceFilter,
                 sortField === 'downloaded' ? downloadedGroupSortField : null,
-                sortField === 'downloaded' ? downloadedGroupSortDirection : null
+                sortField === 'downloaded' ? downloadedGroupSortDirection : null,
+                accountFilter,
+                includePodcasts
             );
 
             console.log('[LibraryScreen] Loaded books:', response.books.length, 'of', response.total_count);
@@ -318,6 +347,114 @@ export default function LibraryScreen() {
             setIsLoadingMore(true);
             loadBooks(false);
         }
+    };
+
+    const loadPodcastEpisodes = async (podcast: Book, reset: boolean = false) => {
+        try {
+            const dbPath = getDatabasePath();
+
+            try {
+                initializeDatabase(dbPath);
+            } catch (dbError) {
+                setPodcastEpisodes([]);
+                setPodcastEpisodeCount(0);
+                setHasMorePodcastEpisodes(false);
+                return;
+            }
+
+            const offset = reset ? 0 : podcastEpisodes.length;
+            let remoteEpisodeCount: number | null = null;
+
+            try {
+                const accountId = podcast.account?.split(',').find(Boolean) || accountFilter;
+                const account = accountId
+                    ? await getAccount(dbPath, accountId)
+                    : await getPrimaryAccount(dbPath);
+
+                if (account) {
+                    const syncStats = await syncPodcastEpisodes(
+                        dbPath,
+                        account,
+                        podcast.audible_product_id,
+                        offset,
+                        PAGE_SIZE
+                    );
+                    remoteEpisodeCount = syncStats.total_library_count;
+                }
+            } catch (syncError) {
+                console.warn('[LibraryScreen] Could not sync podcast episode page:', syncError);
+            }
+
+            const response = getBooksWithFilters(
+                dbPath,
+                offset,
+                PAGE_SIZE,
+                null,
+                null,
+                null,
+                'release_date',
+                'desc',
+                'audible',
+                null,
+                null,
+                accountFilter,
+                true,
+                podcast.audible_product_id
+            );
+            const totalEpisodes = Math.max(response.total_count, remoteEpisodeCount ?? 0);
+
+            if (reset) {
+                setPodcastEpisodes(response.books);
+            } else {
+                setPodcastEpisodes(prev => [...prev, ...response.books]);
+            }
+
+            setPodcastEpisodeCount(totalEpisodes);
+            setHasMorePodcastEpisodes(offset + response.books.length < totalEpisodes);
+        } catch (error) {
+            console.error('[LibraryScreen] Error loading podcast episodes:', error);
+            if (reset) {
+                setPodcastEpisodes([]);
+                setPodcastEpisodeCount(0);
+            }
+            setHasMorePodcastEpisodes(false);
+        } finally {
+            setIsLoadingPodcastEpisodes(false);
+            setIsRefreshingPodcastEpisodes(false);
+            setIsLoadingMorePodcastEpisodes(false);
+        }
+    };
+
+    const handlePodcastPress = (podcast: Book) => {
+        setSelectedPodcast(podcast);
+        setPodcastEpisodes([]);
+        setPodcastEpisodeCount(0);
+        setHasMorePodcastEpisodes(true);
+        setIsLoadingPodcastEpisodes(true);
+        loadPodcastEpisodes(podcast, true);
+    };
+
+    const handleClosePodcast = () => {
+        setSelectedPodcast(null);
+        setPodcastEpisodes([]);
+        setPodcastEpisodeCount(0);
+        setHasMorePodcastEpisodes(false);
+    };
+
+    const handlePodcastEpisodesRefresh = () => {
+        if (!selectedPodcast) return;
+
+        setIsRefreshingPodcastEpisodes(true);
+        loadPodcastEpisodes(selectedPodcast, true);
+    };
+
+    const handleLoadMorePodcastEpisodes = () => {
+        if (!selectedPodcast || isLoadingPodcastEpisodes || isLoadingMorePodcastEpisodes || !hasMorePodcastEpisodes) {
+            return;
+        }
+
+        setIsLoadingMorePodcastEpisodes(true);
+        loadPodcastEpisodes(selectedPodcast, false);
     };
 
     const handleSortChange = (field: SortField, direction: SortDirection) => {
@@ -379,7 +516,11 @@ export default function LibraryScreen() {
                 selectedCategory || null,
                 exportSortField === 'title' ? 'title' : 'length',
                 exportSortDirection,
-                sourceFilter === 'all' ? null : sourceFilter
+                sourceFilter === 'all' ? null : sourceFilter,
+                null,
+                null,
+                accountFilter,
+                includePodcasts
             );
 
             books.push(...response.books);
@@ -466,6 +607,7 @@ export default function LibraryScreen() {
         setSelectedSeries(null);
         setSelectedCategory(null);
         setSourceFilter('all');
+        setAccountFilter(null);
         setShowFilterModal(false);
     };
 
@@ -514,7 +656,27 @@ export default function LibraryScreen() {
             return {text: '✓ Downloaded', color: colors.success};
         }
 
+        if (book.is_downloadable === false) {
+            return {text: 'Episodes Only', color: colors.textSecondary};
+        }
+
         return {text: 'Available', color: colors.textSecondary};
+    };
+
+    const isPodcastParent = (book: Book): boolean => {
+        const deliveryType = book.content_delivery_type?.toLowerCase() || '';
+        return book.content_type === 4
+            || (book.is_downloadable === false && (
+                deliveryType.includes('podcast')
+                || deliveryType === 'periodical'
+            ));
+    };
+
+    const getBookAccountIds = (book: Book): string[] => {
+        return (book.account || '')
+            .split(',')
+            .map(value => value.trim())
+            .filter(Boolean);
     };
 
     const requestNotificationPermission = async (): Promise<boolean> => {
@@ -583,6 +745,14 @@ export default function LibraryScreen() {
             }
 
             // Audible books: existing DRM download flow
+            if (book.is_downloadable === false) {
+                Alert.alert(
+                    'Not Downloadable',
+                    'This item is a podcast or periodical parent. Enable podcasts to sync episodes, then download an episode instead.'
+                );
+                return;
+            }
+
             const hasPermission = await requestNotificationPermission();
             if (!hasPermission) {
                 Alert.alert(
@@ -596,7 +766,15 @@ export default function LibraryScreen() {
             const dbPath = getDatabasePath();
             initializeDatabase(dbPath);
 
-            let account = await getPrimaryAccount(dbPath);
+            const owningAccountId = accountFilter || getBookAccountIds(book)[0] || null;
+            let account = owningAccountId
+                ? await getAccount(dbPath, owningAccountId)
+                : await getPrimaryAccount(dbPath);
+
+            if (!account) {
+                account = await getPrimaryAccount(dbPath);
+            }
+
             if (!account) {
                 Alert.alert('Error', 'Please log in first');
                 return;
@@ -721,6 +899,24 @@ export default function LibraryScreen() {
         }
     };
 
+    const refreshAfterDownloadStateChange = (book: Book) => {
+        loadBooks(true);
+
+        if (
+            selectedPodcast &&
+            book.origin_asin === selectedPodcast.audible_product_id
+        ) {
+            setPodcastEpisodes(prev =>
+                prev.map(episode =>
+                    episode.audible_product_id === book.audible_product_id
+                        ? {...episode, file_path: undefined}
+                        : episode
+                )
+            );
+            loadPodcastEpisodes(selectedPodcast, true);
+        }
+    };
+
     const handleMarkAsNotDownloaded = async (book: Book) => {
         try {
             const dbPath = getDatabasePath();
@@ -742,7 +938,7 @@ export default function LibraryScreen() {
                                     await clearBookDownloadState(dbPath, book.audible_product_id, false);
                                     console.log('[LibraryScreen] Cleared download status:', book.title);
                                     Alert.alert('Success', `Download status cleared for "${book.title}".\n\nThe file still exists on disk.`);
-                                    loadBooks(true);
+                                    refreshAfterDownloadStateChange(book);
                                 } catch (error: any) {
                                     console.error('[LibraryScreen] Clear status error:', error);
                                     Alert.alert('Error', error.message || 'Failed to clear download status');
@@ -776,7 +972,7 @@ export default function LibraryScreen() {
                                         const deleteError = result.delete_error ? `\n\nDelete error: ${result.delete_error}` : '';
                                         Alert.alert('Partial Success', `Download status cleared, but file could not be deleted.${deleteError}\n\nYou may need to delete it manually.`);
                                     }
-                                    loadBooks(true);
+                                    refreshAfterDownloadStateChange(book);
                                 } catch (error: any) {
                                     console.error('[LibraryScreen] Delete file error:', error);
                                     Alert.alert('Error', error.message || 'Failed to delete file');
@@ -800,7 +996,7 @@ export default function LibraryScreen() {
                                     await clearBookDownloadState(dbPath, book.audible_product_id, false);
                                     console.log('[LibraryScreen] Cleared download status:', book.title);
                                     Alert.alert('Success', `Download status cleared for "${book.title}".`);
-                                    loadBooks(true);
+                                    refreshAfterDownloadStateChange(book);
                                 } catch (error: any) {
                                     console.error('[LibraryScreen] Clear status error:', error);
                                     Alert.alert('Error', error.message || 'Failed to clear download status');
@@ -896,13 +1092,16 @@ export default function LibraryScreen() {
 
     const renderItem = ({item}: { item: Book }) => {
         const status = getStatus(item);
-        const authorText = (item.authors?.length || 0) > 0 ? item.authors.join(', ') : 'Unknown Author';
+        const parentPodcast = isPodcastParent(item);
+        const authorText = parentPodcast
+            ? 'Podcast'
+            : (item.authors?.length || 0) > 0 ? item.authors.join(', ') : 'Unknown Author';
         const coverUrl = getCoverUrl(item);
         const task = downloadTasks.get(item.audible_product_id);
         const isDownloaded = !!item.file_path || task?.status === 'completed';
         const isProcessing = task?.status === 'decrypting' || task?.status === 'validating' || task?.status === 'copying';
         const canRetryConversion = task?.status === 'failed' && !!task.aaxc_key;
-        const canDownload = !task || (task.status === 'failed' && !canRetryConversion);
+        const canDownload = item.is_downloadable !== false && (!task || (task.status === 'failed' && !canRetryConversion));
         const isDownloading = task?.status === 'downloading';
         const isPaused = task?.status === 'paused';
         const isQueued = task?.status === 'queued';
@@ -910,8 +1109,13 @@ export default function LibraryScreen() {
         return (
             <TouchableOpacity
                 style={styles.item}
-                onPress={() => console.log('Item pressed:', item)}
+                onPress={() => {
+                    if (parentPodcast) {
+                        handlePodcastPress(item);
+                    }
+                }}
                 onLongPress={() => handleBookLongPress(item)}
+                accessibilityLabel={parentPodcast ? `Open ${item.title} episodes` : item.title}
             >
                 <View style={styles.itemRow}>
                     {coverUrl ? (
@@ -937,8 +1141,15 @@ export default function LibraryScreen() {
                                 {item.series_name} {item.series_sequence ? `#${item.series_sequence}` : ''}
                             </Text>
                         )}
+                        {item.episode_number !== undefined && item.episode_number !== null && (
+                            <Text style={styles.series} numberOfLines={1}>
+                                Episode {item.episode_number}
+                            </Text>
+                        )}
                         <View style={styles.metadata}>
-                            <Text style={styles.duration}>{formatDuration(item.duration_seconds)}</Text>
+                            {!parentPodcast && (
+                                <Text style={styles.duration}>{formatDuration(item.duration_seconds)}</Text>
+                            )}
                             {item.source === 'librivox' && (
                                 <View style={styles.sourceBadge}>
                                     <Text style={styles.sourceBadgeText}>LibriVox</Text>
@@ -1006,10 +1217,18 @@ export default function LibraryScreen() {
                             <ActivityIndicator size="small" color={colors.textSecondary} />
                         </View>
                     )}
+
+                    {parentPodcast && (
+                        <View style={styles.episodeButton}>
+                            <Ionicons name="list" size={22} color={colors.accent} />
+                        </View>
+                    )}
                 </View>
             </TouchableOpacity>
         );
     };
+
+    const renderPodcastEpisodeItem = ({item}: { item: Book }) => renderItem({item});
 
     const getSortLabel = () => {
         const fieldLabels = {
@@ -1033,8 +1252,11 @@ export default function LibraryScreen() {
         if (selectedSeries) count++;
         if (selectedCategory) count++;
         if (sourceFilter !== 'all') count++;
+        if (accountFilter) count++;
         return count;
     };
+
+    const selectedBookIsPodcastParent = selectedBook ? isPodcastParent(selectedBook) : false;
 
     return (
         <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
@@ -1308,6 +1530,71 @@ export default function LibraryScreen() {
                 />
             )}
 
+            <Modal
+                visible={!!selectedPodcast}
+                animationType="slide"
+                onRequestClose={handleClosePodcast}
+            >
+                <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
+                    <View style={styles.episodeHeader}>
+                        <TouchableOpacity
+                            style={styles.episodeBackButton}
+                            onPress={handleClosePodcast}
+                            accessibilityLabel="Back to library"
+                        >
+                            <Ionicons name="arrow-back" size={24} color={colors.textPrimary} />
+                        </TouchableOpacity>
+                        <View style={styles.episodeHeaderText}>
+                            <Text style={styles.episodeHeaderTitle} numberOfLines={1}>
+                                {selectedPodcast?.title || 'Episodes'}
+                            </Text>
+                            <Text style={styles.episodeHeaderSubtitle}>
+                                {podcastEpisodeCount > 0
+                                    ? `${podcastEpisodes.length} of ${podcastEpisodeCount} episodes`
+                                    : `${podcastEpisodes.length} episodes`}
+                            </Text>
+                        </View>
+                    </View>
+
+                    {isLoadingPodcastEpisodes ? (
+                        <View style={styles.emptyState}>
+                            <ActivityIndicator size="large" color={colors.accent} />
+                        </View>
+                    ) : podcastEpisodes.length === 0 ? (
+                        <View style={styles.emptyState}>
+                            <Text style={styles.emptyText}>No episodes</Text>
+                        </View>
+                    ) : (
+                        <FlatList
+                            data={podcastEpisodes}
+                            renderItem={renderPodcastEpisodeItem}
+                            keyExtractor={(item, index) =>
+                                `${item.id ?? item.audible_product_id}-${index}`
+                            }
+                            contentContainerStyle={styles.list}
+                            ItemSeparatorComponent={() => <View style={styles.separator}/>}
+                            onEndReached={handleLoadMorePodcastEpisodes}
+                            onEndReachedThreshold={0.5}
+                            ListFooterComponent={
+                                isLoadingMorePodcastEpisodes ? (
+                                    <View style={styles.loadingFooter}>
+                                        <Text style={styles.loadingText}>Loading more...</Text>
+                                    </View>
+                                ) : null
+                            }
+                            refreshControl={
+                                <RefreshControl
+                                    refreshing={isRefreshingPodcastEpisodes}
+                                    onRefresh={handlePodcastEpisodesRefresh}
+                                    tintColor={colors.accent}
+                                    colors={[colors.accent]}
+                                />
+                            }
+                        />
+                    )}
+                </SafeAreaView>
+            </Modal>
+
             {/* Sort Modal */}
             <Modal
                 visible={showSortModal}
@@ -1432,6 +1719,38 @@ export default function LibraryScreen() {
                                 </TouchableOpacity>
                             ))}
 
+                            {allAccounts.length > 1 && (
+                                <>
+                                    <Text style={styles.filterSectionTitle}>Account</Text>
+                                    <TouchableOpacity
+                                        style={[
+                                            styles.filterOption,
+                                            !accountFilter && styles.filterOptionSelected
+                                        ]}
+                                        onPress={() => setAccountFilter(null)}
+                                    >
+                                        <Text style={styles.filterOptionText}>All Accounts</Text>
+                                        {!accountFilter && <Text style={styles.modalCheck}>✓</Text>}
+                                    </TouchableOpacity>
+
+                                    {allAccounts.map((savedAccount) => (
+                                        <TouchableOpacity
+                                            key={savedAccount.account_id}
+                                            style={[
+                                                styles.filterOption,
+                                                accountFilter === savedAccount.account_id && styles.filterOptionSelected
+                                            ]}
+                                            onPress={() => setAccountFilter(savedAccount.account_id)}
+                                        >
+                                            <Text style={styles.filterOptionText}>
+                                                {savedAccount.account_name || savedAccount.account_id}
+                                            </Text>
+                                            {accountFilter === savedAccount.account_id && <Text style={styles.modalCheck}>✓</Text>}
+                                        </TouchableOpacity>
+                                    ))}
+                                </>
+                            )}
+
                             {/* Series Filter */}
                             <Text style={styles.filterSectionTitle}>Series</Text>
                             <TouchableOpacity
@@ -1517,53 +1836,57 @@ export default function LibraryScreen() {
                             {selectedBook?.authors?.join(', ') || ''}
                         </Text>
 
-                        <TouchableOpacity
-                            style={styles.modalOption}
-                            onPress={() => {
-                                setShowContextMenu(false);
-                                if (selectedBook) {
-                                    handleSelectFileAsDownloaded(selectedBook);
-                                }
-                            }}
-                        >
-                            <Ionicons
-                                name="document-attach"
-                                size={24}
-                                color={colors.accent}
-                                style={styles.modalOptionIcon}
-                            />
-                            <View style={styles.modalOptionTextContainer}>
-                                <Text style={styles.modalOptionText}>Select File as Downloaded</Text>
-                                <Text style={styles.modalOptionDescription}>
-                                    Choose an existing audio file on your device
-                                </Text>
-                            </View>
-                        </TouchableOpacity>
+                        {!selectedBookIsPodcastParent && (
+                            <>
+                                <TouchableOpacity
+                                    style={styles.modalOption}
+                                    onPress={() => {
+                                        setShowContextMenu(false);
+                                        if (selectedBook) {
+                                            handleSelectFileAsDownloaded(selectedBook);
+                                        }
+                                    }}
+                                >
+                                    <Ionicons
+                                        name="document-attach"
+                                        size={24}
+                                        color={colors.accent}
+                                        style={styles.modalOptionIcon}
+                                    />
+                                    <View style={styles.modalOptionTextContainer}>
+                                        <Text style={styles.modalOptionText}>Select File as Downloaded</Text>
+                                        <Text style={styles.modalOptionDescription}>
+                                            Choose an existing audio file on your device
+                                        </Text>
+                                    </View>
+                                </TouchableOpacity>
 
-                        <TouchableOpacity
-                            style={styles.modalOption}
-                            onPress={() => {
-                                setShowContextMenu(false);
-                                if (selectedBook) {
-                                    handleCreateCoverArt(selectedBook);
-                                }
-                            }}
-                        >
-                            <Ionicons
-                                name="image"
-                                size={24}
-                                color={colors.accent}
-                                style={styles.modalOptionIcon}
-                            />
-                            <View style={styles.modalOptionTextContainer}>
-                                <Text style={styles.modalOptionText}>Create Cover Art File</Text>
-                                <Text style={styles.modalOptionDescription}>
-                                    Save EmbeddedCover.jpg for Smart Audiobook Player
-                                </Text>
-                            </View>
-                        </TouchableOpacity>
+                                <TouchableOpacity
+                                    style={styles.modalOption}
+                                    onPress={() => {
+                                        setShowContextMenu(false);
+                                        if (selectedBook) {
+                                            handleCreateCoverArt(selectedBook);
+                                        }
+                                    }}
+                                >
+                                    <Ionicons
+                                        name="image"
+                                        size={24}
+                                        color={colors.accent}
+                                        style={styles.modalOptionIcon}
+                                    />
+                                    <View style={styles.modalOptionTextContainer}>
+                                        <Text style={styles.modalOptionText}>Create Cover Art File</Text>
+                                        <Text style={styles.modalOptionDescription}>
+                                            Save EmbeddedCover.jpg for Smart Audiobook Player
+                                        </Text>
+                                    </View>
+                                </TouchableOpacity>
+                            </>
+                        )}
 
-                        {selectedBook && (
+                        {selectedBook && !selectedBookIsPodcastParent && (
                             <>
                                 <View style={styles.modalDivider} />
                                 <TouchableOpacity
@@ -1916,6 +2239,16 @@ const createStyles = (theme: Theme) => ({
         fontSize: 20,
         color: theme.colors.background,
     },
+    episodeButton: {
+        width: 44,
+        height: 44,
+        borderRadius: 22,
+        backgroundColor: theme.colors.background,
+        borderWidth: 1,
+        borderColor: theme.colors.accent,
+        justifyContent: 'center' as const,
+        alignItems: 'center' as const,
+    },
     pauseButton: {
         width: 44,
         height: 44,
@@ -1953,6 +2286,37 @@ const createStyles = (theme: Theme) => ({
     cancelButtonText: {
         fontSize: 20,
         color: theme.colors.background,
+    },
+    episodeHeader: {
+        flexDirection: 'row' as const,
+        alignItems: 'center' as const,
+        gap: theme.spacing.md,
+        padding: theme.spacing.lg,
+        borderBottomWidth: 1,
+        borderBottomColor: theme.colors.border,
+        backgroundColor: theme.colors.backgroundSecondary,
+    },
+    episodeBackButton: {
+        width: 44,
+        height: 44,
+        borderRadius: 22,
+        justifyContent: 'center' as const,
+        alignItems: 'center' as const,
+        backgroundColor: theme.colors.background,
+        borderWidth: 1,
+        borderColor: theme.colors.border,
+    },
+    episodeHeaderText: {
+        flex: 1,
+        minWidth: 0,
+    },
+    episodeHeaderTitle: {
+        ...theme.typography.subtitle,
+        color: theme.colors.textPrimary,
+    },
+    episodeHeaderSubtitle: {
+        ...theme.typography.caption,
+        color: theme.colors.textSecondary,
     },
     modalOverlay: {
         flex: 1,

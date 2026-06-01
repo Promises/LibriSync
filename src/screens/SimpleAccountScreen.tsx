@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, Alert, ScrollView, Platform } from 'react-native';
+import { View, Text, Alert, ScrollView, Platform, TouchableOpacity } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import * as SecureStore from 'expo-secure-store';
@@ -10,10 +10,11 @@ import {
   syncLibrary,
   initializeDatabase,
   refreshToken,
-  getBooks,
+  getBooksWithFilters,
   getCustomerInformation,
   saveAccount,
   getPrimaryAccount,
+  getAllAccounts,
   deleteAccount,
   scanDownloadDirectory,
   setDownloadDirectory,
@@ -30,6 +31,7 @@ import type { Theme } from '../hooks/useStyles';
 import { getDatabasePath } from '../utils/appPaths';
 
 const DOWNLOAD_PATH_KEY = 'download_path';
+const SELECTED_ACCOUNT_KEY = 'selected_audible_account_id';
 
 export default function SimpleAccountScreen() {
   const styles = useStyles(createStyles);
@@ -44,6 +46,8 @@ export default function SimpleAccountScreen() {
   const [isRefreshingToken, setIsRefreshingToken] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<'connected' | 'error' | 'checking'>('checking');
   const [accountName, setAccountName] = useState<string | null>(null);
+  const [allAccounts, setAllAccounts] = useState<Account[]>([]);
+  const [showAddAccount, setShowAddAccount] = useState(false);
 
   // Load account on mount
   useEffect(() => {
@@ -73,11 +77,19 @@ export default function SimpleAccountScreen() {
       console.log('[SimpleAccountScreen] Loading account from SQLite database');
       initializeDatabase(dbPath);
 
-      // Try to load account from SQLite (single source of truth)
-      const loadedAccount = await getPrimaryAccount(dbPath);
+      const accounts = await getAllAccounts(dbPath);
+      setAllAccounts(accounts);
+
+      const selectedAccountId = await SecureStore.getItemAsync(SELECTED_ACCOUNT_KEY);
+      const primaryAccount = await getPrimaryAccount(dbPath);
+      const loadedAccount = accounts.find(acc => acc.account_id === selectedAccountId)
+        || primaryAccount
+        || accounts[0]
+        || null;
 
       if (loadedAccount) {
         console.log('[SimpleAccountScreen] Account found in SQLite database');
+        await SecureStore.setItemAsync(SELECTED_ACCOUNT_KEY, loadedAccount.account_id);
         setAccount(loadedAccount);
 
         // Load token expiry
@@ -88,6 +100,7 @@ export default function SimpleAccountScreen() {
       } else {
         console.log('[SimpleAccountScreen] No account found in SQLite database');
         setAccount(null);
+        setAllAccounts([]);
         setSyncStats(null);
         setLastSyncDate(null);
         setTokenExpiry(null);
@@ -116,8 +129,22 @@ export default function SimpleAccountScreen() {
         return;
       }
 
-      // Get first page to see if we have any synced books
-      const response = getBooks(dbPath, 0, 1);
+      // Get first page for this account to see if any books are synced
+      const response = getBooksWithFilters(
+        dbPath,
+        0,
+        1,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        acc.account_id,
+        true
+      );
       console.log('[SimpleAccountScreen] getBooks response:', response);
 
       if (response.books && response.books.length > 0) {
@@ -153,20 +180,23 @@ export default function SimpleAccountScreen() {
 
   const loadTokenInfo = async (sourceAccount: Account | null = account) => {
     try {
-      let expiryStr = await SecureStore.getItemAsync('token_expires_at');
+      let expiryStr: string | null = null;
 
-      // If not found, try to extract from account identity
-      if (!expiryStr && sourceAccount?.identity) {
+      if (sourceAccount?.identity) {
         console.log('[SimpleAccountScreen] Token expiry not in SecureStore, extracting from account');
         // Access token is an object with token and expires_at properties
         const accessToken = sourceAccount.identity.access_token;
         if (typeof accessToken === 'object' && accessToken.expires_at) {
           expiryStr = accessToken.expires_at;
         }
-        // Save it for next time
-        if (expiryStr) {
-          await SecureStore.setItemAsync('token_expires_at', expiryStr);
-        }
+      }
+
+      if (!expiryStr) {
+        expiryStr = await SecureStore.getItemAsync('token_expires_at');
+      }
+
+      if (expiryStr) {
+        await SecureStore.setItemAsync('token_expires_at', expiryStr);
       }
 
       if (expiryStr) {
@@ -237,6 +267,38 @@ export default function SimpleAccountScreen() {
     );
   };
 
+  const getAccountLocale = (sourceAccount: Account | null = account) => {
+    return sourceAccount?.locale || sourceAccount?.identity?.locale || null;
+  };
+
+  const getLocaleCode = (sourceAccount: Account | null = account): string => {
+    return getAccountLocale(sourceAccount)?.country_code || '';
+  };
+
+  const formatAccountRegion = (sourceAccount: Account | null): string => {
+    const locale = getAccountLocale(sourceAccount);
+    const countryCode = locale?.country_code || '';
+    const countrySuffix = countryCode ? ` (${countryCode.toUpperCase()})` : '';
+
+    return `${locale?.name || countryCode.toUpperCase() || 'Unknown Region'}${countrySuffix}`;
+  };
+
+  const formatAccountName = (sourceAccount: Account): string => {
+    const countryCode = getLocaleCode(sourceAccount).toUpperCase();
+    const bareRegionName = countryCode ? `(${countryCode})` : '';
+    const savedName = sourceAccount.account_name?.trim();
+
+    if (savedName && savedName !== bareRegionName) {
+      return savedName;
+    }
+
+    const customerName = sourceAccount.identity?.customer_info?.name?.trim()
+      || sourceAccount.identity?.customer_info?.given_name?.trim();
+    const regionSuffix = countryCode ? ` (${countryCode})` : '';
+
+    return `${customerName || 'Audible Account'}${regionSuffix}`;
+  };
+
   const testConnection = async () => {
     if (!account?.identity) return;
 
@@ -248,10 +310,15 @@ export default function SimpleAccountScreen() {
       const accessToken = typeof account.identity.access_token === 'string'
         ? account.identity.access_token
         : account.identity.access_token.token;
+      const localeCode = getLocaleCode(account);
+
+      if (!localeCode) {
+        throw new Error('Missing Audible region');
+      }
 
       // Fetch fresh customer info from API
       const customerInfo = await getCustomerInformation(
-        account.locale.country_code,
+        localeCode,
         accessToken
       );
 
@@ -290,6 +357,7 @@ export default function SimpleAccountScreen() {
       // Save account to SQLite (single source of truth)
       await saveAccount(dbPath, newAccount);
       console.log('[SimpleAccountScreen] Account saved to SQLite database');
+      await SecureStore.setItemAsync(SELECTED_ACCOUNT_KEY, newAccount.account_id);
 
       const expiresAt = newAccount.identity?.access_token?.expires_at;
       if (expiresAt) {
@@ -300,7 +368,10 @@ export default function SimpleAccountScreen() {
       }
 
       // Update state
+      const accounts = await getAllAccounts(dbPath);
+      setAllAccounts(accounts);
       setAccount(newAccount);
+      setShowAddAccount(false);
 
       // Schedule background workers based on saved settings
       await scheduleWorkersFromSettings();
@@ -336,6 +407,14 @@ export default function SimpleAccountScreen() {
     }
   };
 
+  const handleSelectAccount = async (selected: Account) => {
+    await SecureStore.setItemAsync(SELECTED_ACCOUNT_KEY, selected.account_id);
+    setAccount(selected);
+    setAccountName(selected.identity?.customer_info?.name || selected.account_name || null);
+    await loadTokenInfo(selected);
+    await loadSyncedBooks(selected);
+  };
+
   const handleLogout = () => {
     console.log('========== LOG OUT BUTTON PRESSED ==========');
 
@@ -358,8 +437,8 @@ export default function SimpleAccountScreen() {
 
             try {
               // Delete from SQLite first; otherwise a restart/focus reload would restore the login.
+              const dbPath = getDatabasePath();
               if (account?.account_id) {
-                const dbPath = getDatabasePath();
                 initializeDatabase(dbPath);
                 await deleteAccount(dbPath, account.account_id);
                 console.log('[SimpleAccountScreen] Account deleted from SQLite database');
@@ -376,13 +455,26 @@ export default function SimpleAccountScreen() {
                 SecureStore.deleteItemAsync('audible_locale_code'),
               ]);
 
-              setAccount(null);
-              setSyncStats(null);
-              setLastSyncDate(null);
-              setTokenExpiry(null);
-              setTimeRemaining(null);
-              setAccountName(null);
-              setConnectionStatus('checking');
+              const remainingAccounts = await getAllAccounts(dbPath);
+              setAllAccounts(remainingAccounts);
+
+              if (remainingAccounts.length > 0) {
+                const nextAccount = remainingAccounts[0];
+                await SecureStore.setItemAsync(SELECTED_ACCOUNT_KEY, nextAccount.account_id);
+                setAccount(nextAccount);
+                setConnectionStatus('checking');
+                await loadTokenInfo(nextAccount);
+                await loadSyncedBooks(nextAccount);
+              } else {
+                await SecureStore.deleteItemAsync(SELECTED_ACCOUNT_KEY);
+                setAccount(null);
+                setSyncStats(null);
+                setLastSyncDate(null);
+                setTokenExpiry(null);
+                setTimeRemaining(null);
+                setAccountName(null);
+                setConnectionStatus('checking');
+              }
             } catch (error) {
               console.error('[SimpleAccountScreen] Failed to log out:', error);
               Alert.alert('Logout Failed', 'Could not remove the local account data.');
@@ -407,8 +499,14 @@ export default function SimpleAccountScreen() {
 
       // Call Rust bridge to refresh token (pass individual parameters)
       const { ExpoRustBridge } = require('../../modules/expo-rust-bridge');
+      const localeCode = getLocaleCode(account);
+
+      if (!localeCode) {
+        throw new Error('Missing Audible region');
+      }
+
       const response = await ExpoRustBridge.refreshAccessToken(
-        account.locale.country_code,
+        localeCode,
         account.identity.refresh_token,
         account.identity.device_serial_number
       );
@@ -620,9 +718,15 @@ export default function SimpleAccountScreen() {
   };
 
   // Show login screen if not authenticated
-  if (!account) {
+  if (!account || showAddAccount) {
     console.log('[SimpleAccountScreen] Rendering LoginScreen (no account)');
-    return <LoginScreen onLoginSuccess={handleLoginSuccess} />;
+    return (
+      <LoginScreen
+        onLoginSuccess={handleLoginSuccess}
+        onCancel={account ? () => setShowAddAccount(false) : undefined}
+        title={account ? 'Add Audible Account' : 'Log in to Audible'}
+      />
+    );
   }
 
   // Show account info if authenticated
@@ -631,6 +735,39 @@ export default function SimpleAccountScreen() {
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
       <ScrollView contentContainerStyle={styles.content}>
         <Text style={styles.title}>Account</Text>
+
+        <View style={styles.card}>
+          <Text style={styles.label}>Audible Accounts</Text>
+          {allAccounts.map((savedAccount) => {
+            const isSelected = savedAccount.account_id === account.account_id;
+            return (
+              <TouchableOpacity
+                key={savedAccount.account_id}
+                style={[
+                  styles.accountRow,
+                  isSelected && styles.accountRowSelected,
+                ]}
+                onPress={() => handleSelectAccount(savedAccount)}
+                disabled={isSelected}
+              >
+                <View style={styles.accountText}>
+                  <Text style={styles.value}>{formatAccountName(savedAccount)}</Text>
+                  <Text style={styles.caption}>
+                    {formatAccountRegion(savedAccount)}
+                  </Text>
+                </View>
+                {isSelected && <Text style={styles.selectedMark}>✓</Text>}
+              </TouchableOpacity>
+            );
+          })}
+          <Button
+            title="Add Account"
+            onPress={() => setShowAddAccount(true)}
+            variant="outlined"
+            state="primary"
+            style={{ marginTop: spacing.sm }}
+          />
+        </View>
 
         {accountName && (
           <View style={styles.card}>
@@ -660,7 +797,7 @@ export default function SimpleAccountScreen() {
         <View style={styles.card}>
           <Text style={styles.label}>Region</Text>
           <Text style={styles.value}>
-            {account.locale.name} ({account.locale.country_code.toUpperCase()})
+            {formatAccountRegion(account)}
           </Text>
         </View>
 
@@ -765,6 +902,30 @@ const createStyles = (theme: Theme) => ({
   caption: {
     ...theme.typography.caption,
     marginTop: theme.spacing.xs,
+  },
+  accountRow: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    justifyContent: 'space-between' as const,
+    paddingVertical: theme.spacing.sm,
+    paddingHorizontal: theme.spacing.sm,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    marginTop: theme.spacing.sm,
+  },
+  accountRowSelected: {
+    borderColor: theme.colors.accent,
+    backgroundColor: theme.colors.accentDim,
+  },
+  accountText: {
+    flex: 1,
+    paddingRight: theme.spacing.sm,
+  },
+  selectedMark: {
+    ...theme.typography.body,
+    color: theme.colors.accent,
+    fontWeight: '700' as const,
   },
   statusRow: {
     flexDirection: 'row' as const,

@@ -17,7 +17,6 @@
 // You should have received a copy of the GNU General Public License
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
-
 //! Database migrations
 //!
 //! This module handles database schema creation and migrations.
@@ -46,8 +45,15 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
     run_migration(pool, 1, "initial_schema", create_initial_schema(pool)).await?;
     run_migration(pool, 2, "download_tasks", create_download_tasks_table(pool)).await?;
     run_migration(pool, 3, "accounts", create_accounts_table(pool)).await?;
-    run_migration(pool, 4, "download_conversion_columns", add_download_conversion_columns(pool)).await?;
+    run_migration(
+        pool,
+        4,
+        "download_conversion_columns",
+        add_download_conversion_columns(pool),
+    )
+    .await?;
     run_migration(pool, 5, "add_source_column", add_source_column(pool)).await?;
+    run_migration(pool, 6, "book_accounts", create_book_accounts_table(pool)).await?;
 
     Ok(())
 }
@@ -365,6 +371,7 @@ mod tests {
 
         let expected_tables = vec![
             "Accounts",
+            "BookAccounts",
             "BookCategories",
             "BookContributors",
             "Books",
@@ -467,22 +474,24 @@ CREATE INDEX IF NOT EXISTS idx_download_tasks_created_at ON DownloadTasks(create
 /// conversion can be retried without re-downloading the encrypted file.
 async fn add_download_conversion_columns(pool: &SqlitePool) -> Result<()> {
     // SQLite doesn't support IF NOT EXISTS for ADD COLUMN, so check first
-    let columns: Vec<String> = sqlx::query_scalar(
-        "SELECT name FROM pragma_table_info('DownloadTasks')"
-    )
-    .fetch_all(pool)
-    .await?;
+    let columns: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('DownloadTasks')")
+            .fetch_all(pool)
+            .await?;
 
     if !columns.contains(&"aaxc_key".to_string()) {
-        pool.execute("ALTER TABLE DownloadTasks ADD COLUMN aaxc_key TEXT").await?;
+        pool.execute("ALTER TABLE DownloadTasks ADD COLUMN aaxc_key TEXT")
+            .await?;
     }
 
     if !columns.contains(&"aaxc_iv".to_string()) {
-        pool.execute("ALTER TABLE DownloadTasks ADD COLUMN aaxc_iv TEXT").await?;
+        pool.execute("ALTER TABLE DownloadTasks ADD COLUMN aaxc_iv TEXT")
+            .await?;
     }
 
     if !columns.contains(&"output_directory".to_string()) {
-        pool.execute("ALTER TABLE DownloadTasks ADD COLUMN output_directory TEXT").await?;
+        pool.execute("ALTER TABLE DownloadTasks ADD COLUMN output_directory TEXT")
+            .await?;
     }
 
     Ok(())
@@ -546,16 +555,58 @@ END;
 /// This allows books from different sources (Audible, LibriVox) to coexist
 /// in the same database. Existing books default to 'audible'.
 async fn add_source_column(pool: &SqlitePool) -> Result<()> {
-    let columns: Vec<String> = sqlx::query_scalar(
-        "SELECT name FROM pragma_table_info('Books')"
-    )
-    .fetch_all(pool)
-    .await?;
+    let columns: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('Books')")
+        .fetch_all(pool)
+        .await?;
 
     if !columns.contains(&"source".to_string()) {
-        pool.execute("ALTER TABLE Books ADD COLUMN source TEXT NOT NULL DEFAULT 'audible'").await?;
-        pool.execute("CREATE INDEX IF NOT EXISTS idx_books_source ON Books(source)").await?;
+        pool.execute("ALTER TABLE Books ADD COLUMN source TEXT NOT NULL DEFAULT 'audible'")
+            .await?;
+        pool.execute("CREATE INDEX IF NOT EXISTS idx_books_source ON Books(source)")
+            .await?;
     }
+
+    Ok(())
+}
+
+/// Add many-to-many account ownership for books.
+///
+/// LibraryBooks is kept for compatibility with older queries, while BookAccounts
+/// stores one row per account/marketplace that owns a book.
+async fn create_book_accounts_table(pool: &SqlitePool) -> Result<()> {
+    pool.execute(
+        r#"
+CREATE TABLE IF NOT EXISTS BookAccounts (
+    book_id INTEGER NOT NULL,
+    account TEXT NOT NULL,
+    date_added TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    is_deleted INTEGER NOT NULL DEFAULT 0,
+    absent_from_last_scan INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (book_id) REFERENCES Books(book_id) ON DELETE CASCADE,
+    PRIMARY KEY (book_id, account)
+);
+
+INSERT OR IGNORE INTO BookAccounts (
+    book_id,
+    account,
+    date_added,
+    is_deleted,
+    absent_from_last_scan
+)
+SELECT
+    book_id,
+    account,
+    date_added,
+    is_deleted,
+    absent_from_last_scan
+FROM LibraryBooks;
+
+CREATE INDEX IF NOT EXISTS idx_book_accounts_account ON BookAccounts(account);
+CREATE INDEX IF NOT EXISTS idx_book_accounts_book ON BookAccounts(book_id);
+CREATE INDEX IF NOT EXISTS idx_book_accounts_absent ON BookAccounts(account, absent_from_last_scan);
+        "#,
+    )
+    .await?;
 
     Ok(())
 }

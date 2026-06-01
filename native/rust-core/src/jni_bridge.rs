@@ -821,6 +821,67 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeSyncLi
         .into_raw()
 }
 
+/// Synchronize one page of episodes for a podcast or periodical parent.
+#[no_mangle]
+pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeSyncPodcastEpisodes(
+    mut env: JNIEnv,
+    _class: JClass,
+    params_json: JString,
+) -> jstring {
+    let params_str_result = jstring_to_string(&mut env, params_json);
+
+    let response = catch_panic(move || {
+        #[derive(Deserialize)]
+        struct Params {
+            db_path: String,
+            account_json: String,
+            parent_asin: String,
+            offset: i32,
+            limit: i32,
+        }
+
+        match (move || -> crate::Result<String> {
+            let params_str = params_str_result?;
+            let params: Params = serde_json::from_str(&params_str)
+                .map_err(|e| crate::LibationError::InvalidInput(format!("Invalid JSON: {}", e)))?;
+
+            let result = RUNTIME.block_on(async {
+                let db = crate::storage::Database::new(&params.db_path).await?;
+
+                let account_json =
+                    crate::api::auth::ensure_valid_token(db.pool(), &params.account_json, 30)
+                        .await?;
+
+                let account: crate::api::auth::Account = serde_json::from_str(&account_json)
+                    .map_err(|e| {
+                        crate::LibationError::InvalidInput(format!("Invalid account JSON: {}", e))
+                    })?;
+
+                let client = crate::api::client::AudibleClient::new(account.clone())?;
+
+                client
+                    .sync_podcast_episodes_page(
+                        &db,
+                        &account,
+                        &params.parent_asin,
+                        params.offset,
+                        params.limit,
+                    )
+                    .await
+            })?;
+
+            Ok(success_response(result))
+        })() {
+            Ok(result) => result,
+            Err(e) => error_response(&e.to_string()),
+        }
+    });
+
+    env.new_string(response)
+        .expect("Failed to create Java string")
+        .into_raw()
+}
+
 /// Get books from database with pagination
 ///
 /// # Arguments (JSON string)
@@ -1161,6 +1222,9 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetBoo
             downloaded_group_sort_field: Option<String>,
             downloaded_group_sort_direction: Option<String>,
             source: Option<String>,
+            account: Option<String>,
+            origin_asin: Option<String>,
+            include_podcasts: Option<bool>,
         }
 
         match (move || -> crate::Result<String> {
@@ -1172,18 +1236,16 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetBoo
                 let db = crate::storage::Database::new(&params.db_path).await?;
 
                 // Build query parameters
-                let mut query_params = crate::storage::BookQueryParams {
-                    search_query: params.search_query,
-                    series_name: params.series_name,
-                    category: params.category,
-                    source: params.source,
-                    sort_field: None,
-                    sort_direction: None,
-                    downloaded_group_sort_field: None,
-                    downloaded_group_sort_direction: None,
-                    limit: params.limit,
-                    offset: params.offset,
-                };
+                let mut query_params = crate::storage::BookQueryParams::with_defaults();
+                query_params.search_query = params.search_query;
+                query_params.series_name = params.series_name;
+                query_params.category = params.category;
+                query_params.source = params.source;
+                query_params.account = params.account;
+                query_params.origin_asin = params.origin_asin;
+                query_params.include_podcasts = params.include_podcasts.unwrap_or(true);
+                query_params.limit = params.limit;
+                query_params.offset = params.offset;
 
                 // Parse sort field
                 if let Some(field) = params.sort_field {
@@ -1244,6 +1306,7 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetBoo
                         "subtitle": book.subtitle,
                         "description": book.description,
                         "duration_seconds": book.length_in_minutes * 60,
+                        "content_type": book.content_type,
                         "language": book.language,
                         "rating": book.rating_overall,
                         "cover_url": book.picture_large,
@@ -1271,6 +1334,7 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetBoo
                         "is_abridged": book.is_abridged,
                         "is_spatial": book.is_spatial,
                         "source": book.source.as_deref().unwrap_or("audible"),
+                        "account": book.account,
                     })
                 }).collect();
 
@@ -1721,6 +1785,8 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeBuildF
             db_path: String,
             asin: String,
             naming_pattern: String,
+            #[serde(default)]
+            podcast_naming_pattern: Option<String>,
         }
 
         match (move || -> crate::Result<String> {
@@ -1740,16 +1806,81 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeBuildF
                     crate::LibationError::not_found(format!("Book not found: {}", params.asin))
                 })?;
 
-                // Convert to AudioMetadata
-                let metadata = book.to_audio_metadata();
-
                 // Parse naming pattern
                 let pattern =
                     crate::file::paths::NamingPattern::from_string(&params.naming_pattern)
                         .unwrap_or(crate::file::paths::NamingPattern::AuthorSeriesBook);
 
-                // Build path
-                let file_path = crate::file::paths::build_file_path(&metadata, pattern, "m4b")?;
+                let delivery_type = book
+                    .content_delivery_type
+                    .as_deref()
+                    .unwrap_or_default()
+                    .to_lowercase();
+                let has_origin_asin = book
+                    .origin_asin
+                    .as_deref()
+                    .map(|asin| !asin.trim().is_empty())
+                    .unwrap_or(false);
+                let parent_book = if let Some(parent_asin) = book
+                    .origin_asin
+                    .as_deref()
+                    .filter(|asin| !asin.trim().is_empty())
+                {
+                    crate::storage::queries::find_book_with_relations_by_asin(
+                        db.pool(),
+                        parent_asin,
+                    )
+                    .await?
+                } else {
+                    None
+                };
+                let parent_delivery_type = parent_book
+                    .as_ref()
+                    .and_then(|parent| parent.content_delivery_type.as_deref())
+                    .unwrap_or_default()
+                    .to_lowercase();
+                let has_podcast_parent = parent_delivery_type.contains("podcast")
+                    || parent_delivery_type.contains("periodical");
+                let is_podcast_episode = delivery_type.contains("podcastepisode")
+                    || (has_podcast_parent && has_origin_asin)
+                    || (has_origin_asin && book.episode_number.is_some());
+
+                let file_path = if is_podcast_episode {
+                    let parent_title = parent_book
+                        .as_ref()
+                        .map(|parent| parent.title.clone())
+                        .unwrap_or_else(|| "Podcasts".to_string());
+
+                    let date_prefix = book
+                        .date_published
+                        .as_deref()
+                        .map(|date| date.chars().take(10).collect::<String>())
+                        .filter(|date| !date.trim().is_empty())
+                        .unwrap_or_else(|| "0000-00-00".to_string());
+                    let episode_name = format!("{} - {}", date_prefix, book.title);
+                    let podcast_folder = crate::file::paths::sanitize_path_component(&parent_title);
+                    let episode_folder = crate::file::paths::sanitize_path_component(&episode_name);
+                    let episode_file = crate::file::paths::sanitize_filename(&episode_name);
+                    let podcast_pattern = params
+                        .podcast_naming_pattern
+                        .as_deref()
+                        .unwrap_or("podcast_episode_folder");
+
+                    match podcast_pattern {
+                        "podcast_flat_file" | "flat_file" => {
+                            format!("{}/{}.mp3", podcast_folder, episode_file)
+                        }
+                        _ => {
+                            format!("{}/{}/{}.mp3", podcast_folder, episode_folder, episode_file)
+                        }
+                    }
+                } else {
+                    // Convert to AudioMetadata
+                    let metadata = book.to_audio_metadata();
+
+                    // Build path
+                    crate::file::paths::build_file_path(&metadata, pattern, "m4b")?
+                };
 
                 Ok::<_, crate::LibationError>(serde_json::json!({
                     "file_path": file_path,
@@ -1949,7 +2080,23 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeDownlo
                     .build_download_license(&params.asin, quality, false)
                     .await?;
 
-                // Extract AAXC keys
+                let file_type = if license.drm_type.is_encrypted() {
+                    "aaxc".to_string()
+                } else {
+                    "mp3".to_string()
+                };
+                let default_extension = if file_type == "mp3" { "mp3" } else { "aax" };
+                let file_extension = license
+                    .download_url
+                    .split('?')
+                    .next()
+                    .and_then(|path| path.rsplit('/').next())
+                    .and_then(|name| name.rsplit_once('.').map(|(_, ext)| ext))
+                    .filter(|ext| ext.chars().all(|ch| ch.is_ascii_alphanumeric()))
+                    .unwrap_or(default_extension)
+                    .to_ascii_lowercase();
+
+                // Extract AAXC keys. Plain podcast MP3 downloads have no voucher.
                 let (key_hex, iv_hex) = if let Some(ref keys) = license.decryption_keys {
                     if !keys.is_empty() && keys[0].key_part_1.len() == 16 {
                         let key = keys[0]
@@ -1973,6 +2120,8 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeDownlo
                             "Unsupported key format (only AAXC supported)".to_string(),
                         ));
                     }
+                } else if !license.drm_type.is_encrypted() {
+                    (String::new(), String::new())
                 } else {
                     return Err(crate::LibationError::InvalidInput(
                         "No decryption keys in license".to_string(),
@@ -1989,8 +2138,13 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeDownlo
                 let audiobooks_cache = format!("{}/audiobooks", cache_dir.trim_end_matches('/'));
                 let _ = std::fs::create_dir_all(&audiobooks_cache);
 
-                let encrypted_path = format!("{}/{}.aax", audiobooks_cache, params.asin);
-                let decrypted_path = format!("{}/{}.m4b", audiobooks_cache, params.asin);
+                let encrypted_path =
+                    format!("{}/{}.{}", audiobooks_cache, params.asin, file_extension);
+                let decrypted_path = if file_type == "mp3" {
+                    encrypted_path.clone()
+                } else {
+                    format!("{}/{}.m4b", audiobooks_cache, params.asin)
+                };
 
                 // Download with reqwest
                 let user_agent = "Audible/671 CFNetwork/1240.0.4 Darwin/20.6.0";
@@ -2216,7 +2370,23 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetDow
                     .build_download_license(&params.asin, quality, false)
                     .await?;
 
-                // Extract AAXC keys
+                let file_type = if license.drm_type.is_encrypted() {
+                    "aaxc".to_string()
+                } else {
+                    "mp3".to_string()
+                };
+                let default_extension = if file_type == "mp3" { "mp3" } else { "aax" };
+                let file_extension = license
+                    .download_url
+                    .split('?')
+                    .next()
+                    .and_then(|path| path.rsplit('/').next())
+                    .and_then(|name| name.rsplit_once('.').map(|(_, ext)| ext))
+                    .filter(|ext| ext.chars().all(|ch| ch.is_ascii_alphanumeric()))
+                    .unwrap_or(default_extension)
+                    .to_ascii_lowercase();
+
+                // Extract AAXC keys. Plain podcast MP3 downloads have no voucher.
                 let (key_hex, iv_hex) = if let Some(ref keys) = license.decryption_keys {
                     if !keys.is_empty() && keys[0].key_part_1.len() == 16 {
                         let key = keys[0]
@@ -2240,6 +2410,8 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetDow
                             "Unsupported key format (only AAXC supported)".to_string(),
                         ));
                     }
+                } else if !license.drm_type.is_encrypted() {
+                    (String::new(), String::new())
                 } else {
                     return Err(crate::LibationError::InvalidInput(
                         "No decryption keys in license".to_string(),
@@ -2259,23 +2431,32 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetDow
                     .head(&license.download_url)
                     .header("User-Agent", "Audible/671 CFNetwork/1240.0.4 Darwin/20.6.0")
                     .send()
-                    .await
-                    .map_err(|e| crate::LibationError::NetworkError {
-                        message: format!("HEAD request failed: {}", e),
-                        is_transient: true,
-                    })?;
+                    .await;
 
-                let total_bytes = head_response
-                    .headers()
-                    .get("content-length")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(0);
+                let total_bytes = match head_response {
+                    Ok(response) if response.status().is_success() => response
+                        .headers()
+                        .get("content-length")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(0),
+                    Ok(response) => {
+                        eprintln!("HEAD request returned HTTP {}", response.status());
+                        0
+                    }
+                    Err(error) => {
+                        eprintln!("HEAD request failed: {}", error);
+                        0
+                    }
+                };
 
                 #[derive(Serialize)]
                 struct LicenseInfo {
                     download_url: String,
                     total_bytes: u64,
+                    drm_type: String,
+                    file_type: String,
+                    file_extension: String,
                     aaxc_key: String,
                     aaxc_iv: String,
                     request_headers: std::collections::HashMap<String, String>,
@@ -2284,6 +2465,9 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetDow
                 Ok::<_, crate::LibationError>(LicenseInfo {
                     download_url: license.download_url,
                     total_bytes,
+                    drm_type: format!("{:?}", license.drm_type),
+                    file_type,
+                    file_extension,
                     aaxc_key: key_hex,
                     aaxc_iv: iv_hex,
                     request_headers,
@@ -2897,6 +3081,85 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetPri
             });
 
             Ok(success_response(response))
+        })() {
+            Ok(result) => result,
+            Err(e) => error_response(&e.to_string()),
+        }
+    });
+
+    env.new_string(response)
+        .expect("Failed to create Java string")
+        .into_raw()
+}
+
+/// Get a specific account from database
+#[no_mangle]
+pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetAccount(
+    mut env: JNIEnv,
+    _class: JClass,
+    params_json: JString,
+) -> jstring {
+    let params_str_result = jstring_to_string(&mut env, params_json);
+
+    let response = catch_panic(move || {
+        #[derive(Deserialize)]
+        struct Params {
+            db_path: String,
+            account_id: String,
+        }
+
+        match (move || -> crate::Result<String> {
+            let params_str = params_str_result?;
+            let params: Params = serde_json::from_str(&params_str)
+                .map_err(|e| crate::LibationError::InvalidInput(format!("Invalid JSON: {}", e)))?;
+
+            let account_json = RUNTIME.block_on(async {
+                let db = crate::storage::Database::new(&params.db_path).await?;
+                crate::storage::accounts::get_account(db.pool(), &params.account_id).await
+            })?;
+
+            Ok(success_response(serde_json::json!({
+                "account": account_json,
+            })))
+        })() {
+            Ok(result) => result,
+            Err(e) => error_response(&e.to_string()),
+        }
+    });
+
+    env.new_string(response)
+        .expect("Failed to create Java string")
+        .into_raw()
+}
+
+/// Get all accounts from database
+#[no_mangle]
+pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetAllAccounts(
+    mut env: JNIEnv,
+    _class: JClass,
+    params_json: JString,
+) -> jstring {
+    let params_str_result = jstring_to_string(&mut env, params_json);
+
+    let response = catch_panic(move || {
+        #[derive(Deserialize)]
+        struct Params {
+            db_path: String,
+        }
+
+        match (move || -> crate::Result<String> {
+            let params_str = params_str_result?;
+            let params: Params = serde_json::from_str(&params_str)
+                .map_err(|e| crate::LibationError::InvalidInput(format!("Invalid JSON: {}", e)))?;
+
+            let accounts = RUNTIME.block_on(async {
+                let db = crate::storage::Database::new(&params.db_path).await?;
+                crate::storage::accounts::get_all_accounts(db.pool()).await
+            })?;
+
+            Ok(success_response(serde_json::json!({
+                "accounts": serde_json::to_string(&accounts)?,
+            })))
         })() {
             Ok(result) => result,
             Err(e) => error_response(&e.to_string()),

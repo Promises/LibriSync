@@ -77,8 +77,54 @@
 use crate::api::client::AudibleClient;
 use crate::error::{LibationError, Result};
 use chrono::{DateTime, NaiveDate, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
+
+fn default_on_null<'de, D, T>(deserializer: D) -> std::result::Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+fn optional_i32_from_string_or_number<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<i32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    let Some(value) = value else {
+        return Ok(None);
+    };
+
+    match value {
+        serde_json::Value::Number(number) => Ok(number.as_i64().map(|value| value as i32)),
+        serde_json::Value::String(value) => Ok(value.parse::<i32>().ok()),
+        _ => Ok(None),
+    }
+}
+
+fn optional_string_from_any<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    let Some(value) = value else {
+        return Ok(None);
+    };
+
+    match value {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::String(value) => Ok(Some(value)),
+        serde_json::Value::Number(value) => Ok(Some(value.to_string())),
+        serde_json::Value::Bool(value) => Ok(Some(value.to_string())),
+        _ => Ok(None),
+    }
+}
 
 // ============================================================================
 // CORE TYPES - DRM and Codecs
@@ -90,7 +136,7 @@ use std::collections::HashMap;
 /// C# enum values:
 /// - `Adrm` - Audible DRM (AAX and AAXC formats)
 /// - `Widevine` - Widevine DRM (MPEG-DASH format)
-/// - Other values indicate unencrypted content
+/// - `Mpeg` and other values indicate unencrypted content
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DrmType {
     /// Audible DRM (AAX/AAXC format)
@@ -101,8 +147,12 @@ pub enum DrmType {
 
     /// Widevine DRM (MPEG-DASH format)
     /// Requires Widevine CDM for decryption
-    #[serde(rename = "Mpeg")]
+    #[serde(rename = "Widevine")]
     Widevine,
+
+    /// Plain MPEG audio, used by podcast episodes
+    #[serde(rename = "Mpeg")]
+    Mpeg,
 
     /// No DRM (unencrypted MP3 or M4B)
     /// Some older audiobooks or podcasts
@@ -342,15 +392,15 @@ pub struct ContentMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Contributor {
     /// Contributor's unique ID
-    #[serde(rename = "asin")]
+    #[serde(rename = "asin", default, deserialize_with = "default_on_null")]
     pub asin: String,
 
     /// Display name
-    #[serde(rename = "name")]
+    #[serde(rename = "name", default, deserialize_with = "default_on_null")]
     pub name: String,
 
     /// Role (author, narrator, etc.)
-    #[serde(rename = "role")]
+    #[serde(rename = "role", default, deserialize_with = "default_on_null")]
     pub role: String,
 }
 
@@ -363,7 +413,7 @@ pub struct Rating {
     pub overall_distribution: Option<RatingDistribution>,
 
     /// Number of reviews
-    #[serde(rename = "num_reviews")]
+    #[serde(rename = "num_reviews", default, deserialize_with = "default_on_null")]
     pub num_reviews: i32,
 }
 
@@ -371,11 +421,19 @@ pub struct Rating {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RatingDistribution {
     /// Average rating
-    #[serde(rename = "average_rating")]
+    #[serde(
+        rename = "average_rating",
+        default,
+        deserialize_with = "default_on_null"
+    )]
     pub average_rating: f32,
 
     /// Display stars (formatted string like "4.5 out of 5 stars")
-    #[serde(rename = "display_stars")]
+    #[serde(
+        rename = "display_stars",
+        default,
+        deserialize_with = "optional_string_from_any"
+    )]
     pub display_stars: Option<String>,
 }
 
@@ -384,15 +442,19 @@ pub struct RatingDistribution {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Series {
     /// Series ASIN
-    #[serde(rename = "asin")]
+    #[serde(rename = "asin", default, deserialize_with = "default_on_null")]
     pub asin: String,
 
     /// Series title
-    #[serde(rename = "title")]
+    #[serde(rename = "title", default, deserialize_with = "default_on_null")]
     pub title: String,
 
     /// Book's position in series (e.g., "1", "2.5")
-    #[serde(rename = "sequence")]
+    #[serde(
+        rename = "sequence",
+        default,
+        deserialize_with = "optional_string_from_any"
+    )]
     pub sequence: Option<String>,
 }
 
@@ -401,22 +463,34 @@ pub struct Series {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Relationship {
     /// Related product ASIN
-    #[serde(rename = "asin")]
+    #[serde(rename = "asin", default, deserialize_with = "default_on_null")]
     pub asin: String,
 
     /// Relationship type (e.g., "episode", "season", "series")
     /// Reference: ApiExtended.cs:112 - RelationshipType.Episode
-    #[serde(rename = "relationship_type")]
+    #[serde(
+        rename = "relationship_type",
+        default,
+        deserialize_with = "default_on_null"
+    )]
     pub relationship_type: String,
 
     /// Relationship to product (e.g., "parent", "child")
     /// Reference: ApiExtended.cs:107, 111 - RelationshipToProduct enum
-    #[serde(rename = "relationship_to_product")]
+    #[serde(
+        rename = "relationship_to_product",
+        default,
+        deserialize_with = "default_on_null"
+    )]
     pub relationship_to_product: String,
 
     /// Sort order for episodes
     /// Reference: ApiExtended.cs:259 - parent.Relationships[].Sort
-    #[serde(rename = "sort")]
+    #[serde(
+        rename = "sort",
+        default,
+        deserialize_with = "optional_i32_from_string_or_number"
+    )]
     pub sort: Option<i32>,
 }
 
@@ -441,15 +515,27 @@ pub struct CatalogProduct {
     pub title: String,
 
     /// Subtitle (if any)
-    #[serde(rename = "subtitle")]
+    #[serde(
+        rename = "subtitle",
+        default,
+        deserialize_with = "optional_string_from_any"
+    )]
     pub subtitle: Option<String>,
 
     /// Full product description/summary
-    #[serde(rename = "publisher_summary")]
+    #[serde(
+        rename = "publisher_summary",
+        default,
+        deserialize_with = "optional_string_from_any"
+    )]
     pub publisher_summary: Option<String>,
 
     /// Publisher name
-    #[serde(rename = "publisher_name")]
+    #[serde(
+        rename = "publisher_name",
+        default,
+        deserialize_with = "optional_string_from_any"
+    )]
     pub publisher_name: Option<String>,
 
     /// Release date
@@ -457,23 +543,23 @@ pub struct CatalogProduct {
     pub release_date: Option<NaiveDate>,
 
     /// Runtime in minutes
-    #[serde(rename = "runtime_length_min")]
+    #[serde(rename = "runtime_length_min", default)]
     pub runtime_length_min: i32,
 
     /// Content language (e.g., "english", "spanish")
-    #[serde(rename = "language")]
+    #[serde(rename = "language", default, deserialize_with = "default_on_null")]
     pub language: String,
 
     /// Format type (e.g., "unabridged", "abridged")
-    #[serde(rename = "format_type")]
+    #[serde(rename = "format_type", default, deserialize_with = "default_on_null")]
     pub format_type: String,
 
     /// Authors, narrators, etc.
-    #[serde(rename = "authors")]
+    #[serde(rename = "authors", default, deserialize_with = "default_on_null")]
     pub authors: Vec<Contributor>,
 
     /// Narrators
-    #[serde(rename = "narrators")]
+    #[serde(rename = "narrators", default, deserialize_with = "default_on_null")]
     pub narrators: Vec<Contributor>,
 
     /// Customer ratings
@@ -481,13 +567,17 @@ pub struct CatalogProduct {
     pub rating: Option<Rating>,
 
     /// Series information
-    #[serde(rename = "series")]
+    #[serde(rename = "series", default, deserialize_with = "default_on_null")]
     pub series: Vec<Series>,
 
     /// Relationships to other products
     /// Used for episodes/series parent-child relationships
     /// Reference: ApiExtended.cs:106-116 - Episode and parent ASIN extraction
-    #[serde(rename = "relationships")]
+    #[serde(
+        rename = "relationships",
+        default,
+        deserialize_with = "default_on_null"
+    )]
     pub relationships: Vec<Relationship>,
 
     /// Product URL (cover image)
@@ -506,12 +596,12 @@ pub struct CatalogProduct {
 
     /// Whether this is a series parent
     /// Reference: ApiExtended.cs:103, 145 - i.IsSeriesParent
-    #[serde(rename = "is_series_parent")]
+    #[serde(rename = "is_series_parent", default)]
     pub is_series_parent: bool,
 
     /// Whether this is an episode (podcast episode or series child)
     /// Reference: ApiExtended.cs:102, 147 - i.IsEpisodes
-    #[serde(rename = "is_episode")]
+    #[serde(rename = "is_episode", default)]
     pub is_episode: bool,
 }
 
@@ -613,7 +703,7 @@ impl AudibleClient {
     /// Location: ApiExtended.cs:200-223 - getProductsAsync() for episode batching
     ///
     /// # Endpoint
-    /// `GET /1.0/catalog/products?asin=A,B,C`
+    /// `GET /1.0/catalog/products?asins=A,B,C`
     ///
     /// # Arguments
     /// * `asins` - List of Audible product IDs (max 50 per request)
@@ -675,10 +765,10 @@ impl AudibleClient {
         ]
         .join(",");
 
-        // Build query with comma-separated ASINs
+        // Build query with comma-separated ASINs.
         let asin_param = asins.join(",");
         let params = vec![
-            ("asin", asin_param),
+            ("asins", asin_param),
             ("response_groups", response_groups),
             ("image_sizes", "500".to_string()),
         ];
@@ -895,12 +985,14 @@ mod tests {
     fn test_drm_type_checks() {
         assert!(DrmType::Adrm.is_encrypted());
         assert!(DrmType::Widevine.is_encrypted());
+        assert!(!DrmType::Mpeg.is_encrypted());
         assert!(!DrmType::None.is_encrypted());
 
         assert!(DrmType::Adrm.requires_activation_bytes());
         assert!(!DrmType::Widevine.requires_activation_bytes());
 
         assert!(DrmType::Widevine.is_widevine());
+        assert!(!DrmType::Mpeg.is_widevine());
         assert!(!DrmType::Adrm.is_widevine());
     }
 

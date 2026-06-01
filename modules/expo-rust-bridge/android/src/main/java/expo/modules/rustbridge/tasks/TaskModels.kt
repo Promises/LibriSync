@@ -78,6 +78,8 @@ object DownloadTaskMetadata {
     const val STAGE = "stage" // "downloading", "decrypting", "copying"
     const val ENCRYPTED_PATH = "encrypted_path"
     const val DECRYPTED_PATH = "decrypted_path"
+    const val FILE_TYPE = "file_type"
+    const val FILE_EXTENSION = "file_extension"
     const val AAXC_KEY = "aaxc_key"
     const val AAXC_IV = "aaxc_iv"
     const val RUST_TASK_ID = "rust_task_id"

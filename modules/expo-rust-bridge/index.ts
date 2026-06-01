@@ -195,6 +195,7 @@ export interface Book {
   release_date?: string;
   purchase_date?: string;
   duration_seconds: number;
+  content_type?: number;
   language?: string;
   rating?: number;
   cover_url?: string;
@@ -202,6 +203,7 @@ export interface Book {
   created_at: string;
   updated_at: string;
   source?: 'audible' | 'librivox';
+  account?: string;
 
   // Additional metadata from API
   pdf_url?: string;
@@ -501,6 +503,17 @@ export interface ExpoRustBridgeModule {
   syncLibraryPage(dbPath: string, accountJson: string, page: number): Promise<RustResponse<SyncStats>>;
 
   /**
+   * Synchronize one page of podcast or periodical episodes from Audible.
+   */
+  syncPodcastEpisodes(
+    dbPath: string,
+    accountJson: string,
+    parentAsin: string,
+    offset: number,
+    limit: number
+  ): Promise<RustResponse<SyncStats>>;
+
+  /**
    * Save the selected download directory for native background workers.
    */
   setDownloadDirectory(directory: string): RustResponse<{ saved: boolean }>;
@@ -757,6 +770,16 @@ export interface ExpoRustBridgeModule {
   getPrimaryAccount(dbPath: string): Promise<RustResponse<{ account: string | null }>>;
 
   /**
+   * Get one account from SQLite database.
+   */
+  getAccount(dbPath: string, accountId: string): Promise<RustResponse<{ account: string | null }>>;
+
+  /**
+   * Get all accounts from SQLite database.
+   */
+  getAllAccounts(dbPath: string): Promise<RustResponse<{ accounts: string }>>;
+
+  /**
    * Delete account from SQLite database.
    */
   deleteAccount(dbPath: string, accountId: string): Promise<RustResponse<{ deleted: boolean }>>;
@@ -899,6 +922,20 @@ export interface ExpoRustBridgeModule {
    * @returns Current naming pattern
    */
   getNamingPattern(): RustResponse<{ pattern: string }>;
+
+  /**
+   * Set podcast episode naming pattern preference.
+   *
+   * @param pattern - Naming pattern: "podcast_episode_folder" or "podcast_flat_file"
+   */
+  setPodcastNamingPattern(pattern: string): RustResponse<{}>;
+
+  /**
+   * Get podcast episode naming pattern preference.
+   *
+   * @returns Current podcast naming pattern
+   */
+  getPodcastNamingPattern(): RustResponse<{ pattern: string }>;
 
   /**
    * Set Smart Audiobook Player cover preference.
@@ -1265,6 +1302,27 @@ async function syncLibrary(
 }
 
 /**
+ * Sync one page of episodes for a podcast or periodical parent.
+ */
+async function syncPodcastEpisodes(
+  dbPath: string,
+  account: Account,
+  parentAsin: string,
+  offset: number,
+  limit: number
+): Promise<SyncStats> {
+  const accountJson = JSON.stringify(account);
+  const response = await NativeModule!.syncPodcastEpisodes(
+    dbPath,
+    accountJson,
+    parentAsin,
+    offset,
+    limit
+  );
+  return unwrapResult(response);
+}
+
+/**
  * Get books from database with pagination
  */
 function getBooks(dbPath: string, offset: number, limit: number): { books: Book[]; total_count: number } {
@@ -1298,16 +1356,23 @@ function getBooksWithFilters(
   sortDirection?: string | null,
   source?: string | null,
   downloadedGroupSortField?: string | null,
-  downloadedGroupSortDirection?: string | null
+  downloadedGroupSortDirection?: string | null,
+  account?: string | null,
+  includePodcasts?: boolean,
+  originAsin?: string | null
 ): { books: Book[]; total_count: number } {
   // Pack extra sort/filter values into extras JSON (Kotlin Function limit: 8 params)
   let extras: string | null = null;
-  if (sortDirection || source || downloadedGroupSortField || downloadedGroupSortDirection) {
-    const extrasObj: Record<string, string> = {};
+  const excludePodcasts = includePodcasts === false;
+  if (sortDirection || source || downloadedGroupSortField || downloadedGroupSortDirection || account || excludePodcasts || originAsin) {
+    const extrasObj: Record<string, string | boolean> = {};
     if (sortDirection) extrasObj.sort_direction = sortDirection;
     if (source) extrasObj.source = source;
     if (downloadedGroupSortField) extrasObj.downloaded_group_sort_field = downloadedGroupSortField;
     if (downloadedGroupSortDirection) extrasObj.downloaded_group_sort_direction = downloadedGroupSortDirection;
+    if (account) extrasObj.account = account;
+    if (originAsin) extrasObj.origin_asin = originAsin;
+    if (excludePodcasts) extrasObj.include_podcasts = false;
     extras = JSON.stringify(extrasObj);
   }
 
@@ -1791,7 +1856,72 @@ async function getPrimaryAccount(dbPath: string): Promise<Account | null> {
     return null;
   }
 
-  return JSON.parse(data.account);
+  return parseAccount(data.account);
+}
+
+/**
+ * Get one account from SQLite database.
+ *
+ * @param dbPath - Database path
+ * @param accountId - Account identifier
+ * @returns Account object or null if no match exists
+ */
+async function getAccount(dbPath: string, accountId: string): Promise<Account | null> {
+  const response = await NativeModule!.getAccount(dbPath, accountId);
+  const data = unwrapResult(response);
+
+  if (!data.account || data.account === 'null') {
+    return null;
+  }
+
+  return parseAccount(data.account);
+}
+
+function parseAccount(value: unknown): Account | null {
+  try {
+    const account = typeof value === 'string' ? JSON.parse(value) : value;
+
+    if (!account || typeof account !== 'object') {
+      return null;
+    }
+
+    const parsedAccount = account as Account;
+    if (!parsedAccount.locale && parsedAccount.identity?.locale) {
+      parsedAccount.locale = parsedAccount.identity.locale;
+    }
+
+    return parsedAccount;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Get all accounts from SQLite database.
+ *
+ * @param dbPath - Database path
+ * @returns Array of account objects
+ */
+async function getAllAccounts(dbPath: string): Promise<Account[]> {
+  const response = await NativeModule!.getAllAccounts(dbPath);
+  const data = unwrapResult(response);
+
+  if (!data.accounts) {
+    return [];
+  }
+
+  try {
+    const rawAccounts = JSON.parse(data.accounts);
+    if (!Array.isArray(rawAccounts)) {
+      return [];
+    }
+
+    return rawAccounts
+      .map(parseAccount)
+      .filter((account): account is Account => !!account?.account_id);
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -2133,6 +2263,7 @@ export {
   initializeDatabase,
   syncLibrary,
   syncLibraryPage,
+  syncPodcastEpisodes,
   setDownloadDirectory,
   getDownloadDirectory,
   scanDownloadDirectory,
@@ -2173,6 +2304,8 @@ export {
   // Account Storage (SQLite)
   saveAccount,
   getPrimaryAccount,
+  getAccount,
+  getAllAccounts,
   deleteAccount,
   // LibriVox
   insertLibrivoxBook,

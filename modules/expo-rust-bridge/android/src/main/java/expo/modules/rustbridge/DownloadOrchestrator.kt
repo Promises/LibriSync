@@ -591,6 +591,10 @@ class DownloadOrchestrator(
                             "completed" -> {
                                 Log.d(TAG, "Download completed! Finalizing $asin")
 
+                                // The Rust download slot is now free; start the next
+                                // queued download (workers can't advance the queue).
+                                kickDownloadQueue()
+
                                 // Trigger conversion or plain MP3 copy (cancellable via coroutine scope)
                                 try {
                                     if (plainAudio) {
@@ -613,10 +617,12 @@ class DownloadOrchestrator(
                                 val error = taskData?.get("error") as? String ?: "Unknown error"
                                 Log.e(TAG, "Download failed for $asin: $error")
                                 errorCallback?.invoke(asin, title, error)
+                                kickDownloadQueue()
                                 break
                             }
                             "cancelled" -> {
                                 Log.d(TAG, "Download cancelled for $asin")
+                                kickDownloadQueue()
                                 break
                             }
                         }
@@ -633,6 +639,20 @@ class DownloadOrchestrator(
         }
 
         monitoringJobs[asin] = job
+    }
+
+    /**
+     * Ask the Rust manager to start any queued downloads that now fit within the
+     * concurrency limit. Download workers can't advance the queue themselves, so
+     * we kick it whenever a download reaches a terminal state.
+     */
+    private fun kickDownloadQueue() {
+        try {
+            val params = JSONObject().apply { put("db_path", dbPath) }
+            ExpoRustBridgeModule.nativeStartPendingDownloads(params.toString())
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start pending downloads", e)
+        }
     }
 
     /**

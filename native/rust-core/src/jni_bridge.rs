@@ -2635,6 +2635,53 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetDow
         .into_raw()
 }
 
+/// Start any queued downloads that fit within the concurrency limit.
+///
+/// Called after a download reaches a terminal state to keep the queue moving,
+/// since download workers cannot start the next task themselves.
+///
+/// # Arguments (JSON string)
+/// ```json
+/// {
+///   "db_path": "/data/data/.../libation.db"
+/// }
+/// ```
+#[no_mangle]
+pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeStartPendingDownloads(
+    mut env: JNIEnv,
+    _class: JClass,
+    params_json: JString,
+) -> jstring {
+    let params_str_result = jstring_to_string(&mut env, params_json);
+
+    let response = catch_panic(move || {
+        #[derive(Deserialize)]
+        struct Params {
+            db_path: String,
+        }
+
+        match (move || -> crate::Result<String> {
+            let params_str = params_str_result?;
+            let params: Params = serde_json::from_str(&params_str)
+                .map_err(|e| crate::LibationError::InvalidInput(format!("Invalid JSON: {}", e)))?;
+
+            RUNTIME.block_on(async {
+                let manager = get_or_create_manager(&params.db_path).await?;
+                manager.start_pending_downloads().await
+            })?;
+
+            Ok(success_response(serde_json::json!({ "started": true })))
+        })() {
+            Ok(result) => result,
+            Err(e) => error_response(&e.to_string()),
+        }
+    });
+
+    env.new_string(response)
+        .expect("Failed to create Java string")
+        .into_raw()
+}
+
 /// List download tasks with optional filter
 ///
 /// # Arguments (JSON string)

@@ -577,7 +577,10 @@ pub async fn list_books_with_filters(
     }
 
     if !params.include_podcasts {
-        where_clauses.push("b.content_type NOT IN (2, 4)");
+        where_clauses.push(
+            "(b.content_delivery_type IS NULL \
+             OR b.content_delivery_type NOT IN ('PodcastParent', 'PodcastSeries', 'Periodical'))",
+        );
     }
 
     let where_clause = if where_clauses.is_empty() {
@@ -808,7 +811,10 @@ pub async fn count_books_with_filters(pool: &SqlitePool, params: &BookQueryParam
     }
 
     if !params.include_podcasts {
-        where_clauses.push("b.content_type NOT IN (2, 4)");
+        where_clauses.push(
+            "(b.content_delivery_type IS NULL \
+             OR b.content_delivery_type NOT IN ('PodcastParent', 'PodcastSeries', 'Periodical'))",
+        );
     }
 
     let where_clause = if where_clauses.is_empty() {

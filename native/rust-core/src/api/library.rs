@@ -775,6 +775,15 @@ impl AudibleClient {
 
         stats.total_library_count = child_asins.len() as i32;
 
+        // On the first page, remove previously-imported episodes that Audible no
+        // longer lists as children (e.g. season grouping nodes that older versions
+        // ingested as fake 0-length episodes). Guarded by a non-empty result so a
+        // transient empty/failed response can't wipe a podcast's episodes.
+        if offset <= 0 && !child_asins.is_empty() {
+            self.prune_removed_episodes(db, parent_asin, &child_asins)
+                .await?;
+        }
+
         if child_asins.is_empty() {
             return Ok(stats);
         }
@@ -799,6 +808,37 @@ impl AudibleClient {
         stats.books_updated = stats.total_items.saturating_sub(new_count);
 
         Ok(stats)
+    }
+
+    /// Delete episodes previously imported for `parent_asin` that are no longer in
+    /// the current child list. Cleans up stale rows such as podcast season nodes.
+    async fn prune_removed_episodes(
+        &self,
+        db: &Database,
+        parent_asin: &str,
+        child_asins: &[String],
+    ) -> Result<()> {
+        let pool = db.pool();
+
+        let existing: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT book_id, audible_product_id FROM Books \
+             WHERE origin_asin = ? AND content_type = ? AND audible_product_id != ?",
+        )
+        .bind(parent_asin)
+        .bind(ContentType::Episode as i32)
+        .bind(parent_asin)
+        .fetch_all(pool)
+        .await?;
+
+        let keep: HashSet<&str> = child_asins.iter().map(|asin| asin.as_str()).collect();
+
+        for (book_id, asin) in existing {
+            if !keep.contains(asin.as_str()) {
+                crate::storage::queries::delete_book(pool, book_id).await?;
+            }
+        }
+
+        Ok(())
     }
 
     async fn fetch_podcast_episode_asins(&self, parent_asin: &str) -> Result<Vec<String>> {
@@ -830,6 +870,13 @@ impl AudibleClient {
                 .get("relationship_type")
                 .and_then(|value| value.as_str())
                 .unwrap_or("");
+
+            // Skip season grouping nodes: Audible returns them as children of the
+            // podcast, but they have no audio (0 length) and produce errors if
+            // treated as downloadable episodes.
+            if relationship_type.eq_ignore_ascii_case("season") {
+                continue;
+            }
 
             let is_child = relationship_to_product.eq_ignore_ascii_case("child")
                 || relationship_type.eq_ignore_ascii_case("episode");

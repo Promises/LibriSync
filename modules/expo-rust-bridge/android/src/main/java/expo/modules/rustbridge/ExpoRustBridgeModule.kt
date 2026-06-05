@@ -2349,6 +2349,7 @@ class ExpoRustBridgeModule : Module() {
     // Download Manager functions
     @JvmStatic external fun nativeEnqueueDownload(paramsJson: String): String
     @JvmStatic external fun nativeGetDownloadTask(paramsJson: String): String
+    @JvmStatic external fun nativeStartPendingDownloads(paramsJson: String): String
     @JvmStatic external fun nativeListDownloadTasks(paramsJson: String): String
     @JvmStatic external fun nativePauseDownload(paramsJson: String): String
     @JvmStatic external fun nativeResumeDownload(paramsJson: String): String

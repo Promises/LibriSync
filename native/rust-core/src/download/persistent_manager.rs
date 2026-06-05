@@ -379,6 +379,19 @@ impl PersistentDownloadManager {
         Ok(())
     }
 
+    /// Fill any free download slots from the queued tasks. Safe to call
+    /// repeatedly (e.g. after a download finishes or fails) to keep the queue
+    /// advancing without relying on the next enqueue or an app restart.
+    pub async fn start_pending_downloads(&self) -> Result<()> {
+        for _ in 0..self.max_concurrent {
+            if self.try_start_next_download().await.is_err() {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
     // ========================================================================
     // Internal Methods
     // ========================================================================

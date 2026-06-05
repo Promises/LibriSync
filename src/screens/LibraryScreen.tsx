@@ -457,6 +457,110 @@ export default function LibraryScreen() {
         loadPodcastEpisodes(selectedPodcast, false);
     };
 
+    const handleDownloadAllEpisodes = async () => {
+        if (!selectedPodcast) return;
+
+        try {
+            const downloadDir = await SecureStore.getItemAsync(DOWNLOAD_PATH_KEY);
+            if (!downloadDir) {
+                Alert.alert(
+                    'Download Directory Not Set',
+                    'Please go to Settings and choose a download directory first.',
+                    [{ text: 'OK' }]
+                );
+                return;
+            }
+
+            const episodesToDownload = podcastEpisodes.filter(episode =>
+                episode.is_downloadable !== false
+                && !episode.file_path
+                && !downloadTasks.has(episode.audible_product_id)
+            );
+
+            if (episodesToDownload.length === 0) {
+                Alert.alert(
+                    'Nothing to Download',
+                    'All loaded episodes are already downloaded or in the queue.'
+                );
+                return;
+            }
+
+            const hasPermission = await requestNotificationPermission();
+            if (!hasPermission) {
+                Alert.alert(
+                    'Permission Required',
+                    'Please grant notification permission to see download progress',
+                    [{ text: 'OK' }]
+                );
+                return;
+            }
+
+            const dbPath = getDatabasePath();
+            initializeDatabase(dbPath);
+
+            const owningAccountId = accountFilter || getBookAccountIds(selectedPodcast)[0] || null;
+            let account = owningAccountId
+                ? await getAccount(dbPath, owningAccountId)
+                : await getPrimaryAccount(dbPath);
+
+            if (!account) {
+                account = await getPrimaryAccount(dbPath);
+            }
+
+            if (!account) {
+                Alert.alert('Error', 'Please log in first');
+                return;
+            }
+
+            if (account.identity?.access_token) {
+                const expiresAt = new Date(account.identity.access_token.expires_at);
+                const minutesUntilExpiry = (expiresAt.getTime() - Date.now()) / 1000 / 60;
+
+                if (minutesUntilExpiry < 5) {
+                    try {
+                        const newTokens = await refreshToken(account);
+                        account.identity.access_token.token = newTokens.access_token;
+                        if (newTokens.refresh_token) {
+                            account.identity.refresh_token = newTokens.refresh_token;
+                        }
+                        account.identity.access_token.expires_at = new Date(Date.now() + parseInt(newTokens.expires_in.toString()) * 1000).toISOString();
+                        await saveAccount(dbPath, account);
+                    } catch (refreshError) {
+                        console.error('[LibraryScreen] Token refresh failed:', refreshError);
+                        Alert.alert('Error', 'Please log in again - token refresh failed');
+                        return;
+                    }
+                }
+            }
+
+            let queued = 0;
+            for (const episode of episodesToDownload) {
+                try {
+                    const author = (episode.authors?.length || 0) > 0 ? episode.authors.join(', ') : undefined;
+                    await enqueueDownloadNew(
+                        episode.audible_product_id,
+                        episode.title,
+                        author,
+                        account,
+                        downloadDir,
+                        'High'
+                    );
+                    queued++;
+                } catch (episodeError: any) {
+                    console.error('[LibraryScreen] Failed to enqueue episode:', episode.title, episodeError);
+                }
+            }
+
+            Alert.alert(
+                'Downloads Started',
+                `${queued} episode${queued === 1 ? '' : 's'} added to the download queue.`
+            );
+        } catch (error: any) {
+            console.error('[LibraryScreen] Download all error:', error);
+            Alert.alert('Download Failed', error.message || 'Unknown error');
+        }
+    };
+
     const handleSortChange = (field: SortField, direction: SortDirection) => {
         let nextGroupField = downloadedGroupSortField;
         let nextGroupDirection = downloadedGroupSortDirection;
@@ -1554,6 +1658,15 @@ export default function LibraryScreen() {
                                     : `${podcastEpisodes.length} episodes`}
                             </Text>
                         </View>
+                        {podcastEpisodes.length > 0 && (
+                            <TouchableOpacity
+                                style={styles.episodeDownloadAllButton}
+                                onPress={handleDownloadAllEpisodes}
+                                accessibilityLabel="Download all episodes"
+                            >
+                                <Ionicons name="download-outline" size={24} color={colors.accent} />
+                            </TouchableOpacity>
+                        )}
                     </View>
 
                     {isLoadingPodcastEpisodes ? (
@@ -2309,6 +2422,16 @@ const createStyles = (theme: Theme) => ({
     episodeHeaderText: {
         flex: 1,
         minWidth: 0,
+    },
+    episodeDownloadAllButton: {
+        width: 44,
+        height: 44,
+        borderRadius: 22,
+        justifyContent: 'center' as const,
+        alignItems: 'center' as const,
+        backgroundColor: theme.colors.background,
+        borderWidth: 1,
+        borderColor: theme.colors.border,
     },
     episodeHeaderTitle: {
         ...theme.typography.subtitle,

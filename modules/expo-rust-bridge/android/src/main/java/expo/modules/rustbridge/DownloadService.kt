@@ -443,9 +443,11 @@ class DownloadService : Service() {
      */
     private fun checkAndStopServiceIfIdle() {
         try {
+            // List all tasks (no status filter) so we count queued and in-progress
+            // work, not just actively downloading tasks. Stopping the service while
+            // tasks are still queued cancels the service scope and breaks the queue.
             val listParams = JSONObject().apply {
                 put("db_path", dbPath)
-                put("filter", "downloading")
             }
 
             val listResult = ExpoRustBridgeModule.nativeListDownloadTasks(listParams.toString())
@@ -455,12 +457,22 @@ class DownloadService : Service() {
                 val data = json.getJSONObject("data")
                 val tasks = data.getJSONArray("tasks")
 
-                if (tasks.length() == 0) {
+                val activeStatuses = setOf(
+                    "queued", "downloading", "decrypting", "validating", "copying"
+                )
+                var activeCount = 0
+                for (i in 0 until tasks.length()) {
+                    if (tasks.getJSONObject(i).optString("status") in activeStatuses) {
+                        activeCount++
+                    }
+                }
+
+                if (activeCount == 0) {
                     Log.d(TAG, "No active downloads remaining - stopping service")
                     stopForegroundCompat()
                     stopSelf()
                 } else {
-                    Log.d(TAG, "${tasks.length()} downloads still active - keeping service alive")
+                    Log.d(TAG, "$activeCount downloads still active - keeping service alive")
                 }
             }
         } catch (e: Exception) {

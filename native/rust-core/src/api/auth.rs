@@ -1363,7 +1363,13 @@ pub async fn exchange_authorization_code(
         ],
         "cookies": {
             "website_cookies": [],
-            "domain": format!(".amazon.{}", if locale.country_code == "us" { "com" } else { locale.country_code.as_str() })
+            // Cookie domain must match the full Amazon TLD, not the bare country code.
+            // e.g. uk -> .amazon.co.uk, au -> .amazon.com.au, jp -> .amazon.co.jp.
+            // Using the country code directly produced invalid domains like ".amazon.uk",
+            // which Amazon accepted with HTTP 200 but then omitted the cookie token types
+            // from the response, causing a downstream unwrap() panic. Reuse the already
+            // resolved Amazon domain so the cookie domain is always valid.
+            "domain": format!(".{}", amazon_domain)
         },
         "registration_data": {
             "domain": "DeviceLegacy",
@@ -1468,15 +1474,27 @@ pub async fn exchange_authorization_code(
                 response_body: Some(register_response.to_string()),
             })?;
 
+    // Helper to fetch a required field without panicking. A missing field
+    // (e.g. Amazon omitting cookie token types when something is off with the
+    // request) returns a structured error instead of unwrapping on None.
+    let require_field = |obj: &serde_json::Value, key: &str| -> Result<serde_json::Value> {
+        obj.get(key)
+            .cloned()
+            .ok_or_else(|| LibationError::InvalidApiResponse {
+                message: format!("Missing '{}' in registration response", key),
+                response_body: Some(obj.to_string()),
+            })
+    };
+
     // Parse bearer tokens
-    let bearer: BearerTokenInfo = serde_json::from_value(tokens.get("bearer").unwrap().clone())
+    let bearer: BearerTokenInfo = serde_json::from_value(require_field(tokens, "bearer")?)
         .map_err(|e| LibationError::InvalidApiResponse {
             message: format!("Failed to parse bearer tokens: {}", e),
             response_body: Some(tokens.to_string()),
         })?;
 
     // Parse MAC-DMS tokens
-    let mac_dms: MacDmsTokenInfo = serde_json::from_value(tokens.get("mac_dms").unwrap().clone())
+    let mac_dms: MacDmsTokenInfo = serde_json::from_value(require_field(tokens, "mac_dms")?)
         .map_err(|e| LibationError::InvalidApiResponse {
         message: format!("Failed to parse mac_dms tokens: {}", e),
         response_body: Some(tokens.to_string()),
@@ -1484,7 +1502,7 @@ pub async fn exchange_authorization_code(
 
     // Parse website cookies
     let website_cookies: Vec<Cookie> =
-        serde_json::from_value(tokens.get("website_cookies").unwrap().clone()).map_err(|e| {
+        serde_json::from_value(require_field(tokens, "website_cookies")?).map_err(|e| {
             LibationError::InvalidApiResponse {
                 message: format!("Failed to parse website_cookies: {}", e),
                 response_body: Some(tokens.to_string()),
@@ -1493,7 +1511,7 @@ pub async fn exchange_authorization_code(
 
     // Parse store authentication cookie
     let store_authentication_cookie: StoreAuthCookie =
-        serde_json::from_value(tokens.get("store_authentication_cookie").unwrap().clone())
+        serde_json::from_value(require_field(tokens, "store_authentication_cookie")?)
             .map_err(|e| LibationError::InvalidApiResponse {
                 message: format!("Failed to parse store_authentication_cookie: {}", e),
                 response_body: Some(tokens.to_string()),
@@ -1501,7 +1519,7 @@ pub async fn exchange_authorization_code(
 
     // Parse device info
     let device_info: DeviceInfo =
-        serde_json::from_value(extensions.get("device_info").unwrap().clone()).map_err(|e| {
+        serde_json::from_value(require_field(extensions, "device_info")?).map_err(|e| {
             LibationError::InvalidApiResponse {
                 message: format!("Failed to parse device_info: {}", e),
                 response_body: Some(extensions.to_string()),
@@ -1510,7 +1528,7 @@ pub async fn exchange_authorization_code(
 
     // Parse customer info
     let customer_info: CustomerInfo =
-        serde_json::from_value(extensions.get("customer_info").unwrap().clone()).map_err(|e| {
+        serde_json::from_value(require_field(extensions, "customer_info")?).map_err(|e| {
             LibationError::InvalidApiResponse {
                 message: format!("Failed to parse customer_info: {}", e),
                 response_body: Some(extensions.to_string()),

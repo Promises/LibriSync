@@ -37,6 +37,9 @@ import * as DocumentPicker from 'expo-document-picker';
 import {Directory, Paths} from 'expo-file-system';
 import {getDatabasePath} from '../utils/appPaths';
 import {getBook} from '../services/librivox';
+import {DEMO_BOOKS, DEMO_SERIES, DEMO_CATEGORIES, DEMO_ACCOUNT} from '../services/demo/demoData';
+import {isDemoAccountId, isDemoBook, filterSortPaginate} from '../services/demo/demoMode';
+import * as demoDownloads from '../services/demo/demoDownloads';
 import {
     buildLibraryExportText,
     exportLibrary,
@@ -46,6 +49,7 @@ import {
 } from '../utils/libraryExport';
 
 const DOWNLOAD_PATH_KEY = 'download_path';
+const SELECTED_ACCOUNT_KEY = 'selected_audible_account_id';
 const LIBRARY_PREFS_KEY = 'library_preferences';
 const INCLUDE_PODCASTS_KEY = 'include_podcasts';
 const PAGE_SIZE = 100;
@@ -188,6 +192,11 @@ export default function LibraryScreen() {
                     taskMap.set(task.asin, task);
                 });
 
+                // Merge in-memory demo download tasks (empty unless in demo mode)
+                demoDownloads.getTasks().forEach((task, asin) => {
+                    taskMap.set(asin, task);
+                });
+
                 setDownloadTasks(taskMap);
             } catch (error) {
                 console.error('[LibraryScreen] Error polling progress:', error);
@@ -243,6 +252,15 @@ export default function LibraryScreen() {
 
     const loadFilterOptions = async () => {
         try {
+            // Demo mode: filter options come from the in-memory dataset.
+            const selectedId = await SecureStore.getItemAsync(SELECTED_ACCOUNT_KEY);
+            if (isDemoAccountId(selectedId)) {
+                setAllSeries(DEMO_SERIES);
+                setAllCategories(DEMO_CATEGORIES);
+                setAllAccounts([DEMO_ACCOUNT]);
+                return;
+            }
+
             const dbPath = getDatabasePath();
 
             try {
@@ -264,6 +282,31 @@ export default function LibraryScreen() {
 
     const loadBooks = async (reset: boolean = false) => {
         try {
+            const offset = reset ? 0 : audiobooks.length;
+            const limit = PAGE_SIZE;
+
+            // Demo mode: serve the in-memory dataset instead of querying SQLite.
+            const selectedId = await SecureStore.getItemAsync(SELECTED_ACCOUNT_KEY);
+            if (isDemoAccountId(selectedId)) {
+                const result = filterSortPaginate(DEMO_BOOKS, {
+                    offset,
+                    limit,
+                    searchQuery,
+                    series: selectedSeries,
+                    category: selectedCategory,
+                    sortField,
+                    sortDirection,
+                });
+                if (reset) {
+                    setAudiobooks(result.books);
+                } else {
+                    setAudiobooks(prev => [...prev, ...result.books]);
+                }
+                setTotalCount(result.total_count);
+                setHasMore(offset + result.books.length < result.total_count);
+                return;
+            }
+
             const dbPath = getDatabasePath();
 
             console.log('[LibraryScreen] Loading books from:', dbPath);
@@ -277,9 +320,6 @@ export default function LibraryScreen() {
                 setHasMore(false);
                 return;
             }
-
-            const offset = reset ? 0 : audiobooks.length;
-            const limit = PAGE_SIZE;
 
             console.log('[LibraryScreen] Fetching books:', {
                 offset,
@@ -808,6 +848,17 @@ export default function LibraryScreen() {
 
     const handleDownload = async (book: Book) => {
         try {
+            // Demo mode: real LibriVox MP3 download to the app sandbox (no SAF dir,
+            // no DRM, no native pipeline). Progress shows through the same UI.
+            if (isDemoBook(book)) {
+                demoDownloads.enqueue(book);
+                Alert.alert(
+                    'Download Started',
+                    `"${book.title}" is downloading. Watch the progress here in the library.`
+                );
+                return;
+            }
+
             const downloadDir = await SecureStore.getItemAsync(DOWNLOAD_PATH_KEY);
             if (!downloadDir) {
                 Alert.alert(
@@ -938,6 +989,11 @@ export default function LibraryScreen() {
 
     const handlePauseDownload = (book: Book) => {
         try {
+            if (isDemoBook(book)) {
+                demoDownloads.pause(book.audible_product_id);
+                return;
+            }
+
             const dbPath = getDatabasePath();
 
             const task = downloadTasks.get(book.audible_product_id);
@@ -952,6 +1008,11 @@ export default function LibraryScreen() {
 
     const handleResumeDownload = (book: Book) => {
         try {
+            if (isDemoBook(book)) {
+                demoDownloads.resume(book.audible_product_id);
+                return;
+            }
+
             const dbPath = getDatabasePath();
 
             const task = downloadTasks.get(book.audible_product_id);
@@ -966,6 +1027,22 @@ export default function LibraryScreen() {
 
     const handleCancelDownload = (book: Book) => {
         try {
+            if (isDemoBook(book)) {
+                Alert.alert(
+                    'Cancel Download',
+                    `Are you sure you want to cancel downloading "${book.title}"?`,
+                    [
+                        { text: 'No', style: 'cancel' },
+                        {
+                            text: 'Yes',
+                            style: 'destructive',
+                            onPress: () => demoDownloads.cancel(book.audible_product_id),
+                        }
+                    ]
+                );
+                return;
+            }
+
             const dbPath = getDatabasePath();
 
             const task = downloadTasks.get(book.audible_product_id);

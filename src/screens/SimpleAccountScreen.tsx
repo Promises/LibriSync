@@ -29,6 +29,8 @@ import { useStyles } from '../hooks/useStyles';
 import { useTheme } from '../styles/theme';
 import type { Theme } from '../hooks/useStyles';
 import { getDatabasePath } from '../utils/appPaths';
+import { DEMO_ACCOUNT, DEMO_BOOKS } from '../services/demo/demoData';
+import { isDemoAccount, isDemoAccountId } from '../services/demo/demoMode';
 
 const DOWNLOAD_PATH_KEY = 'download_path';
 const SELECTED_ACCOUNT_KEY = 'selected_audible_account_id';
@@ -78,13 +80,20 @@ export default function SimpleAccountScreen() {
       initializeDatabase(dbPath);
 
       const accounts = await getAllAccounts(dbPath);
-      setAllAccounts(accounts);
-
       const selectedAccountId = await SecureStore.getItemAsync(SELECTED_ACCOUNT_KEY);
+
+      // Demo mode: the demo account never lives in SQLite — inject it so the
+      // account list and selection behave like any real Audible account.
+      const realAccounts = accounts.filter(acc => !isDemoAccountId(acc.account_id));
+      const mergedAccounts = isDemoAccountId(selectedAccountId)
+        ? [DEMO_ACCOUNT, ...realAccounts]
+        : realAccounts;
+      setAllAccounts(mergedAccounts);
+
       const primaryAccount = await getPrimaryAccount(dbPath);
-      const loadedAccount = accounts.find(acc => acc.account_id === selectedAccountId)
+      const loadedAccount = mergedAccounts.find(acc => acc.account_id === selectedAccountId)
         || primaryAccount
-        || accounts[0]
+        || mergedAccounts[0]
         || null;
 
       if (loadedAccount) {
@@ -115,7 +124,23 @@ export default function SimpleAccountScreen() {
     }
   };
 
+  const buildDemoStats = (): SyncStats => ({
+    total_items: DEMO_BOOKS.length,
+    total_library_count: DEMO_BOOKS.length,
+    books_added: 0,
+    books_updated: 0,
+    books_absent: 0,
+    errors: [],
+    has_more: false,
+  });
+
   const loadSyncedBooks = async (acc: Account) => {
+    // Demo mode: library count comes from the in-memory dataset, not SQLite.
+    if (isDemoAccount(acc)) {
+      setSyncStats(buildDemoStats());
+      return;
+    }
+
     try {
       const dbPath = getDatabasePath();
 
@@ -302,6 +327,13 @@ export default function SimpleAccountScreen() {
   const testConnection = async () => {
     if (!account?.identity) return;
 
+    // Demo mode: no Audible API call — report a healthy connection.
+    if (isDemoAccount(account)) {
+      setAccountName(DEMO_ACCOUNT.account_name);
+      setConnectionStatus('connected');
+      return;
+    }
+
     try {
       setConnectionStatus('checking');
       console.log('[SimpleAccountScreen] Fetching customer information from Audible API...');
@@ -347,6 +379,28 @@ export default function SimpleAccountScreen() {
 
   const handleLoginSuccess = async (newAccount: Account) => {
     console.log('[SimpleAccountScreen] Login successful, saving to SQLite');
+
+    // Demo mode: never persisted to SQLite, no background workers, no API calls.
+    if (isDemoAccount(newAccount)) {
+      try {
+        await SecureStore.setItemAsync(SELECTED_ACCOUNT_KEY, newAccount.account_id);
+        const dbPath = getDatabasePath();
+        const realAccounts = (await getAllAccounts(dbPath)).filter(
+          acc => !isDemoAccountId(acc.account_id)
+        );
+        setAllAccounts([DEMO_ACCOUNT, ...realAccounts]);
+        setAccount(newAccount);
+        setShowAddAccount(false);
+        setSyncStats(buildDemoStats());
+        setConnectionStatus('connected');
+        setAccountName(newAccount.account_name);
+        const expiresAt = newAccount.identity?.access_token?.expires_at;
+        if (expiresAt) setTokenExpiry(new Date(expiresAt));
+      } catch (error) {
+        console.error('[SimpleAccountScreen] Failed to enter demo mode:', error);
+      }
+      return;
+    }
 
     try {
       const dbPath = getDatabasePath();
@@ -437,8 +491,9 @@ export default function SimpleAccountScreen() {
 
             try {
               // Delete from SQLite first; otherwise a restart/focus reload would restore the login.
+              // The demo account is never persisted, so there is nothing to delete.
               const dbPath = getDatabasePath();
-              if (account?.account_id) {
+              if (account?.account_id && !isDemoAccount(account)) {
                 initializeDatabase(dbPath);
                 await deleteAccount(dbPath, account.account_id);
                 console.log('[SimpleAccountScreen] Account deleted from SQLite database');
@@ -490,6 +545,12 @@ export default function SimpleAccountScreen() {
 
     if (!account?.identity) {
       Alert.alert('Error', 'No authentication data available');
+      return;
+    }
+
+    // Demo mode: no real token to refresh.
+    if (isDemoAccount(account)) {
+      Alert.alert('Demo Mode', 'This is a demo account — no Audible token to refresh.');
       return;
     }
 
@@ -614,6 +675,15 @@ export default function SimpleAccountScreen() {
     console.log('========== SYNC LIBRARY BUTTON PRESSED ==========');
 
     if (!account) return;
+
+    // Demo mode: the library is a fixed in-memory set — "sync" just refreshes counts.
+    if (isDemoAccount(account)) {
+      setSyncStats(buildDemoStats());
+      const now = new Date();
+      setLastSyncDate(now);
+      Alert.alert('Demo Library', `${DEMO_BOOKS.length} sample audiobooks ready in your library.`);
+      return;
+    }
 
     const downloadDir = await ensureDownloadDirectory();
     if (!downloadDir) return;

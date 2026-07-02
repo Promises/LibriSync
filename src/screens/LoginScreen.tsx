@@ -8,6 +8,7 @@ import {
   RustBridgeError,
 } from '../../modules/expo-rust-bridge';
 import type { Account, Locale } from '../../modules/expo-rust-bridge';
+import { DEMO_ACCOUNT } from '../services/demo/demoData';
 import { useStyles } from '../hooks/useStyles';
 import { useTheme } from '../styles/theme';
 import type { Theme } from '../hooks/useStyles';
@@ -208,6 +209,13 @@ export default function LoginScreen({ onLoginSuccess, onCancel, title = 'Log in 
     startOAuthFlow(region);
   };
 
+  // Demo mode: skip OAuth entirely and sign in with a fake Audible account
+  // backed by free LibriVox books. Replicates the full Audible UI offline.
+  const handleDemoMode = () => {
+    console.log('[LoginScreen] Entering demo mode (no OAuth)');
+    onLoginSuccess(DEMO_ACCOUNT);
+  };
+
   const handleBackToRegionPicker = () => {
     console.log('[LoginScreen] User cancelled login, returning to region picker');
     setOauthUrl(null);
@@ -271,6 +279,14 @@ export default function LoginScreen({ onLoginSuccess, onCancel, title = 'Log in 
           )}
 
           <View style={styles.regionGrid}>
+            <TouchableOpacity
+              style={[styles.regionCard, styles.demoCard]}
+              onPress={handleDemoMode}
+              disabled={isLoading}
+            >
+              <Text style={styles.regionName}>🎬 Demo Mode</Text>
+              <Text style={styles.regionDomain}>no login</Text>
+            </TouchableOpacity>
             {REGIONS.map((region) => (
               <TouchableOpacity
                 key={region.code}
@@ -354,6 +370,10 @@ const createStyles = (theme: Theme) => ({
     textAlign: 'center' as const,
     marginBottom: theme.spacing.xl,
     color: theme.colors.textSecondary,
+  },
+  // Same shape as a region card, with a subtle accent border to hint it's special.
+  demoCard: {
+    borderColor: theme.colors.accent,
   },
   regionGrid: {
     gap: theme.spacing.md,

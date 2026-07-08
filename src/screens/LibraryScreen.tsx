@@ -66,6 +66,7 @@ const EXPORT_FORMAT_OPTIONS: Array<{ format: LibraryExportFormat; label: string;
     {format: 'json', label: 'JSON', icon: 'code-slash-outline'},
     {format: 'xlsx', label: 'XLSX', icon: 'document-text-outline'},
     {format: 'png', label: 'PNG', icon: 'image-outline'},
+    {format: 'goodreads', label: 'Goodreads', icon: 'library-outline'},
 ];
 
 interface LibraryPreferences {
@@ -98,10 +99,14 @@ export default function LibraryScreen() {
     const [sortDirection, setSortDirection] = useState<SortDirection>('asc');
     const [downloadedGroupSortField, setDownloadedGroupSortField] = useState<BookSortField>('title');
     const [downloadedGroupSortDirection, setDownloadedGroupSortDirection] = useState<SortDirection>('asc');
-    const [selectedSeries, setSelectedSeries] = useState<string | null>(null);
-    const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
+    const [selectedSeries, setSelectedSeries] = useState<string[]>([]);
+    const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
     const [sourceFilter, setSourceFilter] = useState<SourceFilter>('all');
-    const [accountFilter, setAccountFilter] = useState<string | null>(null);
+    const [typeFilter, setTypeFilter] = useState<'all' | 'audiobooks' | 'podcasts'>('all');
+    const [accountFilters, setAccountFilters] = useState<string[]>([]);
+    const [expandedFilterSections, setExpandedFilterSections] = useState<Record<string, boolean>>({});
+    // Downloads need one owning account; only use the filter when it's unambiguous
+    const singleAccountFilter = accountFilters.length === 1 ? accountFilters[0] : null;
     const [includePodcasts, setIncludePodcasts] = useState(true);
 
     // Filter options
@@ -113,6 +118,12 @@ export default function LibraryScreen() {
     const [showFilterModal, setShowFilterModal] = useState(false);
     const [showSortModal, setShowSortModal] = useState(false);
     const [showContextMenu, setShowContextMenu] = useState(false);
+    const [showDetailModal, setShowDetailModal] = useState(false);
+    const [detailDescriptionExpanded, setDetailDescriptionExpanded] = useState(false);
+    // Measured line count of the full (unclamped) description; drives whether
+    // the Show more/less toggle is needed at all.
+    const [detailDescriptionLines, setDetailDescriptionLines] = useState(0);
+    const DETAIL_DESCRIPTION_LINES = 8;
     const [selectedBook, setSelectedBook] = useState<Book | null>(null);
     const [selectedPodcast, setSelectedPodcast] = useState<Book | null>(null);
     const [podcastEpisodes, setPodcastEpisodes] = useState<Book[]>([]);
@@ -160,14 +171,14 @@ export default function LibraryScreen() {
                 clearTimeout(searchTimeout.current);
             }
         };
-    }, [searchQuery, sortField, sortDirection, downloadedGroupSortField, downloadedGroupSortDirection, selectedSeries, selectedCategory, sourceFilter, accountFilter, includePodcasts]);
+    }, [searchQuery, sortField, sortDirection, downloadedGroupSortField, downloadedGroupSortDirection, selectedSeries, selectedCategories, sourceFilter, typeFilter, accountFilters, includePodcasts]);
 
     // Reload books when tab is focused
     useFocusEffect(
         React.useCallback(() => {
             console.log('[LibraryScreen] Tab focused, reloading books...');
             loadBooks(true);
-        }, [searchQuery, sortField, sortDirection, downloadedGroupSortField, downloadedGroupSortDirection, selectedSeries, selectedCategory, sourceFilter, accountFilter, includePodcasts])
+        }, [searchQuery, sortField, sortDirection, downloadedGroupSortField, downloadedGroupSortDirection, selectedSeries, selectedCategories, sourceFilter, typeFilter, accountFilters, includePodcasts])
     );
 
     useFocusEffect(
@@ -293,7 +304,7 @@ export default function LibraryScreen() {
                     limit,
                     searchQuery,
                     series: selectedSeries,
-                    category: selectedCategory,
+                    category: selectedCategories,
                     sortField,
                     sortDirection,
                 });
@@ -328,8 +339,8 @@ export default function LibraryScreen() {
                 sortField,
                 sortDirection,
                 selectedSeries,
-                selectedCategory,
-                accountFilter,
+                selectedCategories,
+                accountFilters,
                 includePodcasts,
                 downloadedGroupSortField,
                 downloadedGroupSortDirection,
@@ -340,15 +351,17 @@ export default function LibraryScreen() {
                 offset,
                 limit,
                 searchQuery || null,
-                selectedSeries || null,
-                selectedCategory || null,
+                selectedSeries,
+                selectedCategories,
                 sortField,
                 sortDirection,
                 sourceFilter === 'all' ? null : sourceFilter,
                 sortField === 'downloaded' ? downloadedGroupSortField : null,
                 sortField === 'downloaded' ? downloadedGroupSortDirection : null,
-                accountFilter,
-                includePodcasts
+                accountFilters,
+                typeFilter === 'audiobooks' ? false : includePodcasts,
+                null,
+                typeFilter === 'podcasts'
             );
 
             console.log('[LibraryScreen] Loaded books:', response.books.length, 'of', response.total_count);
@@ -406,7 +419,7 @@ export default function LibraryScreen() {
             let remoteEpisodeCount: number | null = null;
 
             try {
-                const accountId = podcast.account?.split(',').find(Boolean) || accountFilter;
+                const accountId = podcast.account?.split(',').find(Boolean) || singleAccountFilter;
                 const account = accountId
                     ? await getAccount(dbPath, accountId)
                     : await getPrimaryAccount(dbPath);
@@ -437,7 +450,7 @@ export default function LibraryScreen() {
                 'audible',
                 null,
                 null,
-                accountFilter,
+                accountFilters,
                 true,
                 podcast.audible_product_id
             );
@@ -538,7 +551,7 @@ export default function LibraryScreen() {
             const dbPath = getDatabasePath();
             initializeDatabase(dbPath);
 
-            const owningAccountId = accountFilter || getBookAccountIds(selectedPodcast)[0] || null;
+            const owningAccountId = singleAccountFilter || getBookAccountIds(selectedPodcast)[0] || null;
             let account = owningAccountId
                 ? await getAccount(dbPath, owningAccountId)
                 : await getPrimaryAccount(dbPath);
@@ -656,15 +669,17 @@ export default function LibraryScreen() {
                 books.length,
                 pageSize,
                 searchQuery || null,
-                selectedSeries || null,
-                selectedCategory || null,
+                selectedSeries,
+                selectedCategories,
                 exportSortField === 'title' ? 'title' : 'length',
                 exportSortDirection,
                 sourceFilter === 'all' ? null : sourceFilter,
                 null,
                 null,
-                accountFilter,
-                includePodcasts
+                accountFilters,
+                typeFilter === 'audiobooks' ? false : includePodcasts,
+                null,
+                typeFilter === 'podcasts'
             );
 
             books.push(...response.books);
@@ -748,11 +763,29 @@ export default function LibraryScreen() {
 
     const handleClearFilters = () => {
         setSearchQuery('');
-        setSelectedSeries(null);
-        setSelectedCategory(null);
+        setSelectedSeries([]);
+        setSelectedCategories([]);
         setSourceFilter('all');
-        setAccountFilter(null);
+        setTypeFilter('all');
+        setAccountFilters([]);
         setShowFilterModal(false);
+    };
+
+    // Convert Audible's HTML descriptions (<p>/<br> structure) to plain text
+    // while keeping the paragraph and line breaks.
+    const stripHtml = (value?: string): string => {
+        return (value || '')
+            .replace(/<br\s*\/?>/gi, '\n')
+            .replace(/<\/p>/gi, '\n\n')
+            .replace(/<[^>]*>/g, '')
+            .replace(/&amp;/g, '&')
+            .replace(/&quot;/g, '"')
+            .replace(/&#39;|&apos;/g, "'")
+            .replace(/&nbsp;/g, ' ')
+            .replace(/[ \t]+/g, ' ')
+            .replace(/ ?\n ?/g, '\n')
+            .replace(/\n{3,}/g, '\n\n')
+            .trim();
     };
 
     const formatDuration = (seconds: number): string => {
@@ -821,6 +854,13 @@ export default function LibraryScreen() {
             .split(',')
             .map(value => value.trim())
             .filter(Boolean);
+    };
+
+    const getBookAccountLabels = (book: Book): string[] => {
+        return getBookAccountIds(book).map((accountId) => {
+            const savedAccount = allAccounts.find((a) => a.account_id === accountId);
+            return savedAccount?.account_name || accountId;
+        });
     };
 
     const requestNotificationPermission = async (): Promise<boolean> => {
@@ -921,7 +961,7 @@ export default function LibraryScreen() {
             const dbPath = getDatabasePath();
             initializeDatabase(dbPath);
 
-            const owningAccountId = accountFilter || getBookAccountIds(book)[0] || null;
+            const owningAccountId = singleAccountFilter || getBookAccountIds(book)[0] || null;
             let account = owningAccountId
                 ? await getAccount(dbPath, owningAccountId)
                 : await getPrimaryAccount(dbPath);
@@ -1291,9 +1331,10 @@ export default function LibraryScreen() {
             <TouchableOpacity
                 style={styles.item}
                 onPress={() => {
-                    if (parentPodcast) {
-                        handlePodcastPress(item);
-                    }
+                    setSelectedBook(item);
+                    setDetailDescriptionExpanded(false);
+                    setDetailDescriptionLines(0);
+                    setShowDetailModal(true);
                 }}
                 onLongPress={() => handleBookLongPress(item)}
                 accessibilityLabel={parentPodcast ? `Open ${item.title} episodes` : item.title}
@@ -1336,6 +1377,11 @@ export default function LibraryScreen() {
                                     <Text style={styles.sourceBadgeText}>LibriVox</Text>
                                 </View>
                             )}
+                            {allAccounts.length > 1 && getBookAccountLabels(item).map((label) => (
+                                <View key={label} style={styles.sourceBadge}>
+                                    <Text style={styles.sourceBadgeText}>{label}</Text>
+                                </View>
+                            ))}
                             <Text style={[styles.status, {color: status.color}]}>
                                 {status.text}
                             </Text>
@@ -1428,12 +1474,80 @@ export default function LibraryScreen() {
         return `${fieldLabels[sortField]} ${arrow}`;
     };
 
+    const COLLAPSED_FILTER_OPTIONS = 10;
+
+    // Multi-select filter section: tap toggles a value, "All ..." clears the
+    // section, long lists collapse behind a "Show all" row.
+    const renderMultiSelectSection = (
+        title: string,
+        allLabel: string,
+        options: string[],
+        selected: string[],
+        setSelected: (values: string[]) => void,
+        sectionKey: string,
+        getLabel: (value: string) => string = (value) => value
+    ) => {
+        const expanded = !!expandedFilterSections[sectionKey];
+        // Keep selected options visible even when collapsed
+        const visible = expanded || options.length <= COLLAPSED_FILTER_OPTIONS
+            ? options
+            : options.filter((option, index) => index < COLLAPSED_FILTER_OPTIONS || selected.includes(option));
+        const toggle = (value: string) =>
+            setSelected(
+                selected.includes(value)
+                    ? selected.filter((entry) => entry !== value)
+                    : [...selected, value]
+            );
+
+        return (
+            <>
+                <Text style={styles.filterSectionTitle}>{title}</Text>
+                <TouchableOpacity
+                    style={[
+                        styles.filterOption,
+                        selected.length === 0 && styles.filterOptionSelected
+                    ]}
+                    onPress={() => setSelected([])}
+                >
+                    <Text style={styles.filterOptionText}>{allLabel}</Text>
+                    {selected.length === 0 && <Text style={styles.modalCheck}>✓</Text>}
+                </TouchableOpacity>
+                {visible.map((option) => (
+                    <TouchableOpacity
+                        key={option}
+                        style={[
+                            styles.filterOption,
+                            selected.includes(option) && styles.filterOptionSelected
+                        ]}
+                        onPress={() => toggle(option)}
+                    >
+                        <Text style={styles.filterOptionText}>{getLabel(option)}</Text>
+                        {selected.includes(option) && <Text style={styles.modalCheck}>✓</Text>}
+                    </TouchableOpacity>
+                ))}
+                {options.length > COLLAPSED_FILTER_OPTIONS && (
+                    <TouchableOpacity
+                        style={styles.filterOption}
+                        onPress={() =>
+                            setExpandedFilterSections((prev) => ({...prev, [sectionKey]: !expanded}))
+                        }
+                    >
+                        <Text style={[styles.filterOptionText, {color: colors.accent}]}>
+                            {expanded ? 'Show less' : `Show all (${options.length})`}
+                        </Text>
+                    </TouchableOpacity>
+                )}
+            </>
+        );
+    };
+
     const getActiveFiltersCount = () => {
         let count = 0;
-        if (selectedSeries) count++;
-        if (selectedCategory) count++;
+        count += selectedSeries.length;
+        count += selectedCategories.length;
         if (sourceFilter !== 'all') count++;
-        if (accountFilter) count++;
+        if (typeFilter !== 'all') count++;
+        count += accountFilters.length;
         return count;
     };
 
@@ -1672,12 +1786,12 @@ export default function LibraryScreen() {
             ) : audiobooks.length === 0 ? (
                 <View style={styles.emptyState}>
                     <Text style={styles.emptyText}>
-                        {searchQuery || selectedSeries || selectedCategory
+                        {searchQuery || selectedSeries.length > 0 || selectedCategories.length > 0
                             ? 'No books match your search or filters'
                             : 'No audiobooks yet'}
                     </Text>
                     <Text style={styles.emptySubtext}>
-                        {searchQuery || selectedSeries || selectedCategory || sourceFilter !== 'all'
+                        {searchQuery || selectedSeries.length > 0 || selectedCategories.length > 0 || sourceFilter !== 'all'
                             ? 'Try adjusting your search or clearing filters'
                             : 'Go to Account tab to sign in and sync your Audible library, or browse free audiobooks on the Browse tab'}
                     </Text>
@@ -1909,91 +2023,59 @@ export default function LibraryScreen() {
                                 </TouchableOpacity>
                             ))}
 
-                            {allAccounts.length > 1 && (
-                                <>
-                                    <Text style={styles.filterSectionTitle}>Account</Text>
-                                    <TouchableOpacity
-                                        style={[
-                                            styles.filterOption,
-                                            !accountFilter && styles.filterOptionSelected
-                                        ]}
-                                        onPress={() => setAccountFilter(null)}
-                                    >
-                                        <Text style={styles.filterOptionText}>All Accounts</Text>
-                                        {!accountFilter && <Text style={styles.modalCheck}>✓</Text>}
-                                    </TouchableOpacity>
+                            {/* Type Filter */}
+                            <Text style={styles.filterSectionTitle}>Type</Text>
+                            {([
+                                {value: 'all', label: 'All Types'},
+                                {value: 'audiobooks', label: 'Audiobooks'},
+                                {value: 'podcasts', label: 'Podcasts'},
+                            ] as const).map((option) => (
+                                <TouchableOpacity
+                                    key={option.value}
+                                    style={[
+                                        styles.filterOption,
+                                        typeFilter === option.value && styles.filterOptionSelected
+                                    ]}
+                                    onPress={() => setTypeFilter(option.value)}
+                                >
+                                    <Text style={styles.filterOptionText}>{option.label}</Text>
+                                    {typeFilter === option.value && <Text style={styles.modalCheck}>✓</Text>}
+                                </TouchableOpacity>
+                            ))}
 
-                                    {allAccounts.map((savedAccount) => (
-                                        <TouchableOpacity
-                                            key={savedAccount.account_id}
-                                            style={[
-                                                styles.filterOption,
-                                                accountFilter === savedAccount.account_id && styles.filterOptionSelected
-                                            ]}
-                                            onPress={() => setAccountFilter(savedAccount.account_id)}
-                                        >
-                                            <Text style={styles.filterOptionText}>
-                                                {savedAccount.account_name || savedAccount.account_id}
-                                            </Text>
-                                            {accountFilter === savedAccount.account_id && <Text style={styles.modalCheck}>✓</Text>}
-                                        </TouchableOpacity>
-                                    ))}
-                                </>
+                            {allAccounts.length > 1 &&
+                                renderMultiSelectSection(
+                                    'Account',
+                                    'All Accounts',
+                                    allAccounts.map((savedAccount) => savedAccount.account_id),
+                                    accountFilters,
+                                    setAccountFilters,
+                                    'accounts',
+                                    (accountId) => {
+                                        const savedAccount = allAccounts.find((a) => a.account_id === accountId);
+                                        return savedAccount?.account_name || accountId;
+                                    }
+                                )}
+
+                            {/* Genre Filter */}
+                            {renderMultiSelectSection(
+                                'Genre',
+                                'All Genres',
+                                allCategories,
+                                selectedCategories,
+                                setSelectedCategories,
+                                'genres'
                             )}
 
                             {/* Series Filter */}
-                            <Text style={styles.filterSectionTitle}>Series</Text>
-                            <TouchableOpacity
-                                style={[
-                                    styles.filterOption,
-                                    !selectedSeries && styles.filterOptionSelected
-                                ]}
-                                onPress={() => setSelectedSeries(null)}
-                            >
-                                <Text style={styles.filterOptionText}>All Series</Text>
-                                {!selectedSeries && <Text style={styles.modalCheck}>✓</Text>}
-                            </TouchableOpacity>
-
-                            {allSeries.map((series) => (
-                                <TouchableOpacity
-                                    key={series}
-                                    style={[
-                                        styles.filterOption,
-                                        selectedSeries === series && styles.filterOptionSelected
-                                    ]}
-                                    onPress={() => setSelectedSeries(series)}
-                                >
-                                    <Text style={styles.filterOptionText}>{series}</Text>
-                                    {selectedSeries === series && <Text style={styles.modalCheck}>✓</Text>}
-                                </TouchableOpacity>
-                            ))}
-
-                            {/* Category Filter */}
-                            <Text style={styles.filterSectionTitle}>Genre</Text>
-                            <TouchableOpacity
-                                style={[
-                                    styles.filterOption,
-                                    !selectedCategory && styles.filterOptionSelected
-                                ]}
-                                onPress={() => setSelectedCategory(null)}
-                            >
-                                <Text style={styles.filterOptionText}>All Genres</Text>
-                                {!selectedCategory && <Text style={styles.modalCheck}>✓</Text>}
-                            </TouchableOpacity>
-
-                            {allCategories.map((category) => (
-                                <TouchableOpacity
-                                    key={category}
-                                    style={[
-                                        styles.filterOption,
-                                        selectedCategory === category && styles.filterOptionSelected
-                                    ]}
-                                    onPress={() => setSelectedCategory(category)}
-                                >
-                                    <Text style={styles.filterOptionText}>{category}</Text>
-                                    {selectedCategory === category && <Text style={styles.modalCheck}>✓</Text>}
-                                </TouchableOpacity>
-                            ))}
+                            {renderMultiSelectSection(
+                                'Series',
+                                'All Series',
+                                allSeries,
+                                selectedSeries,
+                                setSelectedSeries,
+                                'series'
+                            )}
                         </ScrollView>
 
                         <TouchableOpacity
@@ -2001,6 +2083,95 @@ export default function LibraryScreen() {
                             onPress={() => setShowFilterModal(false)}
                         >
                             <Text style={styles.modalApplyText}>Apply Filters</Text>
+                        </TouchableOpacity>
+                    </View>
+                </TouchableOpacity>
+            </Modal>
+
+            {/* Book Detail Modal */}
+            <Modal
+                visible={showDetailModal}
+                transparent
+                animationType="slide"
+                onRequestClose={() => setShowDetailModal(false)}
+            >
+                <TouchableOpacity
+                    style={styles.modalOverlay}
+                    activeOpacity={1}
+                    onPress={() => setShowDetailModal(false)}
+                >
+                    <View style={styles.modalContentLarge} onStartShouldSetResponder={() => true}>
+                        <Text style={styles.modalTitle}>{selectedBook?.title}</Text>
+                        {!!selectedBook?.subtitle && (
+                            <Text style={styles.modalSubtitle}>{selectedBook.subtitle}</Text>
+                        )}
+                        <ScrollView style={styles.filterScroll}>
+                            {(selectedBook?.authors?.length || 0) > 0 && (
+                                <Text style={styles.detailLine}>By {selectedBook!.authors.join(', ')}</Text>
+                            )}
+                            {(selectedBook?.narrators?.length || 0) > 0 && (
+                                <Text style={styles.detailLine}>Narrated by {selectedBook!.narrators.join(', ')}</Text>
+                            )}
+                            {!!selectedBook?.series_name && (
+                                <Text style={styles.detailLine}>
+                                    {selectedBook.series_name}
+                                    {selectedBook.series_sequence ? ` #${selectedBook.series_sequence}` : ''}
+                                </Text>
+                            )}
+                            {!!selectedBook?.duration_seconds && (
+                                <Text style={styles.detailLine}>{formatDuration(selectedBook.duration_seconds)}</Text>
+                            )}
+                            {!!selectedBook?.release_date && (
+                                <Text style={styles.detailLine}>Released {selectedBook.release_date.split('T')[0]}</Text>
+                            )}
+                            {allAccounts.length > 1 && selectedBook && getBookAccountLabels(selectedBook).length > 0 && (
+                                <Text style={styles.detailLine}>
+                                    Account: {getBookAccountLabels(selectedBook).join(', ')}
+                                </Text>
+                            )}
+                            <Text
+                                style={styles.detailDescription}
+                                numberOfLines={detailDescriptionExpanded ? undefined : DETAIL_DESCRIPTION_LINES}
+                            >
+                                {stripHtml(selectedBook?.description) || 'No summary available.'}
+                            </Text>
+                            {/* Invisible unclamped copy measures the real line count */}
+                            {detailDescriptionLines === 0 && (
+                                <Text
+                                    style={[styles.detailDescription, styles.detailDescriptionMeasure]}
+                                    onTextLayout={(e) =>
+                                        setDetailDescriptionLines(e.nativeEvent.lines.length)
+                                    }
+                                >
+                                    {stripHtml(selectedBook?.description) || 'No summary available.'}
+                                </Text>
+                            )}
+                            {detailDescriptionLines > DETAIL_DESCRIPTION_LINES && (
+                                <TouchableOpacity
+                                    onPress={() => setDetailDescriptionExpanded((prev) => !prev)}
+                                >
+                                    <Text style={[styles.detailLine, {color: colors.accent}]}>
+                                        {detailDescriptionExpanded ? 'Show less' : 'Show more'}
+                                    </Text>
+                                </TouchableOpacity>
+                            )}
+                        </ScrollView>
+                        {selectedBook && isPodcastParent(selectedBook) && (
+                            <TouchableOpacity
+                                style={styles.modalApplyButton}
+                                onPress={() => {
+                                    setShowDetailModal(false);
+                                    handlePodcastPress(selectedBook);
+                                }}
+                            >
+                                <Text style={styles.modalApplyText}>View Episodes</Text>
+                            </TouchableOpacity>
+                        )}
+                        <TouchableOpacity
+                            style={styles.modalApplyButton}
+                            onPress={() => setShowDetailModal(false)}
+                        >
+                            <Text style={styles.modalApplyText}>Close</Text>
                         </TouchableOpacity>
                     </View>
                 </TouchableOpacity>
@@ -2393,6 +2564,25 @@ const createStyles = (theme: Theme) => ({
     },
     separator: {
         height: theme.spacing.sm,
+    },
+    detailLine: {
+        fontSize: 14,
+        color: theme.colors.textSecondary,
+        marginBottom: theme.spacing.xs,
+    },
+    detailDescription: {
+        fontSize: 14,
+        color: theme.colors.textPrimary,
+        lineHeight: 20,
+        marginTop: theme.spacing.sm,
+        marginBottom: theme.spacing.md,
+    },
+    detailDescriptionMeasure: {
+        position: 'absolute' as const,
+        left: 0,
+        right: 0,
+        opacity: 0,
+        zIndex: -1,
     },
     emptyState: {
         flex: 1,

@@ -6,16 +6,18 @@ import Constants from 'expo-constants';
 import { useStyles } from '../hooks/useStyles';
 import { useTheme } from '../styles/theme';
 import type { Theme } from '../hooks/useStyles';
-import { Directory, Paths } from 'expo-file-system';
+import { Directory, File, Paths } from 'expo-file-system';
+import * as DocumentPicker from 'expo-document-picker';
 import * as SecureStore from 'expo-secure-store';
 import {
   scheduleTokenRefresh,
   scheduleLibrarySync,
   cancelTokenRefresh,
   cancelLibrarySync,
+  exportDatabase,
   ExpoRustBridge,
 } from '../../modules/expo-rust-bridge';
-import { getDatabaseFiles } from '../utils/appPaths';
+import { getDatabaseFiles, getDatabasePath } from '../utils/appPaths';
 import { useProviders } from '../contexts/ProvidersContext';
 import { checkForUpdate, isGithubReleaseBuild, type UpdateInfo } from '../utils/versionCheck';
 
@@ -428,6 +430,80 @@ export default function SettingsScreen() {
     return path;
   };
 
+  const handleExportDatabase = async () => {
+    try {
+      const dbPath = getDatabasePath();
+      const fileName = `librisync-database-${new Date().toISOString().slice(0, 10)}.db`;
+      const cacheFile = new File(Paths.cache, fileName);
+
+      // VACUUM INTO produces a single consistent snapshot of the live database
+      exportDatabase(dbPath, cacheFile.uri.replace(/^file:\/\//, ''));
+
+      const directory = await Directory.pickDirectoryAsync(
+        Platform.OS === 'android' ? undefined : Paths.document.uri
+      );
+      const destFile = directory.createFile(fileName, 'application/x-sqlite3');
+      destFile.write(await cacheFile.bytes(), {});
+      cacheFile.delete();
+
+      Alert.alert('Export Complete', `Database saved as ${fileName}`);
+    } catch (error: any) {
+      const message = error?.message || String(error);
+      if (message.toLowerCase().includes('cancel')) return;
+      console.error('[Settings] Database export failed:', error);
+      Alert.alert('Export Failed', message);
+    }
+  };
+
+  const handleImportDatabase = async () => {
+    try {
+      const picked = await DocumentPicker.getDocumentAsync({
+        copyToCacheDirectory: true,
+        multiple: false,
+      });
+      if (picked.canceled || !picked.assets?.[0]?.uri) return;
+
+      const sourceFile = new File(picked.assets[0].uri);
+      const header = (await sourceFile.bytes()).slice(0, 15);
+      const isSqlite = String.fromCharCode(...header) === 'SQLite format 3';
+      if (!isSqlite) {
+        Alert.alert('Import Failed', 'The selected file is not a SQLite database.');
+        return;
+      }
+
+      Alert.alert(
+        'Import Database',
+        'This replaces your current library database with the selected file. Downloads on disk are kept.\n\nAre you sure?',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Import',
+            style: 'destructive',
+            onPress: async () => {
+              try {
+                for (const dbFile of getDatabaseFiles()) {
+                  if (dbFile.exists) {
+                    await dbFile.delete();
+                  }
+                }
+                sourceFile.copy(new File(Paths.document, 'audible.db'));
+                Alert.alert('Import Complete', 'Database imported. Your library will reload.');
+              } catch (error: any) {
+                console.error('[Settings] Database import failed:', error);
+                Alert.alert('Import Failed', error?.message || String(error));
+              }
+            },
+          },
+        ],
+      );
+    } catch (error: any) {
+      const message = error?.message || String(error);
+      if (message.toLowerCase().includes('cancel')) return;
+      console.error('[Settings] Database import failed:', error);
+      Alert.alert('Import Failed', message);
+    }
+  };
+
   const handleDeleteDatabase = () => {
     Alert.alert(
       'Delete Database',
@@ -659,6 +735,30 @@ export default function SettingsScreen() {
 
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Database</Text>
+
+          <View style={styles.settingItem}>
+            <View style={styles.settingInfo}>
+              <Text style={styles.settingLabel}>Export Database</Text>
+              <Text style={styles.settingDescription}>
+                Save a backup copy of the library database
+              </Text>
+            </View>
+            <TouchableOpacity style={styles.button} onPress={handleExportDatabase}>
+              <Text style={styles.buttonText}>Export</Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.settingItem}>
+            <View style={styles.settingInfo}>
+              <Text style={styles.settingLabel}>Import Database</Text>
+              <Text style={styles.settingDescription}>
+                Restore the library from an exported backup
+              </Text>
+            </View>
+            <TouchableOpacity style={styles.button} onPress={handleImportDatabase}>
+              <Text style={styles.buttonText}>Import</Text>
+            </TouchableOpacity>
+          </View>
 
           <TouchableOpacity
             style={[styles.button, styles.dangerButton]}

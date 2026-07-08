@@ -429,7 +429,7 @@ pub struct Category {
 pub struct CategoryLadder {
     pub category_ladder_id: i64,
     pub audible_ladder_id: String,
-    pub ladder: String, // JSON array of category IDs representing the path
+    pub ladder: String, // JSON array of category names representing the path
 }
 
 /// Supplement (PDF) information
@@ -610,5 +610,5 @@ pub struct NewCategory {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewCategoryLadder {
     pub audible_ladder_id: String,
-    pub ladder: String, // JSON array
+    pub ladder: String, // JSON array of category names
 }

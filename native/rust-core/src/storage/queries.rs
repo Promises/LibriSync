@@ -484,12 +484,13 @@ fn grouped_order_expression(field: SortField, direction: SortDirection) -> &'sta
 #[derive(Debug, Clone, Default)]
 pub struct BookQueryParams {
     pub search_query: Option<String>, // Search in title, author, narrator
-    pub series_name: Option<String>,  // Filter by series
-    pub category: Option<String>,     // Filter by genre/category
+    pub series_names: Vec<String>,    // Filter by series (any match)
+    pub categories: Vec<String>,      // Filter by genre/category (any match)
     pub source: Option<String>,       // Filter by source (audible, librivox)
-    pub account: Option<String>,      // Filter by owning account/marketplace
+    pub accounts: Vec<String>,        // Filter by owning accounts (any match)
     pub origin_asin: Option<String>,  // Filter by podcast/periodical parent ASIN
     pub include_podcasts: bool,
+    pub podcasts_only: bool, // Only podcast/periodical parents
     pub sort_field: Option<SortField>,
     pub sort_direction: Option<SortDirection>,
     pub downloaded_group_sort_field: Option<SortField>,
@@ -507,13 +508,10 @@ impl BookQueryParams {
     }
 }
 
-/// List books with relations, supporting search, filter, and sort
-pub async fn list_books_with_filters(
-    pool: &SqlitePool,
-    params: &BookQueryParams,
-) -> Result<Vec<BookWithRelations>> {
-    // Build the WHERE clause dynamically
-    let mut where_clauses = Vec::new();
+/// Build the shared WHERE clause and bind values for book filter queries.
+/// Used by both the list and count queries so they always agree.
+fn build_book_filter_where(params: &BookQueryParams) -> (String, Vec<String>) {
+    let mut where_clauses: Vec<String> = Vec::new();
     let mut bind_values: Vec<String> = Vec::new();
 
     // Search filter
@@ -521,43 +519,76 @@ pub async fn list_books_with_filters(
         let pattern = format!("%{}%", search);
         where_clauses.push(
             "(b.title LIKE ? OR b.subtitle LIKE ? OR book_authors.authors LIKE ? \
-             OR book_narrators.narrators LIKE ? OR book_series_first.series_name LIKE ?)",
+             OR book_narrators.narrators LIKE ? OR book_series_first.series_name LIKE ?)"
+                .to_string(),
         );
-        bind_values.push(pattern.clone());
-        bind_values.push(pattern.clone());
-        bind_values.push(pattern.clone());
-        bind_values.push(pattern.clone());
-        bind_values.push(pattern);
+        for _ in 0..5 {
+            bind_values.push(pattern.clone());
+        }
     }
 
-    // Series filter
-    if let Some(ref series) = params.series_name {
-        where_clauses.push("book_series.series_name = ?");
-        bind_values.push(series.clone());
+    // Series filter (any of the selected series; matches every series a book
+    // belongs to, not just the first one)
+    let series: Vec<&String> = params
+        .series_names
+        .iter()
+        .filter(|s| !s.trim().is_empty())
+        .collect();
+    if !series.is_empty() {
+        let placeholders = vec!["?"; series.len()].join(", ");
+        where_clauses.push(format!(
+            "EXISTS (SELECT 1 FROM SeriesBooks sb_f \
+             JOIN Series s_f ON sb_f.series_id = s_f.series_id \
+             WHERE sb_f.book_id = b.book_id AND s_f.name IN ({}))",
+            placeholders
+        ));
+        for s in series {
+            bind_values.push(s.clone());
+        }
     }
 
-    // Category filter
-    if let Some(ref category) = params.category {
-        where_clauses.push(
+    // Category filter (any of the selected categories)
+    let categories: Vec<&String> = params
+        .categories
+        .iter()
+        .filter(|c| !c.trim().is_empty())
+        .collect();
+    if !categories.is_empty() {
+        let likes = vec!["cl.ladder LIKE ?"; categories.len()].join(" OR ");
+        where_clauses.push(format!(
             "EXISTS (SELECT 1 FROM BookCategories bc \
              JOIN CategoryLadders cl ON bc.category_ladder_id = cl.category_ladder_id \
-             WHERE bc.book_id = b.book_id AND cl.ladder LIKE ?)",
-        );
-        bind_values.push(format!("%{}%", category));
+             WHERE bc.book_id = b.book_id AND ({}))",
+            likes
+        ));
+        for c in categories {
+            // Ladders store a JSON array of names; quote for an exact match.
+            bind_values.push(format!("%\"{}\"%", c));
+        }
     }
 
     // Source filter
     if let Some(ref source) = params.source {
-        where_clauses.push("COALESCE(b.source, 'audible') = ?");
+        where_clauses.push("COALESCE(b.source, 'audible') = ?".to_string());
         bind_values.push(source.clone());
     }
 
-    if let Some(ref account) = params.account {
-        if !account.trim().is_empty() {
-            where_clauses.push(
-                "EXISTS (SELECT 1 FROM BookAccounts ba_filter WHERE ba_filter.book_id = b.book_id AND ba_filter.account = ? AND ba_filter.is_deleted = 0)"
-            );
-            bind_values.push(account.clone());
+    // Account filter (any of the selected accounts)
+    let accounts: Vec<&String> = params
+        .accounts
+        .iter()
+        .filter(|a| !a.trim().is_empty())
+        .collect();
+    if !accounts.is_empty() {
+        let placeholders = vec!["?"; accounts.len()].join(", ");
+        where_clauses.push(format!(
+            "EXISTS (SELECT 1 FROM BookAccounts ba_filter \
+             WHERE ba_filter.book_id = b.book_id AND ba_filter.account IN ({}) \
+             AND ba_filter.is_deleted = 0)",
+            placeholders
+        ));
+        for a in accounts {
+            bind_values.push(a.clone());
         }
     }
 
@@ -565,21 +596,27 @@ pub async fn list_books_with_filters(
     if let Some(ref origin_asin) = params.origin_asin {
         if !origin_asin.trim().is_empty() {
             has_origin_filter = true;
-            where_clauses.push("b.origin_asin = ?");
+            where_clauses.push("b.origin_asin = ?".to_string());
             bind_values.push(origin_asin.clone());
-            where_clauses.push("b.audible_product_id != ?");
+            where_clauses.push("b.audible_product_id != ?".to_string());
             bind_values.push(origin_asin.clone());
         }
     }
 
     if !has_origin_filter {
-        where_clauses.push("b.content_type != 2");
+        where_clauses.push("b.content_type != 2".to_string());
     }
 
-    if !params.include_podcasts {
+    if params.podcasts_only {
+        where_clauses.push(
+            "b.content_delivery_type IN ('PodcastParent', 'PodcastSeries', 'Periodical')"
+                .to_string(),
+        );
+    } else if !params.include_podcasts {
         where_clauses.push(
             "(b.content_delivery_type IS NULL \
-             OR b.content_delivery_type NOT IN ('PodcastParent', 'PodcastSeries', 'Periodical'))",
+             OR b.content_delivery_type NOT IN ('PodcastParent', 'PodcastSeries', 'Periodical'))"
+                .to_string(),
         );
     }
 
@@ -588,6 +625,16 @@ pub async fn list_books_with_filters(
     } else {
         format!("WHERE {}", where_clauses.join(" AND "))
     };
+
+    (where_clause, bind_values)
+}
+
+/// List books with relations, supporting search, filter, and sort
+pub async fn list_books_with_filters(
+    pool: &SqlitePool,
+    params: &BookQueryParams,
+) -> Result<Vec<BookWithRelations>> {
+    let (where_clause, bind_values) = build_book_filter_where(params);
 
     // Build ORDER BY clause
     let order_clause = match (params.sort_field, params.sort_direction) {
@@ -746,82 +793,7 @@ pub async fn list_books_with_filters(
 
 /// Count books matching filter criteria
 pub async fn count_books_with_filters(pool: &SqlitePool, params: &BookQueryParams) -> Result<i64> {
-    // Build the WHERE clause dynamically
-    let mut where_clauses = Vec::new();
-    let mut bind_values: Vec<String> = Vec::new();
-
-    // Search filter
-    if let Some(ref search) = params.search_query {
-        let pattern = format!("%{}%", search);
-        where_clauses.push(
-            "(b.title LIKE ? OR b.subtitle LIKE ? OR book_authors.authors LIKE ? \
-             OR book_narrators.narrators LIKE ? OR book_series.series_name LIKE ?)",
-        );
-        bind_values.push(pattern.clone());
-        bind_values.push(pattern.clone());
-        bind_values.push(pattern.clone());
-        bind_values.push(pattern.clone());
-        bind_values.push(pattern);
-    }
-
-    // Series filter
-    if let Some(ref series) = params.series_name {
-        where_clauses.push("book_series.series_name = ?");
-        bind_values.push(series.clone());
-    }
-
-    // Category filter
-    if let Some(ref category) = params.category {
-        where_clauses.push(
-            "EXISTS (SELECT 1 FROM BookCategories bc \
-             JOIN CategoryLadders cl ON bc.category_ladder_id = cl.category_ladder_id \
-             WHERE bc.book_id = b.book_id AND cl.ladder LIKE ?)",
-        );
-        bind_values.push(format!("%{}%", category));
-    }
-
-    // Source filter
-    if let Some(ref source) = params.source {
-        where_clauses.push("COALESCE(b.source, 'audible') = ?");
-        bind_values.push(source.clone());
-    }
-
-    if let Some(ref account) = params.account {
-        if !account.trim().is_empty() {
-            where_clauses.push(
-                "EXISTS (SELECT 1 FROM BookAccounts ba_filter WHERE ba_filter.book_id = b.book_id AND ba_filter.account = ? AND ba_filter.is_deleted = 0)"
-            );
-            bind_values.push(account.clone());
-        }
-    }
-
-    let mut has_origin_filter = false;
-    if let Some(ref origin_asin) = params.origin_asin {
-        if !origin_asin.trim().is_empty() {
-            has_origin_filter = true;
-            where_clauses.push("b.origin_asin = ?");
-            bind_values.push(origin_asin.clone());
-            where_clauses.push("b.audible_product_id != ?");
-            bind_values.push(origin_asin.clone());
-        }
-    }
-
-    if !has_origin_filter {
-        where_clauses.push("b.content_type != 2");
-    }
-
-    if !params.include_podcasts {
-        where_clauses.push(
-            "(b.content_delivery_type IS NULL \
-             OR b.content_delivery_type NOT IN ('PodcastParent', 'PodcastSeries', 'Periodical'))",
-        );
-    }
-
-    let where_clause = if where_clauses.is_empty() {
-        String::new()
-    } else {
-        format!("WHERE {}", where_clauses.join(" AND "))
-    };
+    let (where_clause, bind_values) = build_book_filter_where(params);
 
     let query = format!(
         r#"
@@ -846,16 +818,22 @@ pub async fn count_books_with_filters(pool: &SqlitePool, params: &BookQueryParam
         book_series AS (
             SELECT
                 sb.book_id,
-                s.name as series_name
+                s.name as series_name,
+                ROW_NUMBER() OVER (PARTITION BY sb.book_id ORDER BY sb."index", s.name) as rn
             FROM SeriesBooks sb
             JOIN Series s ON sb.series_id = s.series_id
+        ),
+        book_series_first AS (
+            SELECT book_id, series_name
+            FROM book_series
+            WHERE rn = 1
         )
         SELECT COUNT(DISTINCT b.book_id)
         FROM Books b
         LEFT JOIN LibraryBooks lb ON b.book_id = lb.book_id
         LEFT JOIN book_authors ON b.book_id = book_authors.book_id
         LEFT JOIN book_narrators ON b.book_id = book_narrators.book_id
-        LEFT JOIN book_series ON b.book_id = book_series.book_id
+        LEFT JOIN book_series_first ON b.book_id = book_series_first.book_id
         {}
         "#,
         where_clause
@@ -886,13 +864,17 @@ pub async fn list_all_series(pool: &SqlitePool) -> Result<Vec<String>> {
 }
 
 /// Get all unique categories/genres from the library
+///
+/// CategoryLadders.ladder stores a JSON array of category names for one
+/// ladder (e.g. ["Science Fiction & Fantasy", "Science Fiction"]); every
+/// name on a ladder linked to at least one book becomes a filter option.
 pub async fn list_all_categories(pool: &SqlitePool) -> Result<Vec<String>> {
     let categories: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT c.name FROM Categories c \
-         JOIN CategoryLadders cl ON c.audible_category_id = cl.ladder \
-         JOIN BookCategories bc ON cl.category_ladder_id = bc.category_ladder_id \
-         WHERE c.name IS NOT NULL \
-         ORDER BY c.name",
+        "SELECT DISTINCT je.value FROM CategoryLadders cl \
+         JOIN BookCategories bc ON cl.category_ladder_id = bc.category_ladder_id, \
+         json_each(cl.ladder) je \
+         WHERE je.value IS NOT NULL AND je.value != '' \
+         ORDER BY je.value",
     )
     .fetch_all(pool)
     .await?;
@@ -1884,6 +1866,120 @@ mod tests {
             paths.get("B012345680").map(String::as_str),
             Some("/books/new.m4b")
         );
+    }
+
+    #[tokio::test]
+    async fn test_list_books_with_filters_by_series_and_category() {
+        let db = Database::new_in_memory()
+            .await
+            .expect("Failed to create database");
+
+        let books = [
+            ("B000000101", "Book One", Some("Alpha Saga"), Some("Fantasy")),
+            ("B000000102", "Book Two", Some("Beta Cycle"), Some("Sci-Fi")),
+            ("B000000103", "Book Three", None, None),
+        ];
+
+        for (asin, title, series, category) in books {
+            let book = NewBook::new(asin.to_string(), title.to_string(), "us".to_string());
+            let book_id = insert_book(db.pool(), &book)
+                .await
+                .expect("Failed to insert book");
+
+            insert_library_book(
+                db.pool(),
+                &NewLibraryBook {
+                    book_id,
+                    account: "test@example.com".to_string(),
+                },
+            )
+            .await
+            .expect("Failed to insert library book");
+
+            if let Some(series_name) = series {
+                let series_id = upsert_series(
+                    db.pool(),
+                    &NewSeries {
+                        audible_series_id: format!("SER-{}", series_name),
+                        name: Some(series_name.to_string()),
+                    },
+                )
+                .await
+                .expect("Failed to upsert series");
+                add_book_to_series(db.pool(), series_id, book_id, Some("1".to_string()), 1.0)
+                    .await
+                    .expect("Failed to link series");
+            }
+
+            if let Some(category_name) = category {
+                let ladder_id = upsert_category_ladder(
+                    db.pool(),
+                    &NewCategoryLadder {
+                        audible_ladder_id: format!("LAD-{}", category_name),
+                        ladder: format!("[\"{}\"]", category_name),
+                    },
+                )
+                .await
+                .expect("Failed to upsert ladder");
+                add_book_category(db.pool(), book_id, ladder_id)
+                    .await
+                    .expect("Failed to link category");
+            }
+        }
+
+        // Series-only filter: this returned zero rows before the fix because
+        // the list query referenced a CTE it never joined.
+        let params = BookQueryParams {
+            series_names: vec!["Alpha Saga".to_string()],
+            limit: 10,
+            offset: 0,
+            ..BookQueryParams::with_defaults()
+        };
+        let by_series = list_books_with_filters(db.pool(), &params)
+            .await
+            .expect("Failed to list by series");
+        assert_eq!(by_series.len(), 1);
+        assert_eq!(by_series[0].title, "Book One");
+        assert_eq!(
+            count_books_with_filters(db.pool(), &params)
+                .await
+                .expect("Failed to count by series"),
+            1
+        );
+
+        // Multi-select series
+        let params = BookQueryParams {
+            series_names: vec!["Alpha Saga".to_string(), "Beta Cycle".to_string()],
+            limit: 10,
+            offset: 0,
+            ..BookQueryParams::with_defaults()
+        };
+        assert_eq!(
+            list_books_with_filters(db.pool(), &params)
+                .await
+                .expect("Failed to list by two series")
+                .len(),
+            2
+        );
+
+        // Category filter against JSON name ladders
+        let params = BookQueryParams {
+            categories: vec!["Fantasy".to_string()],
+            limit: 10,
+            offset: 0,
+            ..BookQueryParams::with_defaults()
+        };
+        let by_category = list_books_with_filters(db.pool(), &params)
+            .await
+            .expect("Failed to list by category");
+        assert_eq!(by_category.len(), 1);
+        assert_eq!(by_category[0].title, "Book One");
+
+        // Genre option list comes from the JSON ladders
+        let categories = list_all_categories(db.pool())
+            .await
+            .expect("Failed to list categories");
+        assert_eq!(categories, vec!["Fantasy".to_string(), "Sci-Fi".to_string()]);
     }
 
     #[tokio::test]

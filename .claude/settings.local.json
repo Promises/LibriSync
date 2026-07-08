@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh issue *)",
+      "Bash(gh api *)",
+      "Bash(echo \"RC=$?\")",
+      "Bash(find /home/user/Github/LibriSync/src -type f)",
+      "Read(//tmp/**)",
+      "Bash(cd /home/user/Github/LibriSync *)",
+      "Bash(cargo check *)",
+      "Bash(echo \"EXIT=$?\")",
+      "Read(//home/user/Github/**)",
+      "Read(//home/user/**)",
+      "Bash(awk '/pub async fn get_download_license/,/^ }$/' native/rust-core/src/api/license.rs)",
+      "Bash(git -C /home/user/Github/LibriSync-upstream-19-20 diff --stat main...HEAD)",
+      "Bash(git -C /home/user/Github/LibriSync-upstream-19-20 log --oneline main..HEAD)"
+    ]
+  }
+}

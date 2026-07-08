@@ -32,8 +32,8 @@ export interface FilterSortParams {
   offset: number;
   limit: number;
   searchQuery?: string | null;
-  series?: string | null;
-  category?: string | null;
+  series?: string | string[] | null;
+  category?: string | string[] | null;
   sortField?: string | null;
   sortDirection?: string | null;
 }
@@ -80,10 +80,15 @@ export function filterSortPaginate(
 ): { books: Book[]; total_count: number } {
   const query = (params.searchQuery || '').trim().toLowerCase();
 
+  const toList = (value?: string | string[] | null): string[] =>
+    (Array.isArray(value) ? value : value ? [value] : []).filter(Boolean);
+  const seriesList = toList(params.series);
+  const categoryList = toList(params.category);
+
   let filtered = source.filter(book => {
     if (query && !matchesSearch(book, query)) return false;
-    if (params.series && book.series_name !== params.series) return false;
-    if (params.category && book.category !== params.category) return false;
+    if (seriesList.length && !seriesList.includes(book.series_name ?? '')) return false;
+    if (categoryList.length && !categoryList.includes(book.category ?? '')) return false;
     return true;
   });
 

@@ -352,6 +352,11 @@ class ExpoRustBridgeModule : Module() {
             if (extrasObj.has("account")) put("account", extrasObj.getString("account"))
             if (extrasObj.has("origin_asin")) put("origin_asin", extrasObj.getString("origin_asin"))
             if (extrasObj.has("include_podcasts")) put("include_podcasts", extrasObj.getBoolean("include_podcasts"))
+            if (extrasObj.has("podcasts_only")) put("podcasts_only", extrasObj.getBoolean("podcasts_only"))
+            // Multi-select filters (JSON arrays of strings)
+            if (extrasObj.has("series_names")) put("series_names", extrasObj.getJSONArray("series_names"))
+            if (extrasObj.has("categories")) put("categories", extrasObj.getJSONArray("categories"))
+            if (extrasObj.has("accounts")) put("accounts", extrasObj.getJSONArray("accounts"))
           } catch (_: Exception) {
             // If extras is not valid JSON, treat it as sort_direction for backward compat
             put("sort_direction", extras)
@@ -372,6 +377,21 @@ class ExpoRustBridgeModule : Module() {
         put("db_path", dbPath)
       }
       parseJsonResponse(nativeGetAllSeries(params.toString()))
+    }
+
+    /**
+     * Export the library database as a single consistent SQLite file.
+     *
+     * @param dbPath The path to the SQLite database file
+     * @param destPath Destination file path for the exported copy
+     * @return Map with success flag and dest_path
+     */
+    Function("exportDatabase") { dbPath: String, destPath: String ->
+      val params = JSONObject().apply {
+        put("db_path", dbPath)
+        put("dest_path", destPath)
+      }
+      parseJsonResponse(nativeExportDatabase(params.toString()))
     }
 
     /**
@@ -2342,6 +2362,7 @@ class ExpoRustBridgeModule : Module() {
     @JvmStatic external fun nativeBuildFilePath(paramsJson: String): String
     @JvmStatic external fun nativeGetCustomerInformation(paramsJson: String): String
     @JvmStatic external fun nativeLogFromRust(paramsJson: String): String
+    @JvmStatic external fun nativeExportDatabase(paramsJson: String): String
 
     // License function (get license without downloading)
     @JvmStatic external fun nativeGetDownloadLicense(paramsJson: String): String

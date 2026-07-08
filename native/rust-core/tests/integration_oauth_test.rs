@@ -25,7 +25,7 @@ fn test_parse_real_registration_response() {
     assert_eq!(response.request_id, "8e570a18-8232-4df0-a212-c0d21860fcd5");
     assert_eq!(
         response.response.success.customer_id,
-        "amzn1.account.AGMGLSGIFYVALF2MEO4F3JJQRLSA"
+        "amzn1.account.TESTFIXTUREACCOUNT00000000000"
     );
 
     println!("✅ Registration response parsed successfully");
@@ -51,13 +51,13 @@ fn test_extract_all_tokens() {
     assert!(data.adp_token.contains("{key:"));
 
     // Device info
-    assert_eq!(data.device_serial_number, "B45EF975C33A7B7E8DAF4D96E39B8040");
+    assert_eq!(data.device_serial_number, "00000000000000000000000000000000");
     assert_eq!(data.device_type, "A10KISP2GWF0E4");
-    assert_eq!(data.device_name, "Henning's 7th Android");
+    assert_eq!(data.device_name, "Test Fixture Android");
 
     // Customer info
-    assert_eq!(data.customer_info.name, "Henning Berge");
-    assert_eq!(data.customer_info.given_name, "Henning");
+    assert_eq!(data.customer_info.name, "Test User");
+    assert_eq!(data.customer_info.given_name, "Test");
     assert_eq!(data.customer_info.home_region, "NA");
 
     // Cookies
@@ -84,9 +84,9 @@ fn test_create_identity_from_real_data() {
     // Verify Identity has all required fields
     assert!(identity.access_token.token.len() > 50);
     assert!(identity.refresh_token.len() > 50);
-    assert_eq!(identity.device_serial_number, "B45EF975C33A7B7E8DAF4D96E39B8040");
+    assert_eq!(identity.device_serial_number, "00000000000000000000000000000000");
     assert_eq!(identity.device_type, "A10KISP2GWF0E4");
-    assert_eq!(identity.amazon_account_id, "amzn1.account.AGMGLSGIFYVALF2MEO4F3JJQRLSA");
+    assert_eq!(identity.amazon_account_id, "amzn1.account.TESTFIXTUREACCOUNT00000000000");
     assert_eq!(identity.locale, locale);
 
     // Verify not expired
@@ -117,7 +117,7 @@ fn test_create_account_with_real_identity() {
 
     // Verify account
     assert_eq!(account.account_id, account_id);
-    assert_eq!(account.account_name, "Henning Berge");
+    assert_eq!(account.account_name, "Test User");
     assert!(account.identity.is_some());
     assert!(!account.needs_token_refresh());
 
@@ -222,10 +222,10 @@ fn test_customer_info_complete() {
 
     // Verify all fields
     assert_eq!(customer_info.account_pool, "Amazon");
-    assert_eq!(customer_info.user_id, "amzn1.account.AGMGLSGIFYVALF2MEO4F3JJQRLSA");
+    assert_eq!(customer_info.user_id, "amzn1.account.TESTFIXTUREACCOUNT00000000000");
     assert_eq!(customer_info.home_region, "NA");
-    assert_eq!(customer_info.name, "Henning Berge");
-    assert_eq!(customer_info.given_name, "Henning");
+    assert_eq!(customer_info.name, "Test User");
+    assert_eq!(customer_info.given_name, "Test");
 
     // Verify customer_id matches user_id
     assert_eq!(

@@ -252,7 +252,7 @@ mod tests {
 
         // Verify basic structure
         assert_eq!(response.request_id, "8e570a18-8232-4df0-a212-c0d21860fcd5");
-        assert_eq!(response.response.success.customer_id, "amzn1.account.AGMGLSGIFYVALF2MEO4F3JJQRLSA");
+        assert_eq!(response.response.success.customer_id, "amzn1.account.TESTFIXTUREACCOUNT00000000000");
     }
 
     #[test]
@@ -309,8 +309,8 @@ mod tests {
         let response = RegistrationResponse::from_json(TEST_FIXTURE).unwrap();
         let device_info = &response.response.success.extensions.device_info;
 
-        assert_eq!(device_info.device_name, "Henning's 7th Android");
-        assert_eq!(device_info.device_serial_number, "B45EF975C33A7B7E8DAF4D96E39B8040");
+        assert_eq!(device_info.device_name, "Test Fixture Android");
+        assert_eq!(device_info.device_serial_number, "00000000000000000000000000000000");
         assert_eq!(device_info.device_type, "A10KISP2GWF0E4");
     }
 
@@ -320,10 +320,10 @@ mod tests {
         let customer_info = &response.response.success.extensions.customer_info;
 
         assert_eq!(customer_info.account_pool, "Amazon");
-        assert_eq!(customer_info.user_id, "amzn1.account.AGMGLSGIFYVALF2MEO4F3JJQRLSA");
+        assert_eq!(customer_info.user_id, "amzn1.account.TESTFIXTUREACCOUNT00000000000");
         assert_eq!(customer_info.home_region, "NA");
-        assert_eq!(customer_info.name, "Henning Berge");
-        assert_eq!(customer_info.given_name, "Henning");
+        assert_eq!(customer_info.name, "Test User");
+        assert_eq!(customer_info.given_name, "Test");
     }
 
     #[test]
@@ -344,13 +344,13 @@ mod tests {
         assert!(data.adp_token.contains("{enc:"));
 
         // Verify device info
-        assert_eq!(data.device_serial_number, "B45EF975C33A7B7E8DAF4D96E39B8040");
+        assert_eq!(data.device_serial_number, "00000000000000000000000000000000");
         assert_eq!(data.device_type, "A10KISP2GWF0E4");
-        assert_eq!(data.device_name, "Henning's 7th Android");
+        assert_eq!(data.device_name, "Test Fixture Android");
 
         // Verify customer info
-        assert_eq!(data.amazon_account_id, "amzn1.account.AGMGLSGIFYVALF2MEO4F3JJQRLSA");
-        assert_eq!(data.customer_info.name, "Henning Berge");
+        assert_eq!(data.amazon_account_id, "amzn1.account.TESTFIXTUREACCOUNT00000000000");
+        assert_eq!(data.customer_info.name, "Test User");
         assert_eq!(data.customer_info.home_region, "NA");
 
         // Verify cookies
@@ -370,11 +370,11 @@ mod tests {
         // Verify Identity fields
         assert!(identity.access_token.token.starts_with("Atna|"));
         assert!(identity.refresh_token.starts_with("Atnr|"));
-        assert_eq!(identity.device_serial_number, "B45EF975C33A7B7E8DAF4D96E39B8040");
+        assert_eq!(identity.device_serial_number, "00000000000000000000000000000000");
         assert_eq!(identity.device_type, "A10KISP2GWF0E4");
-        assert_eq!(identity.amazon_account_id, "amzn1.account.AGMGLSGIFYVALF2MEO4F3JJQRLSA");
+        assert_eq!(identity.amazon_account_id, "amzn1.account.TESTFIXTUREACCOUNT00000000000");
         assert_eq!(identity.locale, locale);
-        assert_eq!(identity.customer_info.name, "Henning Berge");
+        assert_eq!(identity.customer_info.name, "Test User");
     }
 
     #[test]
@@ -434,6 +434,6 @@ mod tests {
 
         // These should be the same
         assert_eq!(customer_id, user_id);
-        assert_eq!(customer_id, "amzn1.account.AGMGLSGIFYVALF2MEO4F3JJQRLSA");
+        assert_eq!(customer_id, "amzn1.account.TESTFIXTUREACCOUNT00000000000");
     }
 }

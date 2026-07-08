@@ -706,17 +706,11 @@ impl AudibleClient {
         match serde_json::from_str::<T>(&response_text) {
             Ok(data) => Ok(data),
             Err(e) => {
-                // Extract context around the error location (800 chars)
-                let error_col = e.column();
-                let start = error_col.saturating_sub(400);
-                let end = (error_col + 400).min(response_text.len());
-                let context = &response_text[start..end];
-
+                // Do not echo the response body into the error message; a
+                // partial API response can contain token or account data.
                 Err(LibationError::InvalidApiResponse {
-                    message: format!(
-                        "Parse error: {} at col {}. Context: ...{}...",
-                        e, error_col, context
-                    ),
+                    message: format!("Parse error: {} at line {} col {}", e, e.line(), e.column()),
+                    // Body kept out of the message; this field is not displayed.
                     response_body: Some(response_text),
                 })
             }
@@ -729,8 +723,11 @@ impl AudibleClient {
         let url = response.url().clone();
         let error_body = response.text().await.unwrap_or_default();
 
+        // Cap the reflected body: error responses can echo request data.
+        let snippet: String = error_body.chars().take(300).collect();
+
         Err(LibationError::api_failed(
-            format!("API request failed: {}", error_body),
+            format!("API request failed: {}", snippet),
             Some(status.as_u16()),
             Some(self.extract_endpoint_from_url(url.as_str())),
         ))

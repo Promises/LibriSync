@@ -97,3 +97,4 @@ CLAUDE.md
 build-output/
 *.apk
 !android/app/build/outputs/apk/
+.claude/

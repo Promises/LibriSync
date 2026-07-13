@@ -418,23 +418,14 @@ impl KeyData {
             LibationError::InvalidInput(format!("Decrypted license is not valid UTF-8: {}", e))
         })?;
 
-        // Debug: print decrypted JSON
-        eprintln!("🔍 DEBUG: Decrypted voucher JSON:\n{}\n", json_str);
+        // Never log json_str: it contains the AES key/iv for the audiobook.
 
         // Parse JSON to get Voucher
         // Reference: ContentLicenseDtoV10.cs:46 - VoucherDtoV10.FromJson(plainText)
         let voucher: Voucher = serde_json::from_str(&json_str).map_err(|e| {
-            LibationError::InvalidInput(format!(
-                "Failed to parse decrypted voucher JSON: {}\nJSON was: {}",
-                e, json_str
-            ))
+            // Do not include json_str in the error: it contains the key/iv.
+            LibationError::InvalidInput(format!("Failed to parse decrypted voucher JSON: {}", e))
         })?;
-
-        eprintln!(
-            "🔍 DEBUG: Voucher key length: {}, iv length: {:?}",
-            voucher.key.len(),
-            voucher.iv.as_ref().map(|s| s.len())
-        );
 
         // Convert voucher to KeyData
         // Check if key is hex (32 chars) or base64 (24 chars)

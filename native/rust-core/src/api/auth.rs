@@ -1402,14 +1402,8 @@ pub async fn exchange_authorization_code(
         "requested_extensions": ["device_info", "customer_info"]
     });
 
-    // Log the request for debugging
-    eprintln!("=== Device Registration Request ===");
-    eprintln!("URL: {}", register_url);
-    eprintln!(
-        "Body: {}",
-        serde_json::to_string_pretty(&request_body).unwrap_or_default()
-    );
-    eprintln!("===================================");
+    // Never log the request body: it contains the authorization code and
+    // PKCE verifier, and stderr is readable via logcat on Android.
 
     // Make HTTP request
     let client = reqwest::Client::new();

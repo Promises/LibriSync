@@ -1,8 +1,10 @@
 # LibriSync
 
-Manage your audiobook library. Browse free LibriVox books and sync your Audible collection.
+Libation for Android. Sync and manage your audiobook library, and browse thousands of free LibriVox books.
 
-**[henning.tech/librisync](https://henning.tech/librisync)**<!-- · [Google Play](https://play.google.com/store/apps/details?id=tech.henning.librisync)-->
+**[henning.tech/librisync](https://henning.tech/librisync)** · [Google Play](https://play.google.com/store/apps/details?id=tech.henning.librisync)
+
+LibriSync is essentially **[Libation](https://github.com/rmcrackan/Libation)** on your phone — its core is a direct port of Libation's C# codebase to Rust, so you get the same proven library-sync and download engine, native on Android.
 
 ## Features
 
@@ -10,10 +12,13 @@ Manage your audiobook library. Browse free LibriVox books and sync your Audible 
 Discover thousands of free public domain audiobooks from LibriVox - no account required. Search by title or author, and download directly to your device.
 
 **Sync Your Audible Library**
-Connect your Audible account to sync your purchased audiobooks. View your entire library with cover art, series info, and duration details.
+Connect your Audible account to sync your purchased audiobooks, powered by Libation's sync engine ported to Rust. View your entire library with cover art, series info, and duration details - including podcasts.
+
+**Try It Instantly with Demo Mode**
+Explore the full app backed by free LibriVox books before connecting any account - no login required.
 
 **Download & Listen Offline**
-Background downloads with progress notifications, pause/resume support, and automatic retry on failure.
+Background downloads with progress notifications, pause/resume support, download-all, and automatic retry on failure.
 
 **Smart File Organization**
 Choose how your audiobooks are organized on your device - flat files, Author/Book, or Author/Series/Book folders. Compatible with Smart Audiobook Player for seamless cover art integration.
@@ -35,11 +40,11 @@ No tracking. No analytics. No ads. No accounts required for LibriVox browsing. A
 
 ## Installation
 
-[//]: # (**Google Play**: [Download from Google Play]&#40;https://play.google.com/store/apps/details?id=tech.henning.librisync&#41;)
+**Google Play** ($4.99): [Download from Google Play](https://play.google.com/store/apps/details?id=tech.henning.librisync) - supports development.
 
-**GitHub Releases**: Download the latest APK from [Releases](https://github.com/Promises/LibriSync/releases)
+**GitHub Releases** (free): Download the latest APK from [Releases](https://github.com/Promises/LibriSync/releases) and sideload it.
 
-**Looking for testers**: [Sign up for closed Google Play testing](https://github.com/Promises/LibriSync/issues/15)
+LibriSync is and always will be free and open source here on GitHub.
 
 ---
 

@@ -3,7 +3,7 @@ import {Platform} from 'react-native';
 import type {Book} from '../../modules/expo-rust-bridge';
 import {createLibraryExportImage} from '../../modules/expo-rust-bridge';
 
-export type LibraryExportFormat = 'csv' | 'json' | 'xlsx' | 'png' | 'txt';
+export type LibraryExportFormat = 'csv' | 'json' | 'xlsx' | 'png' | 'txt' | 'goodreads';
 export type LibraryExportSortField = 'title' | 'length';
 export type LibraryExportDirection = 'asc' | 'desc';
 
@@ -94,6 +94,10 @@ export async function exportLibrary(
         if (format === 'csv') {
             const name = `${baseName}.csv`;
             const file = writeTextFile(directory, name, 'text/csv', buildCsv(exportBooks));
+            files.push({format, name, uri: file.uri});
+        } else if (format === 'goodreads') {
+            const name = `${baseName}-goodreads.csv`;
+            const file = writeTextFile(directory, name, 'text/csv', buildGoodreadsCsv(exportBooks));
             files.push({format, name, uri: file.uri});
         } else if (format === 'txt') {
             const name = `${baseName}.txt`;
@@ -204,6 +208,42 @@ function getExportCoverUrl(coverUrl?: string): string {
 
 function buildCsv(books: ExportBook[]): string {
     const rows = [EXPORT_HEADERS, ...books.map(bookToRow)];
+    return `\uFEFF${rows.map(row => row.map(escapeCsvValue).join(',')).join('\n')}`;
+}
+
+// Goodreads import format; StoryGraph accepts the same CSV.
+// Audiobooks have no ISBN, so Goodreads/StoryGraph match by title + author.
+const GOODREADS_HEADERS = [
+    'Title',
+    'Author',
+    'ISBN',
+    'ISBN13',
+    'My Rating',
+    'Publisher',
+    'Binding',
+    'Year Published',
+    'Date Added',
+    'Bookshelves',
+    'Owned Copies',
+];
+
+function buildGoodreadsCsv(books: ExportBook[]): string {
+    const rows = [
+        GOODREADS_HEADERS,
+        ...books.map(book => [
+            book.title,
+            book.authors,
+            '',
+            '',
+            '0',
+            book.publisher,
+            'Audiobook',
+            book.releaseDate ? book.releaseDate.slice(0, 4) : '',
+            book.purchaseDate ? book.purchaseDate.slice(0, 10) : '',
+            '',
+            '1',
+        ]),
+    ];
     return `\uFEFF${rows.map(row => row.map(escapeCsvValue).join(',')).join('\n')}`;
 }
 

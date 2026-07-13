@@ -671,6 +671,120 @@ export default function SimpleAccountScreen() {
     }
   };
 
+  // Refresh the token if needed, then sync one account's library.
+  // UI account state is only touched when it is the selected account.
+  const syncOneAccount = async (dbPath: string, acc: Account): Promise<SyncStats> => {
+    let syncAccount = acc;
+    if (syncAccount.identity?.access_token) {
+      const expiresAt = new Date(syncAccount.identity.access_token.expires_at);
+      const minutesUntilExpiry = (expiresAt.getTime() - Date.now()) / 1000 / 60;
+
+      if (minutesUntilExpiry < 5) {
+        console.log(`[SimpleAccountScreen] Token for ${acc.account_id} expiring soon, refreshing before sync...`);
+        const newTokens = await refreshToken(syncAccount);
+        const newExpiry = new Date(Date.now() + parseInt(newTokens.expires_in.toString(), 10) * 1000);
+
+        syncAccount = {
+          ...syncAccount,
+          identity: {
+            ...syncAccount.identity!,
+            access_token: {
+              token: newTokens.access_token,
+              expires_at: newExpiry.toISOString(),
+            },
+            refresh_token: newTokens.refresh_token || syncAccount.identity!.refresh_token,
+          },
+        };
+
+        // Persist refreshed account
+        await saveAccount(dbPath, syncAccount);
+        if (account && syncAccount.account_id === account.account_id) {
+          await SecureStore.setItemAsync('token_expires_at', newExpiry.toISOString());
+          setAccount(syncAccount);
+          setTokenExpiry(newExpiry);
+        }
+      }
+    }
+
+    // Sync library page-by-page with progress updates
+    console.log(`[SimpleAccountScreen] Starting page-by-page sync for ${syncAccount.account_id}...`);
+    return syncLibrary(dbPath, syncAccount, (_pageStats, page, aggregatedStats) => {
+      console.log(`[SimpleAccountScreen] Page ${page} synced: ${_pageStats.total_items} items`);
+      // Update UI incrementally after each page
+      setSyncStats({
+        ..._pageStats,
+        total_items: aggregatedStats.total_items, // This is cumulative in the aggregated stats
+        books_added: aggregatedStats.books_added,
+        books_updated: aggregatedStats.books_updated,
+      });
+    });
+  };
+
+  const handleSyncAllAccounts = async () => {
+    if (!account) return;
+
+    const realAccounts = allAccounts.filter((acc) => !isDemoAccount(acc));
+    if (realAccounts.length === 0) return;
+
+    const downloadDir = await ensureDownloadDirectory();
+    if (!downloadDir) return;
+
+    try {
+      setIsSyncing(true);
+
+      const dbPath = getDatabasePath();
+      initializeDatabase(dbPath);
+
+      let totalItems = 0;
+      let totalLibraryCount = 0;
+      let booksAdded = 0;
+      let booksUpdated = 0;
+      const failed: string[] = [];
+
+      for (const acc of realAccounts) {
+        try {
+          const stats = await syncOneAccount(dbPath, acc);
+          totalItems += stats.total_items;
+          totalLibraryCount += stats.total_library_count;
+          booksAdded += stats.books_added;
+          booksUpdated += stats.books_updated;
+        } catch (error: any) {
+          console.error(`[SimpleAccountScreen] Sync failed for ${acc.account_id}:`, error);
+          failed.push(formatAccountName(acc));
+        }
+      }
+
+      let existingDownloadsLinked = 0;
+      if (Platform.OS === 'android' && downloadDir) {
+        try {
+          const downloadScanStats = await scanDownloadDirectory(dbPath, downloadDir);
+          existingDownloadsLinked = downloadScanStats.books_linked;
+        } catch (scanError) {
+          console.warn('[SimpleAccountScreen] Existing download scan failed:', scanError);
+        }
+      }
+
+      const now = new Date();
+      setLastSyncDate(now);
+      await SecureStore.setItemAsync('last_sync_date', now.toISOString());
+
+      const scanSummary = Platform.OS === 'android' && downloadDir
+        ? `\nExisting downloads linked: ${existingDownloadsLinked}`
+        : '';
+      const failSummary = failed.length > 0 ? `\nFailed: ${failed.join(', ')}` : '';
+
+      Alert.alert(
+        failed.length > 0 ? 'Sync Finished With Errors' : 'Sync Complete!',
+        `Accounts synced: ${realAccounts.length - failed.length} / ${realAccounts.length}\nSynced: ${totalItems} / ${totalLibraryCount}\nAdded: ${booksAdded}\nUpdated: ${booksUpdated}${scanSummary}${failSummary}`
+      );
+    } catch (error: any) {
+      console.error('Sync all accounts failed:', error);
+      showCopyableErrorAlert('Sync Failed', error, 'Failed to sync all accounts');
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
   const handleSyncLibrary = async () => {
     console.log('========== SYNC LIBRARY BUTTON PRESSED ==========');
 
@@ -696,58 +810,7 @@ export default function SimpleAccountScreen() {
       console.log('[SimpleAccountScreen] Database path:', dbPath);
       initializeDatabase(dbPath);
 
-      // Ensure access token is valid before syncing
-      let syncAccount = account;
-      if (syncAccount.identity?.access_token) {
-        const expiresAt = new Date(syncAccount.identity.access_token.expires_at);
-        const minutesUntilExpiry = (expiresAt.getTime() - Date.now()) / 1000 / 60;
-
-        if (minutesUntilExpiry < 5) {
-          console.log('[SimpleAccountScreen] Token expiring soon, refreshing before sync...');
-          try {
-            const newTokens = await refreshToken(syncAccount);
-            const newExpiry = new Date(Date.now() + parseInt(newTokens.expires_in.toString(), 10) * 1000);
-
-            syncAccount = {
-              ...syncAccount,
-              identity: {
-                ...syncAccount.identity!,
-                access_token: {
-                  token: newTokens.access_token,
-                  expires_at: newExpiry.toISOString(),
-                },
-                refresh_token: newTokens.refresh_token || syncAccount.identity!.refresh_token,
-              },
-            };
-
-            // Persist refreshed account
-            await saveAccount(dbPath, syncAccount);
-            await SecureStore.setItemAsync('token_expires_at', newExpiry.toISOString());
-            setAccount(syncAccount);
-            setTokenExpiry(newExpiry);
-
-            console.log('[SimpleAccountScreen] Token refreshed before sync, new expiry:', newExpiry.toLocaleString());
-          } catch (refreshError: any) {
-            console.error('[SimpleAccountScreen] Token refresh failed before sync:', refreshError);
-            Alert.alert('Sync Failed', 'Could not refresh expired token. Please log in again.');
-            setIsSyncing(false);
-            return;
-          }
-        }
-      }
-
-      // Sync library page-by-page with progress updates
-      console.log('[SimpleAccountScreen] Starting page-by-page sync...');
-      const stats = await syncLibrary(dbPath, syncAccount, (_pageStats, page, aggregatedStats) => {
-        console.log(`[SimpleAccountScreen] Page ${page} synced: ${_pageStats.total_items} items`);
-        // Update UI incrementally after each page
-        setSyncStats({
-          ..._pageStats,
-          total_items: aggregatedStats.total_items, // This is cumulative in the aggregated stats
-          books_added: aggregatedStats.books_added,
-          books_updated: aggregatedStats.books_updated,
-        });
-      });
+      const stats = await syncOneAccount(dbPath, account);
 
       // Update UI with final stats
       setSyncStats(stats);
@@ -926,6 +989,17 @@ export default function SimpleAccountScreen() {
           disabled={isSyncing}
           style={{ marginTop: spacing.sm }}
         />
+
+        {allAccounts.filter((acc) => !isDemoAccount(acc)).length > 1 && (
+          <Button
+            title={isSyncing ? 'Syncing...' : 'Sync All Accounts'}
+            onPress={handleSyncAllAccounts}
+            variant="outlined"
+            state="warning"
+            disabled={isSyncing}
+            style={{ marginTop: spacing.sm }}
+          />
+        )}
 
         <Button
           title="Log Out"

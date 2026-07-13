@@ -448,6 +448,14 @@ export interface ExpoRustBridgeModule {
   getAllCategories(dbPath: string): RustResponse<{ categories: string[] }>;
 
   /**
+   * Export the library database as a single consistent SQLite file.
+   *
+   * @param dbPath - Absolute path to the live database file
+   * @param destPath - Destination file path for the exported copy
+   */
+  exportDatabase(dbPath: string, destPath: string): RustResponse<{ dest_path: string }>;
+
+  /**
    * Render library export rows as a PNG file.
    *
    * @param entriesJson - JSON array of header, group, and book rows
@@ -1350,29 +1358,41 @@ function getBooksWithFilters(
   offset: number,
   limit: number,
   searchQuery?: string | null,
-  seriesName?: string | null,
-  category?: string | null,
+  seriesNames?: string | string[] | null,
+  categories?: string | string[] | null,
   sortField?: string | null,
   sortDirection?: string | null,
   source?: string | null,
   downloadedGroupSortField?: string | null,
   downloadedGroupSortDirection?: string | null,
-  account?: string | null,
+  accounts?: string | string[] | null,
   includePodcasts?: boolean,
-  originAsin?: string | null
+  originAsin?: string | null,
+  podcastsOnly?: boolean
 ): { books: Book[]; total_count: number } {
+  const toList = (value?: string | string[] | null): string[] =>
+    (Array.isArray(value) ? value : value ? [value] : []).filter(Boolean);
+  const seriesList = toList(seriesNames);
+  const categoryList = toList(categories);
+  const accountList = toList(accounts);
+
   // Pack extra sort/filter values into extras JSON (Kotlin Function limit: 8 params)
   let extras: string | null = null;
   const excludePodcasts = includePodcasts === false;
-  if (sortDirection || source || downloadedGroupSortField || downloadedGroupSortDirection || account || excludePodcasts || originAsin) {
-    const extrasObj: Record<string, string | boolean> = {};
+  if (sortDirection || source || downloadedGroupSortField || downloadedGroupSortDirection
+      || accountList.length || excludePodcasts || originAsin || seriesList.length || categoryList.length
+      || podcastsOnly) {
+    const extrasObj: Record<string, string | boolean | string[]> = {};
     if (sortDirection) extrasObj.sort_direction = sortDirection;
     if (source) extrasObj.source = source;
     if (downloadedGroupSortField) extrasObj.downloaded_group_sort_field = downloadedGroupSortField;
     if (downloadedGroupSortDirection) extrasObj.downloaded_group_sort_direction = downloadedGroupSortDirection;
-    if (account) extrasObj.account = account;
+    if (accountList.length) extrasObj.accounts = accountList;
+    if (seriesList.length) extrasObj.series_names = seriesList;
+    if (categoryList.length) extrasObj.categories = categoryList;
     if (originAsin) extrasObj.origin_asin = originAsin;
     if (excludePodcasts) extrasObj.include_podcasts = false;
+    if (podcastsOnly) extrasObj.podcasts_only = true;
     extras = JSON.stringify(extrasObj);
   }
 
@@ -1381,12 +1401,23 @@ function getBooksWithFilters(
     offset,
     limit,
     searchQuery || null,
-    seriesName || null,
-    category || null,
+    null,
+    null,
     sortField || null,
     extras
   );
   return unwrapResult(response);
+}
+
+/**
+ * Export the library database as a single consistent SQLite file.
+ *
+ * @param dbPath - Path to the live database file
+ * @param destPath - Destination file path for the exported copy
+ */
+function exportDatabase(dbPath: string, destPath: string): void {
+  const response = NativeModule!.exportDatabase(dbPath, destPath);
+  unwrapResult(response);
 }
 
 /**
@@ -2271,6 +2302,7 @@ export {
   getBooksWithFilters,
   getAllSeries,
   getAllCategories,
+  exportDatabase,
   createLibraryExportImage,
   copyTextToClipboard,
   getCustomerInformation,

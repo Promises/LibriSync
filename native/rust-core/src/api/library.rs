@@ -224,9 +224,13 @@ pub struct LibraryItem {
     pub publication_datetime: Option<DateTime<Utc>>,
 
     // === DESCRIPTION ===
-    /// Product description/summary
+    /// Short marketing teaser (often truncated with a trailing ellipsis)
     #[serde(rename = "merchandising_summary", default)]
     pub description: Option<String>,
+
+    /// Full publisher summary from the product_desc response group
+    #[serde(rename = "publisher_summary", default)]
+    pub publisher_summary: Option<String>,
 
     /// Publisher/studio name
     #[serde(rename = "publisher_name", default)]
@@ -1006,10 +1010,9 @@ impl AudibleClient {
         let mut updated_count = 0;
         let mut errors = Vec::new();
 
-        // Build lookup maps for contributors, series, categories
+        // Build lookup maps for contributors and series
         let mut contributor_cache: HashMap<String, i64> = HashMap::new();
         let mut series_cache: HashMap<String, i64> = HashMap::new();
-        let mut category_cache: HashMap<String, i64> = HashMap::new();
 
         // Import contributors first (authors, narrators, publishers)
         for item in items {
@@ -1433,10 +1436,64 @@ impl AudibleClient {
         // Link series
         self.link_series(db, book_id, item, series_cache).await?;
 
+        // Link categories/genres
+        self.link_categories(db, book_id, item).await?;
+
         // Update user-defined metadata
         self.update_user_defined_item(db, book_id, item).await?;
 
         Ok(is_new)
+    }
+
+    /// Link category ladders to a book for the genre filter.
+    ///
+    /// Each ladder is stored once in CategoryLadders (keyed by its category
+    /// ids) with `ladder` as a JSON array of category names, then linked via
+    /// BookCategories.
+    async fn link_categories(&self, db: &Database, book_id: i64, item: &LibraryItem) -> Result<()> {
+        let pool = db.pool();
+
+        sqlx::query("DELETE FROM BookCategories WHERE book_id = ?")
+            .bind(book_id)
+            .execute(pool)
+            .await?;
+
+        for ladder in &item.category_ladders {
+            let names: Vec<&str> = ladder
+                .ladder
+                .iter()
+                .filter_map(|node| node.name.as_deref())
+                .filter(|name| !name.trim().is_empty())
+                .collect();
+            if names.is_empty() {
+                continue;
+            }
+
+            let ids: Vec<&str> = ladder
+                .ladder
+                .iter()
+                .filter_map(|node| node.category_id.as_deref())
+                .collect();
+            let ladder_key = if ids.is_empty() {
+                names.join("|")
+            } else {
+                ids.join("|")
+            };
+            let ladder_json = serde_json::to_string(&names).unwrap_or_else(|_| "[]".to_string());
+
+            let ladder_id = crate::storage::queries::upsert_category_ladder(
+                pool,
+                &NewCategoryLadder {
+                    audible_ladder_id: ladder_key,
+                    ladder: ladder_json,
+                },
+            )
+            .await?;
+
+            crate::storage::queries::add_book_category(pool, book_id, ladder_id).await?;
+        }
+
+        Ok(())
     }
 
     /// Create new book record
@@ -1447,7 +1504,13 @@ impl AudibleClient {
         let pool = db.pool();
 
         let content_type = item.get_content_type() as i32;
-        let description = item.description.as_deref().unwrap_or("");
+        // Prefer the full publisher summary; merchandising_summary is a teaser
+        let description = item
+            .publisher_summary
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .or(item.description.as_deref())
+            .unwrap_or("");
         let length_in_minutes = item.length_in_minutes.unwrap_or(0);
         let is_abridged = item.is_abridged.unwrap_or(false);
         let is_spatial = item.is_spatial();
@@ -1570,6 +1633,15 @@ impl AudibleClient {
         let origin_asin = item.origin_asin.as_deref();
         let episode_number = item.episode_number;
         let content_delivery_type = item.content_delivery_type.as_deref();
+        // Prefer the full publisher summary; merchandising_summary is a teaser.
+        // COALESCE(NULLIF(...)) below keeps an existing description when the
+        // API returns none.
+        let description = item
+            .publisher_summary
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .or(item.description.as_deref())
+            .unwrap_or("");
 
         sqlx::query(
             r#"
@@ -1579,6 +1651,7 @@ impl AudibleClient {
                 rating_overall = ?, rating_performance = ?, rating_story = ?,
                 pdf_url = ?, is_finished = ?, is_downloadable = ?, is_ayce = ?,
                 origin_asin = ?, episode_number = ?, content_delivery_type = ?,
+                description = COALESCE(NULLIF(?, ''), description),
                 updated_at = datetime('now')
             WHERE book_id = ?
             "#,
@@ -1602,6 +1675,7 @@ impl AudibleClient {
         .bind(origin_asin)
         .bind(episode_number)
         .bind(content_delivery_type)
+        .bind(description)
         .bind(book_id)
         .execute(pool)
         .await?;

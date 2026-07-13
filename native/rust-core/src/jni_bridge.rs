@@ -1225,6 +1225,16 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetBoo
             account: Option<String>,
             origin_asin: Option<String>,
             include_podcasts: Option<bool>,
+            #[serde(default)]
+            podcasts_only: bool,
+            // Multi-select filters; the single-value fields above are kept
+            // for backward compatibility and merged in.
+            #[serde(default)]
+            series_names: Vec<String>,
+            #[serde(default)]
+            categories: Vec<String>,
+            #[serde(default)]
+            accounts: Vec<String>,
         }
 
         match (move || -> crate::Result<String> {
@@ -1238,12 +1248,22 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetBoo
                 // Build query parameters
                 let mut query_params = crate::storage::BookQueryParams::with_defaults();
                 query_params.search_query = params.search_query;
-                query_params.series_name = params.series_name;
-                query_params.category = params.category;
+                query_params.series_names = params.series_names;
+                if let Some(series) = params.series_name {
+                    query_params.series_names.push(series);
+                }
+                query_params.categories = params.categories;
+                if let Some(category) = params.category {
+                    query_params.categories.push(category);
+                }
                 query_params.source = params.source;
-                query_params.account = params.account;
+                query_params.accounts = params.accounts;
+                if let Some(account) = params.account {
+                    query_params.accounts.push(account);
+                }
                 query_params.origin_asin = params.origin_asin;
                 query_params.include_podcasts = params.include_podcasts.unwrap_or(true);
+                query_params.podcasts_only = params.podcasts_only;
                 query_params.limit = params.limit;
                 query_params.offset = params.offset;
 
@@ -1401,6 +1421,56 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetAll
 
                 let response = serde_json::json!({
                     "series": series,
+                });
+
+                Ok::<_, crate::LibationError>(response)
+            })?;
+
+            Ok(success_response(result))
+        })() {
+            Ok(result) => result,
+            Err(e) => error_response(&e.to_string()),
+        }
+    });
+
+    env.new_string(response)
+        .expect("Failed to create Java string")
+        .into_raw()
+}
+
+/// Export the database to a single consistent file via VACUUM INTO
+#[no_mangle]
+pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeExportDatabase(
+    mut env: JNIEnv,
+    _class: JClass,
+    params_json: JString,
+) -> jstring {
+    let params_str_result = jstring_to_string(&mut env, params_json);
+
+    let response = catch_panic(move || {
+        #[derive(Deserialize)]
+        struct Params {
+            db_path: String,
+            dest_path: String,
+        }
+
+        match (move || -> crate::Result<String> {
+            let params_str = params_str_result?;
+            let params: Params = serde_json::from_str(&params_str)
+                .map_err(|e| crate::LibationError::InvalidInput(format!("Invalid JSON: {}", e)))?;
+
+            // VACUUM INTO refuses to overwrite an existing file
+            let _ = std::fs::remove_file(&params.dest_path);
+
+            let result = RUNTIME.block_on(async {
+                let db = crate::storage::Database::new(&params.db_path).await?;
+                sqlx::query("VACUUM INTO ?")
+                    .bind(&params.dest_path)
+                    .execute(db.pool())
+                    .await?;
+
+                let response = serde_json::json!({
+                    "dest_path": params.dest_path,
                 });
 
                 Ok::<_, crate::LibationError>(response)

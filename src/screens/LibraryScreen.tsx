@@ -16,6 +16,7 @@ import {
     refreshToken,
     enqueueDownloadNew,
     listDownloadTasks,
+    getStageProgress,
     pauseDownload,
     resumeDownload,
     cancelDownload,
@@ -31,7 +32,7 @@ import {
     downloadLibrivoxFile,
     copyTextToClipboard,
 } from '../../modules/expo-rust-bridge';
-import type {Book, Account, DownloadTask} from '../../modules/expo-rust-bridge';
+import type {Book, Account, DownloadTask, StageProgress} from '../../modules/expo-rust-bridge';
 import * as SecureStore from 'expo-secure-store';
 import * as DocumentPicker from 'expo-document-picker';
 import {Directory, Paths} from 'expo-file-system';
@@ -91,6 +92,7 @@ export default function LibraryScreen() {
 
     // Download tracking
     const [downloadTasks, setDownloadTasks] = useState<Map<string, DownloadTask>>(new Map());
+    const [stageProgress, setStageProgress] = useState<Record<string, StageProgress>>({});
     const progressInterval = useRef<NodeJS.Timeout | null>(null);
 
     // Search, filter, and sort state
@@ -209,6 +211,7 @@ export default function LibraryScreen() {
                 });
 
                 setDownloadTasks(taskMap);
+                setStageProgress(getStageProgress());
             } catch (error) {
                 console.error('[LibraryScreen] Error polling progress:', error);
             }
@@ -799,7 +802,36 @@ export default function LibraryScreen() {
         return book.cover_url.replace(/_SL\d+_/, '_SL150_');
     };
 
+    const formatEtaShort = (sec: number): string => {
+        if (!sec || sec <= 0) return '';
+        const h = Math.floor(sec / 3600);
+        const m = Math.floor((sec % 3600) / 60);
+        const s = Math.floor(sec % 60);
+        if (h > 0) return `~${h}h ${m}m`;
+        if (m > 0) return `~${m}m ${s}s`;
+        return `~${s}s`;
+    };
+
     const getStatus = (book: Book): { text: string; color: string } => {
+        const sp = stageProgress[book.audible_product_id];
+
+        // Post-download stages are authoritative from the live store: the DB task row
+        // may still read "downloading"/"completed" during decrypt/validate/copy — true
+        // for auto-downloads, which don't persist these stages to the DB.
+        if (sp && (sp.stage === 'decrypting' || sp.stage === 'validating' || sp.stage === 'copying')) {
+            const etaText = formatEtaShort(sp.eta_seconds);
+            const suffix = etaText ? ` · ${etaText}` : '';
+            const pct = Math.round(sp.percentage);
+            switch (sp.stage) {
+                case 'decrypting':
+                    return {text: `🔓 Decrypting ${pct}%${suffix}`, color: colors.info};
+                case 'validating':
+                    return {text: `🔍 Validating ${pct}%${suffix}`, color: colors.info};
+                case 'copying':
+                    return {text: `📁 Saving ${pct}%${suffix}`, color: colors.info};
+            }
+        }
+
         const task = downloadTasks.get(book.audible_product_id);
 
         if (task) {
@@ -807,19 +839,23 @@ export default function LibraryScreen() {
                 ? ((task.bytes_downloaded / task.total_bytes) * 100).toFixed(1)
                 : '0.0';
 
+            const etaText = sp ? formatEtaShort(sp.eta_seconds) : '';
+            const etaSuffix = etaText ? ` · ${etaText}` : '';
+            const stagePct = sp ? Math.round(sp.percentage) : 0;
+
             switch (task.status) {
                 case 'queued':
                     return {text: '⏳ Queued', color: colors.textSecondary};
                 case 'downloading':
-                    return {text: `⬇ ${percentage}%`, color: colors.info};
+                    return {text: `⬇ ${percentage}%${etaSuffix}`, color: colors.info};
                 case 'paused':
                     return {text: `⏸ Paused ${percentage}%`, color: colors.warning};
                 case 'decrypting':
-                    return {text: '🔓 Decrypting...', color: colors.info};
+                    return {text: `🔓 Decrypting ${stagePct}%${etaSuffix}`, color: colors.info};
                 case 'validating':
-                    return {text: '🔍 Validating...', color: colors.info};
+                    return {text: `🔍 Validating ${stagePct}%${etaSuffix}`, color: colors.info};
                 case 'copying':
-                    return {text: '📁 Saving...', color: colors.info};
+                    return {text: `📁 Saving ${stagePct}%${etaSuffix}`, color: colors.info};
                 case 'completed':
                     return {text: '✓ Downloaded', color: colors.success};
                 case 'failed':

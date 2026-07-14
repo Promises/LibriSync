@@ -291,6 +291,16 @@ export interface DownloadProgress {
   state: TaskStatus;
 }
 
+/**
+ * Live per-ASIN stage progress from the foreground download pipeline.
+ * Covers the stages whose progress is not in the task DB row.
+ */
+export interface StageProgress {
+  stage: TaskStatus;
+  percentage: number;   // 0..100
+  eta_seconds: number;  // 0 = unknown
+}
+
 // ============================================================================
 // Native Module Interface
 // ============================================================================
@@ -649,6 +659,12 @@ export interface ExpoRustBridgeModule {
    * @returns List of tasks
    */
   listDownloadTasks(dbPath: string, filter?: TaskStatus): RustResponse<{ tasks: DownloadTask[] }>;
+
+  /**
+   * Live stage progress + ETA for the foreground download pipeline.
+   * Returns a JSON string keyed by ASIN; parse with getStageProgress().
+   */
+  getStageProgress(): string;
 
   /**
    * Pause a download.
@@ -1604,6 +1620,22 @@ function listDownloadTasks(dbPath: string, filter?: TaskStatus): DownloadTask[] 
 }
 
 /**
+ * Live stage progress + ETA for the foreground download pipeline, keyed by ASIN.
+ *
+ * The download-task DB row only carries status + byte counts; this exposes the
+ * per-stage percentage and ETA (decrypting/validating/copying, plus download ETA)
+ * that the notification already shows. Empty for books not currently processing.
+ */
+function getStageProgress(): Record<string, StageProgress> {
+  try {
+    const json = NativeModule!.getStageProgress();
+    return json ? JSON.parse(json) : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
  * Pause a download.
  *
  * @param dbPath - Path to database file
@@ -2314,6 +2346,7 @@ export {
   retryConversion,
   getDownloadTask,
   listDownloadTasks,
+  getStageProgress,
   pauseDownload,
   resumeDownload,
   cancelDownload,

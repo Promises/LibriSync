@@ -51,7 +51,7 @@ class DownloadOrchestrator(
     private val monitoringJobs = mutableMapOf<String, Job>()
 
     // Callbacks
-    private var progressCallback: ((String, String, Double, Long, Long) -> Unit)? = null // (asin, stage, percentage, bytesDownloaded, totalBytes)
+    private var progressCallback: ((String, String, Double, Long, Long, Long) -> Unit)? = null // (asin, stage, percentage, bytesDownloaded, totalBytes, etaSeconds)
     private var completionCallback: ((String, String, String) -> Unit)? = null // (asin, title, outputPath)
     private var errorCallback: ((String, String, String) -> Unit)? = null // (asin, title, error)
 
@@ -280,10 +280,11 @@ class DownloadOrchestrator(
     ) {
         monitoringJobs[asin]?.cancel()
 
-        progressCallback?.invoke(asin, "downloading", 0.0, 0, 0)
+        progressCallback?.invoke(asin, "downloading", 0.0, 0, 0, 0L)
 
         val job = scope.launch {
             try {
+                val speedEta = SpeedEta()
                 while (isActive) {
                     delay(2000)
 
@@ -306,7 +307,8 @@ class DownloadOrchestrator(
 
                         when (status) {
                             "downloading" -> {
-                                progressCallback?.invoke(asin, "downloading", percentage, bytesDownloaded, taskTotalBytes)
+                                speedEta.update(bytesDownloaded, taskTotalBytes)
+                                progressCallback?.invoke(asin, "downloading", percentage, bytesDownloaded, taskTotalBytes, speedEta.etaSeconds)
                             }
                             "paused" -> {
                                 // Continue monitoring, skip progress updates
@@ -357,7 +359,7 @@ class DownloadOrchestrator(
     ) = withContext(Dispatchers.IO) {
         try {
             updateTaskStatusInDb(taskId, "copying")
-            progressCallback?.invoke(asin, "copying", 0.0, 0, 0)
+            progressCallback?.invoke(asin, "copying", 0.0, 0, 0, 0L)
 
             val finalPath = copyLibrivoxToFinalDestination(asin, title, downloadPath, outputDirectory)
 
@@ -428,9 +430,9 @@ class DownloadOrchestrator(
         val extension = cachedFile.extension.lowercase()
 
         val finalPath = if (extension == "zip") {
-            extractZipToDirectory(cachedFile, safTargetDir, regularTargetPath)
+            extractZipToDirectory(cachedFile, safTargetDir, regularTargetPath, asin)
         } else {
-            copySingleFileToDirectory(cachedFile, extension, pathParts.last(), safTargetDir, regularTargetPath)
+            copySingleFileToDirectory(cachedFile, extension, pathParts.last(), safTargetDir, regularTargetPath, asin)
         }
 
         cachedFile.delete()
@@ -444,10 +446,26 @@ class DownloadOrchestrator(
     private fun extractZipToDirectory(
         zipFile: File,
         safDir: DocumentFile?,
-        regularDirPath: String?
+        regularDirPath: String?,
+        asin: String
     ): String {
+        val audioExts = listOf("mp3", "m4a", "m4b", "ogg", "flac", "opus", "wav")
+        // Pre-count audio entries (reads the zip's central directory) so extraction
+        // can report progress + ETA per file.
+        val totalAudio = try {
+            java.util.zip.ZipFile(zipFile).use { zf ->
+                zf.entries().asSequence().count {
+                    !it.isDirectory &&
+                        File(it.name).name.substringAfterLast('.', "").lowercase() in audioExts
+                }
+            }
+        } catch (e: Exception) {
+            0
+        }
+
         var extractedCount = 0
         var firstPath: String? = null
+        val speedEta = SpeedEta()
 
         java.util.zip.ZipInputStream(zipFile.inputStream().buffered()).use { zis ->
             var entry = zis.nextEntry
@@ -485,6 +503,11 @@ class DownloadOrchestrator(
                             if (firstPath == null) firstPath = outputFile.absolutePath
                         }
                         extractedCount++
+                        if (totalAudio > 0) {
+                            speedEta.update(extractedCount.toLong(), totalAudio.toLong())
+                            val pct = (extractedCount * 100.0 / totalAudio).coerceIn(0.0, 100.0)
+                            progressCallback?.invoke(asin, "copying", pct, 0, 0, speedEta.etaSeconds)
+                        }
                     }
                 }
                 zis.closeEntry()
@@ -505,7 +528,8 @@ class DownloadOrchestrator(
         extension: String,
         fileName: String,
         safDir: DocumentFile?,
-        regularDirPath: String?
+        regularDirPath: String?,
+        asin: String
     ): String {
         // Replace extension in filename
         val targetName = fileName.replaceAfterLast('.', extension)
@@ -514,18 +538,24 @@ class DownloadOrchestrator(
             "m4a", "m4b" -> "audio/mp4"
             else -> "audio/*"
         }
+        val totalBytes = sourceFile.length()
+        val onCopyProgress: (Int, Int) -> Unit = { pct, eta ->
+            progressCallback?.invoke(asin, "copying", pct.toDouble(), 0, 0, eta.toLong())
+        }
 
         return if (safDir != null) {
             safDir.findFile(targetName)?.delete()
             val outputFile = safDir.createFile(mimeType, targetName)
                 ?: throw Exception("Failed to create file: $targetName")
             context.contentResolver.openOutputStream(outputFile.uri)?.use { out ->
-                sourceFile.inputStream().use { inp -> inp.copyTo(out) }
+                sourceFile.inputStream().use { inp -> copyStreamWithProgress(inp, out, totalBytes, onCopyProgress) }
             } ?: throw Exception("Failed to write: $targetName")
             outputFile.uri.toString()
         } else {
             val outputFile = File(regularDirPath!!, targetName)
-            sourceFile.copyTo(outputFile, overwrite = true)
+            outputFile.outputStream().use { out ->
+                sourceFile.inputStream().use { inp -> copyStreamWithProgress(inp, out, totalBytes, onCopyProgress) }
+            }
             outputFile.absolutePath
         }
     }
@@ -549,10 +579,11 @@ class DownloadOrchestrator(
         monitoringJobs[asin]?.cancel()
 
         // Send initial progress notification (0%)
-        progressCallback?.invoke(asin, "downloading", 0.0, 0, totalBytes)
+        progressCallback?.invoke(asin, "downloading", 0.0, 0, totalBytes, 0L)
 
         val job = scope.launch {
             try {
+                val speedEta = SpeedEta()
                 while (isActive) {
                     delay(2000) // Poll every 2 seconds
 
@@ -581,7 +612,8 @@ class DownloadOrchestrator(
                         when (status) {
                             "downloading" -> {
                                 // Send progress notification only while downloading
-                                progressCallback?.invoke(asin, "downloading", percentage, bytesDownloaded, taskTotalBytes)
+                                speedEta.update(bytesDownloaded, taskTotalBytes)
+                                progressCallback?.invoke(asin, "downloading", percentage, bytesDownloaded, taskTotalBytes, speedEta.etaSeconds)
                             }
                             "paused" -> {
                                 Log.d(TAG, "Download paused for $asin - will resume monitoring when unpaused")
@@ -667,7 +699,7 @@ class DownloadOrchestrator(
     ) = withContext(Dispatchers.IO) {
         try {
             updateTaskStatusInDb(taskId, "copying")
-            progressCallback?.invoke(asin, "copying", 0.0, 0, 0)
+            progressCallback?.invoke(asin, "copying", 0.0, 0, 0, 0L)
 
             val finalPath = copyLibrivoxToFinalDestination(asin, title, downloadPath, outputDirectory)
 
@@ -704,7 +736,7 @@ class DownloadOrchestrator(
             resolvedTaskId?.let { updateTaskStatusInDb(it, "decrypting") }
 
             // Notify decrypting stage
-            progressCallback?.invoke(asin, "decrypting", 0.0, 0, 0)
+            progressCallback?.invoke(asin, "decrypting", 0.0, 0, 0, 0L)
 
             // Fetch metadata from database
             val metadata = fetchBookMetadata(asin)
@@ -854,7 +886,36 @@ class DownloadOrchestrator(
                 add(decryptedCachePath)
             }.joinToString(" ")
 
-            val session = com.arthenica.ffmpegkit.FFmpegKit.execute(command)
+            // Probe total duration from the encrypted input's (unencrypted) container
+            // metadata so decrypt can report real progress + ETA. 0 = unknown -> indeterminate.
+            val totalDurationSec = com.arthenica.ffmpegkit.FFprobeKit
+                .getMediaInformation(encryptedPath)
+                .mediaInformation?.duration?.toDoubleOrNull() ?: 0.0
+
+            // FFmpeg statistics stream: time = ms of media processed, speed = realtime multiplier.
+            // Throttle to whole-percent steps to avoid hammering the notification.
+            var lastReportedPct = -1
+            com.arthenica.ffmpegkit.FFmpegKitConfig.enableStatisticsCallback { stat ->
+                if (totalDurationSec > 0.0) {
+                    val processedSec = stat.time.toDouble() / 1000.0
+                    val pct = ((processedSec / totalDurationSec).coerceIn(0.0, 1.0) * 100.0).toInt()
+                    if (pct > lastReportedPct) {
+                        lastReportedPct = pct
+                        val speed = stat.speed
+                        val etaSec = if (speed > 0.0)
+                            ((totalDurationSec - processedSec) / speed).toLong().coerceAtLeast(0L)
+                        else 0L
+                        progressCallback?.invoke(asin, "decrypting", pct.toDouble(), 0, 0, etaSec)
+                    }
+                }
+            }
+
+            val session = try {
+                com.arthenica.ffmpegkit.FFmpegKit.execute(command)
+            } finally {
+                // Global callback: clear so later validation/probe ffmpeg calls don't feed it.
+                com.arthenica.ffmpegkit.FFmpegKitConfig.enableStatisticsCallback(null)
+            }
 
             if (!com.arthenica.ffmpegkit.ReturnCode.isSuccess(session.returnCode)) {
                 val ffmpegOutput = session.allLogsAsString
@@ -868,7 +929,7 @@ class DownloadOrchestrator(
             // CRITICAL: Validate audio file for corruption
             Log.d(TAG, "Validating audio file integrity for $asin...")
             resolvedTaskId?.let { updateTaskStatusInDb(it, "validating") }
-            progressCallback?.invoke(asin, "validating", 0.0, 0, 0)
+            progressCallback?.invoke(asin, "validating", 0.0, 0, 0, 0L)
 
             val validationResult = validateAudioFile(decryptedCachePath, asin)
 
@@ -889,7 +950,7 @@ class DownloadOrchestrator(
 
             // Notify copying stage
             resolvedTaskId?.let { updateTaskStatusInDb(it, "copying") }
-            progressCallback?.invoke(asin, "copying", 0.0, 0, 0)
+            progressCallback?.invoke(asin, "copying", 0.0, 0, 0, 0L)
 
             // Copy to final destination
             val finalPath = copyToFinalDestination(asin, title, decryptedCachePath, outputDirectory, coverArtPath)
@@ -976,10 +1037,13 @@ class DownloadOrchestrator(
 
             Log.d(TAG, "Copying to SAF: ${outputFile.uri}")
 
-            // Copy
+            // Copy (with progress + ETA — large M4B over SAF is slow)
+            val totalBytes = cachedFile.length()
             context.contentResolver.openOutputStream(outputFile.uri)?.use { outputStream ->
                 cachedFile.inputStream().use { inputStream ->
-                    inputStream.copyTo(outputStream)
+                    copyStreamWithProgress(inputStream, outputStream, totalBytes) { pct, eta ->
+                        progressCallback?.invoke(asin, "copying", pct.toDouble(), 0, 0, eta.toLong())
+                    }
                 }
             } ?: throw Exception("Failed to open output stream")
 
@@ -1254,10 +1318,11 @@ class DownloadOrchestrator(
 
     /**
      * Set progress callback
-     * Parameters: (asin, stage, percentage, bytesDownloaded, totalBytes)
+     * Parameters: (asin, stage, percentage, bytesDownloaded, totalBytes, etaSeconds)
      * Stage can be: "downloading", "decrypting", "copying"
+     * etaSeconds is 0 when unknown (only "decrypting" currently reports it)
      */
-    fun setProgressCallback(callback: (String, String, Double, Long, Long) -> Unit) {
+    fun setProgressCallback(callback: (String, String, Double, Long, Long, Long) -> Unit) {
         this.progressCallback = callback
     }
 
@@ -1509,33 +1574,76 @@ class DownloadOrchestrator(
 
             var totalErrors = 0
             val sampleResults = mutableListOf<String>()
+            val totalSamples = samplePoints.size
+            val testDuration = 10 // seconds decoded per sample
 
-            // Step 3: Check each sample point for errors
-            for ((index, timestamp) in samplePoints.withIndex()) {
-                val testDuration = 10 // Test 10 seconds at each point
-                val command = "-v error -ss $timestamp -i \"$filePath\" -t $testDuration -f null -"
+            // Validation cost is dominated by seeking into a huge file, which emits no
+            // FFmpeg statistics — so drive smooth progress + ETA from a timer, seeded
+            // BEFORE the first sample finishes (a novice must see it isn't hung), then
+            // refined by each real sample's measured duration.
+            val completedSamples = java.util.concurrent.atomic.AtomicInteger(0)
+            val sampleStartMs = java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis())
+            val avgSampleMs = java.util.concurrent.atomic.AtomicLong(4000L) // seed ~4s/sample
 
-                val session = com.arthenica.ffmpegkit.FFmpegKit.execute(command)
-                val output = session.allLogsAsString
-
-                // Count error lines
-                val errors = output.lines().count {
-                    it.contains("Error", ignoreCase = true) ||
-                    it.contains("Invalid data", ignoreCase = true)
+            val progressTicker = launch {
+                var lastPct = -1
+                while (isActive) {
+                    val done = completedSamples.get()
+                    val avg = avgSampleMs.get().toDouble()
+                    val sampleElapsed = (System.currentTimeMillis() - sampleStartMs.get()).toDouble()
+                    val subFrac = (sampleElapsed / avg).coerceIn(0.0, 0.99)
+                    val overall = ((done + subFrac) / totalSamples).coerceIn(0.0, 0.999)
+                    val pct = (overall * 100.0).toInt()
+                    if (pct != lastPct) {
+                        lastPct = pct
+                        val remaining = (totalSamples - (done + subFrac)).coerceAtLeast(0.0)
+                        val etaSec = (remaining * avg / 1000.0).toLong().coerceAtLeast(0L)
+                        progressCallback?.invoke(asin, "validating", pct.toDouble(), 0, 0, etaSec)
+                    }
+                    delay(400)
                 }
+            }
 
-                totalErrors += errors
-                val status = if (errors == 0) "✓" else "✗ $errors errors"
-                val timestampStr = formatTimestamp(timestamp.toLong())
-                sampleResults.add("  [$timestampStr] $status")
+            try {
+                // Step 3: Check each sample point for errors
+                for ((index, timestamp) in samplePoints.withIndex()) {
+                    sampleStartMs.set(System.currentTimeMillis())
+                    val command = "-v error -ss $timestamp -i \"$filePath\" -t $testDuration -f null -"
 
-                Log.d(TAG, "Sample ${index + 1}/${samplePoints.size} at $timestampStr: $errors errors")
+                    val session = com.arthenica.ffmpegkit.FFmpegKit.execute(command)
+                    val output = session.allLogsAsString
 
-                // Early exit if we find significant corruption
-                if (errors > 50) {
-                    Log.w(TAG, "High error count detected at $timestampStr, stopping validation")
-                    break
+                    // Count error lines
+                    val errors = output.lines().count {
+                        it.contains("Error", ignoreCase = true) ||
+                        it.contains("Invalid data", ignoreCase = true)
+                    }
+
+                    totalErrors += errors
+                    val statusMark = if (errors == 0) "✓" else "✗ $errors errors"
+                    val timestampStr = formatTimestamp(timestamp.toLong())
+                    sampleResults.add("  [$timestampStr] $statusMark")
+
+                    // Refine the per-sample estimate from the measured time.
+                    val took = System.currentTimeMillis() - sampleStartMs.get()
+                    avgSampleMs.set(
+                        if (index == 0) took.coerceAtLeast(250L)
+                        else (0.6 * avgSampleMs.get() + 0.4 * took).toLong().coerceAtLeast(250L)
+                    )
+                    completedSamples.set(index + 1)
+
+                    Log.d(TAG, "Sample ${index + 1}/$totalSamples at $timestampStr: $errors errors (${took}ms)")
+
+                    // Early exit if we find significant corruption
+                    if (errors > 50) {
+                        Log.w(TAG, "High error count detected at $timestampStr, stopping validation")
+                        break
+                    }
                 }
+            } finally {
+                progressTicker.cancel()
+                // Ensure the bar reaches 100% even if the loop exited early.
+                progressCallback?.invoke(asin, "validating", 100.0, 0, 0, 0L)
             }
 
             // Step 4: Determine if file is valid

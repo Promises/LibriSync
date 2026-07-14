@@ -187,7 +187,9 @@ class DownloadService : Service() {
         notificationManager = DownloadNotificationManager(applicationContext)
 
         // Set up orchestrator callbacks
-        orchestrator.setProgressCallback { asin, stage, percentage, bytesDownloaded, totalBytes ->
+        orchestrator.setProgressCallback { asin, stage, percentage, bytesDownloaded, totalBytes, etaSeconds ->
+            // Expose stage percentage + ETA to the JS UI (LibraryScreen polls this).
+            StageProgressStore.update(asin, stage, percentage.toInt(), etaSeconds)
             currentDownload?.let { download ->
                 val progress = DownloadNotificationManager.DownloadProgress(
                     asin = download.asin,
@@ -196,13 +198,15 @@ class DownloadService : Service() {
                     stage = stage,
                     percentage = percentage.toInt(),
                     bytesDownloaded = bytesDownloaded,
-                    totalBytes = totalBytes
+                    totalBytes = totalBytes,
+                    eta = if (etaSeconds > 0) formatEta(etaSeconds) else null
                 )
                 notificationManager.showProgress(progress)
             }
         }
 
         orchestrator.setCompletionCallback { asin, title, outputPath ->
+            StageProgressStore.clear(asin)
             currentDownload?.let { download ->
                 notificationManager.showCompletion(download.title, download.author, outputPath)
             }
@@ -211,6 +215,7 @@ class DownloadService : Service() {
         }
 
         orchestrator.setErrorCallback { asin, title, error ->
+            StageProgressStore.clear(asin)
             currentDownload?.let { download ->
                 notificationManager.showError(download.title, download.author, error)
             }
@@ -272,6 +277,17 @@ class DownloadService : Service() {
 
     private fun requiresForeground(action: String?): Boolean {
         return action == ACTION_ENQUEUE_DOWNLOAD || action == ACTION_RETRY_CONVERSION || action == ACTION_ENQUEUE_LIBRIVOX
+    }
+
+    private fun formatEta(seconds: Long): String {
+        val h = seconds / 3600
+        val m = (seconds % 3600) / 60
+        val s = seconds % 60
+        return when {
+            h > 0 -> "~${h}h ${m}m remaining"
+            m > 0 -> "~${m}m ${s}s remaining"
+            else -> "~${s}s remaining"
+        }
     }
 
     private fun startDataSyncForeground(notification: Notification) {

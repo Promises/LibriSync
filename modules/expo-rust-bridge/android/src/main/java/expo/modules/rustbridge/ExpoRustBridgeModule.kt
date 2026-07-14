@@ -583,6 +583,16 @@ class ExpoRustBridgeModule : Module() {
     }
 
     /**
+     * Live per-ASIN stage progress (decrypting/validating/copying) + ETA for the
+     * foreground download pipeline. Returns a JSON string:
+     *   { "<asin>": { "stage": String, "percentage": Int, "eta_seconds": Long } }
+     * Complements listDownloadTasks, whose DB rows lack stage percentage and ETA.
+     */
+    Function("getStageProgress") {
+      StageProgressStore.snapshotJson()
+    }
+
+    /**
      * Pause a download.
      *
      * @param dbPath Path to SQLite database

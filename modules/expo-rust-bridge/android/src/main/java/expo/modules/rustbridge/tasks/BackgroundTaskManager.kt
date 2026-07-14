@@ -3,6 +3,7 @@ package expo.modules.rustbridge.tasks
 import android.content.Context
 import android.util.Log
 import expo.modules.rustbridge.AppPaths
+import expo.modules.rustbridge.StageProgressStore
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import java.util.PriorityQueue
@@ -336,6 +337,7 @@ class BackgroundTaskManager private constructor(
     fun unregisterActiveTask(taskId: String) {
         activeTasks.remove(taskId)?.let { task ->
             taskHistory[taskId] = task
+            task.getMetadataString(DownloadTaskMetadata.ASIN)?.let { StageProgressStore.clear(it) }
             Log.d(TAG, "Unregistered active task: $taskId")
         }
     }
@@ -346,6 +348,18 @@ class BackgroundTaskManager private constructor(
     fun updateTaskMetadata(taskId: String, updates: Map<String, Any>) {
         activeTasks[taskId]?.let { task ->
             task.metadata.putAll(updates)
+            // Mirror download-pipeline stage progress to the JS-visible store so the
+            // in-app library list shows auto-download stage % + ETA, not just the notification.
+            val asin = task.getMetadataString(DownloadTaskMetadata.ASIN)
+            val stage = task.getMetadataString(DownloadTaskMetadata.STAGE)
+            if (asin != null && stage != null) {
+                StageProgressStore.update(
+                    asin,
+                    stage,
+                    task.getMetadataInt(DownloadTaskMetadata.PERCENTAGE) ?: 0,
+                    (task.getMetadataInt(DownloadTaskMetadata.ETA_SECONDS) ?: 0).toLong()
+                )
+            }
         }
     }
 

@@ -75,6 +75,7 @@ object DownloadTaskMetadata {
     const val TOTAL_BYTES = "total_bytes"
     const val BYTES_DOWNLOADED = "bytes_downloaded"
     const val PERCENTAGE = "percentage"
+    const val ETA_SECONDS = "eta_seconds" // remaining seconds for current stage, 0 = unknown
     const val STAGE = "stage" // "downloading", "decrypting", "copying"
     const val ENCRYPTED_PATH = "encrypted_path"
     const val DECRYPTED_PATH = "decrypted_path"

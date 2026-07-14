@@ -111,6 +111,7 @@ class DownloadNotificationManager(private val context: Context) {
             }
 
             progress.speed?.let { append(" • $it") }
+            progress.eta?.let { append(" • $it") }
         }
 
         // Build big text with more details

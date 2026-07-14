@@ -6,6 +6,8 @@ import android.net.Uri
 import android.util.Log
 import androidx.documentfile.provider.DocumentFile
 import expo.modules.rustbridge.ExpoRustBridgeModule
+import expo.modules.rustbridge.copyStreamWithProgress
+import expo.modules.rustbridge.SpeedEta
 import kotlinx.coroutines.*
 import org.json.JSONObject
 import java.io.File
@@ -191,6 +193,7 @@ class DownloadWorker(
 
         val job = scope.launch {
             try {
+                val speedEta = SpeedEta()
                 while (isActive) {
                     delay(2000) // Poll every 2 seconds
 
@@ -216,11 +219,13 @@ class DownloadWorker(
 
                         when (status) {
                             "downloading" -> {
+                                speedEta.update(bytesDownloaded, taskTotalBytes)
                                 // Update task metadata
                                 manager.updateTaskMetadata(task.id, mapOf(
                                     DownloadTaskMetadata.BYTES_DOWNLOADED to bytesDownloaded,
                                     DownloadTaskMetadata.PERCENTAGE to percentage,
-                                    DownloadTaskMetadata.STAGE to "downloading"
+                                    DownloadTaskMetadata.STAGE to "downloading",
+                                    DownloadTaskMetadata.ETA_SECONDS to speedEta.etaSeconds.toInt()
                                 ))
 
                                 // Emit progress event
@@ -302,7 +307,9 @@ class DownloadWorker(
 
         try {
             manager.updateTaskMetadata(task.id, mapOf(
-                DownloadTaskMetadata.STAGE to "copying"
+                DownloadTaskMetadata.STAGE to "copying",
+                DownloadTaskMetadata.PERCENTAGE to 0,
+                DownloadTaskMetadata.ETA_SECONDS to 0
             ))
             manager.emitEvent(TaskEvent.DownloadProgress(
                 taskId = task.id,
@@ -314,7 +321,7 @@ class DownloadWorker(
                 totalBytes = 0
             ))
 
-            val finalPath = copyToFinalDestination(asin, title, downloadPath, outputDirectory, null)
+            val finalPath = copyToFinalDestination(asin, title, downloadPath, outputDirectory, null, task.id)
 
             task.getMetadataString(DownloadTaskMetadata.RUST_TASK_ID)?.let { rustTaskId ->
                 updateRustTaskStatusInDb(rustTaskId, "completed", finalPath)
@@ -362,7 +369,9 @@ class DownloadWorker(
 
             // Update stage
             manager.updateTaskMetadata(task.id, mapOf(
-                DownloadTaskMetadata.STAGE to "decrypting"
+                DownloadTaskMetadata.STAGE to "decrypting",
+                DownloadTaskMetadata.PERCENTAGE to 0,
+                DownloadTaskMetadata.ETA_SECONDS to 0
             ))
             manager.emitEvent(TaskEvent.DownloadProgress(
                 taskId = task.id,
@@ -531,7 +540,38 @@ class DownloadWorker(
             }.joinToString(" ")
 
             Log.d(TAG, "FFmpeg command for $asin: $command")
-            val session = com.arthenica.ffmpegkit.FFmpegKit.execute(command)
+
+            // Probe total duration (encrypted container metadata is cleartext) so decrypt can
+            // report live progress + ETA into task metadata; the notification poll renders it.
+            val totalDurationSec = com.arthenica.ffmpegkit.FFprobeKit
+                .getMediaInformation(encryptedPath)
+                .mediaInformation?.duration?.toDoubleOrNull() ?: 0.0
+
+            var lastReportedPct = -1
+            com.arthenica.ffmpegkit.FFmpegKitConfig.enableStatisticsCallback { stat ->
+                if (totalDurationSec > 0.0) {
+                    val processedSec = stat.time.toDouble() / 1000.0
+                    val pct = ((processedSec / totalDurationSec).coerceIn(0.0, 1.0) * 100.0).toInt()
+                    if (pct > lastReportedPct) {
+                        lastReportedPct = pct
+                        val speed = stat.speed
+                        val etaSec = if (speed > 0.0)
+                            ((totalDurationSec - processedSec) / speed).toInt().coerceAtLeast(0)
+                        else 0
+                        manager.updateTaskMetadata(task.id, mapOf(
+                            DownloadTaskMetadata.PERCENTAGE to pct,
+                            DownloadTaskMetadata.ETA_SECONDS to etaSec
+                        ))
+                    }
+                }
+            }
+
+            val session = try {
+                com.arthenica.ffmpegkit.FFmpegKit.execute(command)
+            } finally {
+                // Global callback: clear so later validation/probe ffmpeg calls don't feed it.
+                com.arthenica.ffmpegkit.FFmpegKitConfig.enableStatisticsCallback(null)
+            }
 
             // Cleanup cover art temp file
             coverArtPath?.let { File(it).delete() }
@@ -548,7 +588,9 @@ class DownloadWorker(
             // CRITICAL: Validate audio file for corruption
             Log.d(TAG, "Validating audio file integrity for $asin...")
             manager.updateTaskMetadata(task.id, mapOf(
-                DownloadTaskMetadata.STAGE to "validating"
+                DownloadTaskMetadata.STAGE to "validating",
+                DownloadTaskMetadata.PERCENTAGE to 0,
+                DownloadTaskMetadata.ETA_SECONDS to 0
             ))
             manager.emitEvent(TaskEvent.DownloadProgress(
                 taskId = task.id,
@@ -560,7 +602,7 @@ class DownloadWorker(
                 totalBytes = 0
             ))
 
-            val validationResult = validateAudioFile(decryptedCachePath, asin)
+            val validationResult = validateAudioFile(decryptedCachePath, asin, task.id)
 
             if (!validationResult.isValid) {
                 Log.e(TAG, "Audio validation FAILED for $asin:")
@@ -579,7 +621,9 @@ class DownloadWorker(
 
             // Update stage
             manager.updateTaskMetadata(task.id, mapOf(
-                DownloadTaskMetadata.STAGE to "copying"
+                DownloadTaskMetadata.STAGE to "copying",
+                DownloadTaskMetadata.PERCENTAGE to 0,
+                DownloadTaskMetadata.ETA_SECONDS to 0
             ))
             manager.emitEvent(TaskEvent.DownloadProgress(
                 taskId = task.id,
@@ -592,7 +636,7 @@ class DownloadWorker(
             ))
 
             // Copy to final destination
-            val finalPath = copyToFinalDestination(asin, title, decryptedCachePath, outputDirectory, coverArtPath)
+            val finalPath = copyToFinalDestination(asin, title, decryptedCachePath, outputDirectory, coverArtPath, task.id)
 
             // Cleanup encrypted file
             File(encryptedPath).delete()
@@ -638,7 +682,8 @@ class DownloadWorker(
         title: String,
         decryptedCachePath: String,
         outputDirectory: String,
-        coverArtPath: String?
+        coverArtPath: String?,
+        taskId: String
     ): String = withContext(Dispatchers.IO) {
         val cachedFile = File(decryptedCachePath)
         var finalPath = decryptedCachePath
@@ -695,10 +740,16 @@ class DownloadWorker(
 
             Log.d(TAG, "Copying to SAF: ${outputFile.uri}")
 
-            // Copy
+            // Copy (with progress + ETA — large M4B over SAF is slow)
+            val totalBytes = cachedFile.length()
             context.contentResolver.openOutputStream(outputFile.uri)?.use { outputStream ->
                 cachedFile.inputStream().use { inputStream ->
-                    inputStream.copyTo(outputStream)
+                    copyStreamWithProgress(inputStream, outputStream, totalBytes) { pct, eta ->
+                        manager.updateTaskMetadata(taskId, mapOf(
+                            DownloadTaskMetadata.PERCENTAGE to pct,
+                            DownloadTaskMetadata.ETA_SECONDS to eta
+                        ))
+                    }
                 }
             } ?: throw Exception("Failed to open output stream")
 
@@ -1072,7 +1123,7 @@ class DownloadWorker(
      * Checks multiple sample points throughout the file for AAC decode errors.
      * Returns validation result with error count and details.
      */
-    private suspend fun validateAudioFile(filePath: String, asin: String): AudioValidationResult = withContext(Dispatchers.IO) {
+    private suspend fun validateAudioFile(filePath: String, asin: String, taskId: String): AudioValidationResult = withContext(Dispatchers.IO) {
         try {
             Log.d(TAG, "Validating audio file: $filePath")
 
@@ -1106,33 +1157,79 @@ class DownloadWorker(
 
             var totalErrors = 0
             val sampleResults = mutableListOf<String>()
+            val totalSamples = samplePoints.size
+            val testDuration = 10 // seconds decoded per sample
 
-            // Step 3: Check each sample point for errors
-            for ((index, timestamp) in samplePoints.withIndex()) {
-                val testDuration = 10 // Test 10 seconds at each point
-                val command = "-v error -ss $timestamp -i \"$filePath\" -t $testDuration -f null -"
+            // Validation cost is dominated by seeking into a huge file, which emits no
+            // FFmpeg statistics — so drive smooth progress + ETA from a timer, seeded
+            // BEFORE the first sample finishes, then refined by each sample's duration.
+            val completedSamples = java.util.concurrent.atomic.AtomicInteger(0)
+            val sampleStartMs = java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis())
+            val avgSampleMs = java.util.concurrent.atomic.AtomicLong(4000L) // seed ~4s/sample
 
-                val session = com.arthenica.ffmpegkit.FFmpegKit.execute(command)
-                val output = session.allLogsAsString
-
-                // Count error lines
-                val errors = output.lines().count {
-                    it.contains("Error", ignoreCase = true) ||
-                    it.contains("Invalid data", ignoreCase = true)
+            val progressTicker = launch {
+                var lastPct = -1
+                while (isActive) {
+                    val done = completedSamples.get()
+                    val avg = avgSampleMs.get().toDouble()
+                    val sampleElapsed = (System.currentTimeMillis() - sampleStartMs.get()).toDouble()
+                    val subFrac = (sampleElapsed / avg).coerceIn(0.0, 0.99)
+                    val overall = ((done + subFrac) / totalSamples).coerceIn(0.0, 0.999)
+                    val pct = (overall * 100.0).toInt()
+                    if (pct != lastPct) {
+                        lastPct = pct
+                        val remaining = (totalSamples - (done + subFrac)).coerceAtLeast(0.0)
+                        val etaSec = (remaining * avg / 1000.0).toInt().coerceAtLeast(0)
+                        manager.updateTaskMetadata(taskId, mapOf(
+                            DownloadTaskMetadata.PERCENTAGE to pct,
+                            DownloadTaskMetadata.ETA_SECONDS to etaSec
+                        ))
+                    }
+                    delay(400)
                 }
+            }
 
-                totalErrors += errors
-                val status = if (errors == 0) "✓" else "✗ $errors errors"
-                val timestampStr = formatTimestamp(timestamp.toLong())
-                sampleResults.add("  [$timestampStr] $status")
+            try {
+                // Step 3: Check each sample point for errors
+                for ((index, timestamp) in samplePoints.withIndex()) {
+                    sampleStartMs.set(System.currentTimeMillis())
+                    val command = "-v error -ss $timestamp -i \"$filePath\" -t $testDuration -f null -"
 
-                Log.d(TAG, "Sample ${index + 1}/${samplePoints.size} at $timestampStr: $errors errors")
+                    val session = com.arthenica.ffmpegkit.FFmpegKit.execute(command)
+                    val output = session.allLogsAsString
 
-                // Early exit if we find significant corruption
-                if (errors > 50) {
-                    Log.w(TAG, "High error count detected at $timestampStr, stopping validation")
-                    break
+                    // Count error lines
+                    val errors = output.lines().count {
+                        it.contains("Error", ignoreCase = true) ||
+                        it.contains("Invalid data", ignoreCase = true)
+                    }
+
+                    totalErrors += errors
+                    val statusMark = if (errors == 0) "✓" else "✗ $errors errors"
+                    val timestampStr = formatTimestamp(timestamp.toLong())
+                    sampleResults.add("  [$timestampStr] $statusMark")
+
+                    val took = System.currentTimeMillis() - sampleStartMs.get()
+                    avgSampleMs.set(
+                        if (index == 0) took.coerceAtLeast(250L)
+                        else (0.6 * avgSampleMs.get() + 0.4 * took).toLong().coerceAtLeast(250L)
+                    )
+                    completedSamples.set(index + 1)
+
+                    Log.d(TAG, "Sample ${index + 1}/$totalSamples at $timestampStr: $errors errors (${took}ms)")
+
+                    // Early exit if we find significant corruption
+                    if (errors > 50) {
+                        Log.w(TAG, "High error count detected at $timestampStr, stopping validation")
+                        break
+                    }
                 }
+            } finally {
+                progressTicker.cancel()
+                manager.updateTaskMetadata(taskId, mapOf(
+                    DownloadTaskMetadata.PERCENTAGE to 100,
+                    DownloadTaskMetadata.ETA_SECONDS to 0
+                ))
             }
 
             // Step 4: Determine if file is valid

@@ -152,6 +152,17 @@ class BackgroundNotificationManager(private val context: Context) {
         return builder.build()
     }
 
+    private fun formatEta(seconds: Int): String {
+        val h = seconds / 3600
+        val m = (seconds % 3600) / 60
+        val s = seconds % 60
+        return when {
+            h > 0 -> "~${h}h ${m}m left"
+            m > 0 -> "~${m}m ${s}s left"
+            else -> "~${s}s left"
+        }
+    }
+
     /**
      * Get one-line summary for a task
      */
@@ -163,9 +174,26 @@ class BackgroundNotificationManager(private val context: Context) {
                 val stage = task.getMetadataString(DownloadTaskMetadata.STAGE) ?: "downloading"
                 when {
                     task.status == TaskStatus.PAUSED -> "Paused at $percentage% - $title"
-                    stage == "downloading" -> "$percentage% - $title"
-                    stage == "decrypting" -> "Decrypting $title"
-                    stage == "copying" -> "Saving $title"
+                    stage == "downloading" -> {
+                        val eta = task.getMetadataInt(DownloadTaskMetadata.ETA_SECONDS) ?: 0
+                        if (eta > 0) "$percentage% - $title • ${formatEta(eta)}"
+                        else "$percentage% - $title"
+                    }
+                    stage == "decrypting" -> {
+                        val eta = task.getMetadataInt(DownloadTaskMetadata.ETA_SECONDS) ?: 0
+                        if (eta > 0) "Decrypting $title ($percentage% • ${formatEta(eta)})"
+                        else "Decrypting $title ($percentage%)"
+                    }
+                    stage == "validating" -> {
+                        val eta = task.getMetadataInt(DownloadTaskMetadata.ETA_SECONDS) ?: 0
+                        if (eta > 0) "Validating $title ($percentage% • ${formatEta(eta)})"
+                        else "Validating $title ($percentage%)"
+                    }
+                    stage == "copying" -> {
+                        val eta = task.getMetadataInt(DownloadTaskMetadata.ETA_SECONDS) ?: 0
+                        if (eta > 0) "Saving $title ($percentage% • ${formatEta(eta)})"
+                        else "Saving $title ($percentage%)"
+                    }
                     else -> title
                 }
             }
@@ -204,14 +232,29 @@ class BackgroundNotificationManager(private val context: Context) {
                     stage == "downloading" -> {
                         val mbDownloaded = bytesDownloaded / (1024.0 * 1024.0)
                         val mbTotal = totalBytes / (1024.0 * 1024.0)
+                        val eta = task.getMetadataInt(DownloadTaskMetadata.ETA_SECONDS) ?: 0
+                        val etaSuffix = if (eta > 0) " • ${formatEta(eta)}" else ""
                         if (totalBytes > 0) {
-                            String.format("%s: %d%% (%.1f / %.1f MB)", title, percentage, mbDownloaded, mbTotal)
+                            String.format("%s: %d%% (%.1f / %.1f MB)%s", title, percentage, mbDownloaded, mbTotal, etaSuffix)
                         } else {
-                            "$title: $percentage%"
+                            "$title: $percentage%$etaSuffix"
                         }
                     }
-                    stage == "decrypting" -> "Decrypting: $title"
-                    stage == "copying" -> "Saving: $title"
+                    stage == "decrypting" -> {
+                        val eta = task.getMetadataInt(DownloadTaskMetadata.ETA_SECONDS) ?: 0
+                        if (eta > 0) "Decrypting: $title • $percentage% • ${formatEta(eta)}"
+                        else "Decrypting: $title • $percentage%"
+                    }
+                    stage == "validating" -> {
+                        val eta = task.getMetadataInt(DownloadTaskMetadata.ETA_SECONDS) ?: 0
+                        if (eta > 0) "Validating: $title • $percentage% • ${formatEta(eta)}"
+                        else "Validating: $title • $percentage%"
+                    }
+                    stage == "copying" -> {
+                        val eta = task.getMetadataInt(DownloadTaskMetadata.ETA_SECONDS) ?: 0
+                        if (eta > 0) "Saving: $title • $percentage% • ${formatEta(eta)}"
+                        else "Saving: $title • $percentage%"
+                    }
                     else -> title
                 }
             }

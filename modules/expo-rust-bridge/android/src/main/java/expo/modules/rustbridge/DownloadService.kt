@@ -298,7 +298,16 @@ class DownloadService : Service() {
 
     private fun onActiveDownloadsChanged() {
         if (activeDownloads.isEmpty()) {
-            // stopForeground(REMOVE) clears the anchor notification when truly idle.
+            // No user-initiated downloads remain, so clear the "Downloading N" summary.
+            // It uses NOTIFICATION_ID, which is also the foreground-service notification,
+            // so NotificationManager.cancel() is ignored while foregrounded — it only goes
+            // away via stopForeground(REMOVE). checkAndStopServiceIfIdle() does that only
+            // when Rust reports zero active tasks, but the just-completed task can still
+            // read as active (a race), leaving a stale summary. Detach foreground here so
+            // it clears immediately; a later enqueue re-establishes foreground via
+            // onStartCommand. cancelSummary() then covers the non-foreground case.
+            stopForegroundCompat()
+            notificationManager.cancelSummary()
             checkAndStopServiceIfIdle()
         } else {
             notificationManager.showSummary(activeDownloads.size)

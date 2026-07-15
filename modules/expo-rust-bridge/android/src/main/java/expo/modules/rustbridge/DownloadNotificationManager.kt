@@ -353,6 +353,17 @@ class DownloadNotificationManager(private val context: Context) {
     }
 
     /**
+     * Cancel just the ongoing summary anchor (id NOTIFICATION_ID). Needed because the
+     * anchor is posted via notify(), so stopForeground(REMOVE) won't clear it when the
+     * service isn't in the foreground state (e.g. the WorkManager-driven path) — leaving
+     * a stale "Downloading N audiobooks" after everything has finished.
+     */
+    fun cancelSummary() {
+        notificationManager.cancel(NOTIFICATION_ID)
+        Log.d(TAG, "Cancelled download summary notification")
+    }
+
+    /**
      * Get initial notification for starting foreground service
      */
     fun getInitialNotification(): Notification {

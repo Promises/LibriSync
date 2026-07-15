@@ -678,7 +678,7 @@ class DownloadOrchestrator(
      * concurrency limit. Download workers can't advance the queue themselves, so
      * we kick it whenever a download reaches a terminal state.
      */
-    private fun kickDownloadQueue() {
+    fun kickDownloadQueue() {
         try {
             val params = JSONObject().apply { put("db_path", dbPath) }
             ExpoRustBridgeModule.nativeStartPendingDownloads(params.toString())
@@ -748,8 +748,12 @@ class DownloadOrchestrator(
                 if (coverUrl != null && coverUrl.isNotEmpty()) {
                     try {
                         val coverFile = File.createTempFile("cover_", ".jpg")
-                        val url = java.net.URL(coverUrl)
-                        url.openStream().use { input ->
+                        // Timeouts: a hung cover fetch must not stall the whole pipeline.
+                        val conn = (java.net.URL(coverUrl).openConnection() as java.net.HttpURLConnection).apply {
+                            connectTimeout = 10_000
+                            readTimeout = 15_000
+                        }
+                        conn.inputStream.use { input ->
                             coverFile.outputStream().use { output ->
                                 input.copyTo(output)
                             }
@@ -921,7 +925,7 @@ class DownloadOrchestrator(
                 val ffmpegOutput = session.allLogsAsString
                 Log.e(TAG, "FFmpeg failed with return code: ${session.returnCode}")
                 Log.e(TAG, "FFmpeg output: $ffmpegOutput")
-                throw Exception("FFmpeg failed: ${session.failStackTrace}")
+                throw Exception(ffmpegFailureMessage(ffmpegOutput))
             }
 
             Log.d(TAG, "Conversion complete for $asin (with metadata + cover art)")
@@ -1570,11 +1574,27 @@ class DownloadOrchestrator(
                 maxOf(duration - 30, 60.0) // Near end (or 60s if file is short)
             ).distinct().sorted()
 
-            Log.d(TAG, "Sampling ${samplePoints.size} points: ${samplePoints.map { "%.1fmin".format(it / 60) }}")
+            // Validation depth is user-configurable: "full" (all points), "quick" (ends
+            // only) or "off" (skip). Trades corruption-detection thoroughness for speed.
+            val validationLevel = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
+                .getString("validation_level", "full") ?: "full"
+            if (validationLevel == "off") {
+                Log.d(TAG, "Validation skipped (setting=off) for $asin")
+                progressCallback?.invoke(asin, "validating", 100.0, 0, 0, 0L)
+                return@withContext AudioValidationResult(
+                    isValid = true, errorCount = 0,
+                    errorMessage = "Validation skipped by setting", duration = duration
+                )
+            }
+            val effectiveSamplePoints = if (validationLevel == "quick")
+                listOf(samplePoints.first(), samplePoints.last()).distinct()
+            else samplePoints
+
+            Log.d(TAG, "Sampling ${effectiveSamplePoints.size} points ($validationLevel): ${effectiveSamplePoints.map { "%.1fmin".format(it / 60) }}")
 
             var totalErrors = 0
             val sampleResults = mutableListOf<String>()
-            val totalSamples = samplePoints.size
+            val totalSamples = effectiveSamplePoints.size
             val testDuration = 10 // seconds decoded per sample
 
             // Validation cost is dominated by seeking into a huge file, which emits no
@@ -1606,7 +1626,7 @@ class DownloadOrchestrator(
 
             try {
                 // Step 3: Check each sample point for errors
-                for ((index, timestamp) in samplePoints.withIndex()) {
+                for ((index, timestamp) in effectiveSamplePoints.withIndex()) {
                     sampleStartMs.set(System.currentTimeMillis())
                     val command = "-v error -ss $timestamp -i \"$filePath\" -t $testDuration -f null -"
 

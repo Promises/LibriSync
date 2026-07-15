@@ -25,6 +25,14 @@ class DownloadNotificationManager(private val context: Context) {
         private const val CHANNEL_NAME = "Audiobook Downloads"
         private const val NOTIFICATION_ID = 1001
 
+        /**
+         * Stable per-book notification id. Deterministic (hash-based) so a manager
+         * created in the service and one created in the broadcast receiver agree on
+         * which notification belongs to a given ASIN. High base avoids the foreground
+         * anchor (1001) and its neighbours.
+         */
+        fun notificationIdFor(asin: String): Int = 100_000 + asin.hashCode().mod(800_000)
+
         // Action request codes
         private const val ACTION_PAUSE = "expo.modules.rustbridge.PAUSE_DOWNLOAD"
         private const val ACTION_RESUME = "expo.modules.rustbridge.RESUME_DOWNLOAD"
@@ -84,7 +92,7 @@ class DownloadNotificationManager(private val context: Context) {
     fun showProgress(progress: DownloadProgress) {
         Log.d(TAG, "Showing progress notification: ${progress.title} ${progress.percentage}%")
         val notification = buildProgressNotification(progress)
-        notificationManager.notify(NOTIFICATION_ID, notification)
+        notificationManager.notify(notificationIdFor(progress.asin), notification)
     }
 
     /**
@@ -147,9 +155,13 @@ class DownloadNotificationManager(private val context: Context) {
                 setPackage(context.packageName)
                 putExtra("asin", progress.asin)
             }
+            // Per-ASIN request codes: a constant code + FLAG_UPDATE_CURRENT makes every
+            // notification's button share one PendingIntent, so its extras (asin) get
+            // overwritten by the last one built — cancelling then hits the wrong book.
+            val reqBase = notificationIdFor(progress.asin) * 2
             val pausePendingIntent = PendingIntent.getBroadcast(
                 context,
-                0,
+                reqBase,
                 pauseIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
@@ -166,7 +178,7 @@ class DownloadNotificationManager(private val context: Context) {
             }
             val cancelPendingIntent = PendingIntent.getBroadcast(
                 context,
-                1,
+                reqBase + 1,
                 cancelIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
@@ -183,7 +195,7 @@ class DownloadNotificationManager(private val context: Context) {
     /**
      * Show completion notification
      */
-    fun showCompletion(title: String, author: String? = null, outputPath: String) {
+    fun showCompletion(asin: String, title: String, author: String? = null, outputPath: String) {
         val contentText = buildString {
             append("Ready to listen")
             author?.let { append(" • by $it") }
@@ -196,7 +208,7 @@ class DownloadNotificationManager(private val context: Context) {
         }
 
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setContentTitle("Download Complete")
+            .setContentTitle("Download Complete: $title")
             .setContentText(contentText)
             .setSmallIcon(android.R.drawable.stat_sys_download_done)
             .setAutoCancel(true)
@@ -204,11 +216,8 @@ class DownloadNotificationManager(private val context: Context) {
             .setStyle(NotificationCompat.BigTextStyle().bigText(bigText))
             .build()
 
-        // Use different ID to show alongside ongoing notification
-        notificationManager.notify(NOTIFICATION_ID + 1, notification)
-
-        // Remove progress notification
-        notificationManager.cancel(NOTIFICATION_ID)
+        // Replace this book's ongoing progress notification in place.
+        notificationManager.notify(notificationIdFor(asin), notification)
 
         Log.d(TAG, "Completion notification shown: $title")
     }
@@ -216,7 +225,7 @@ class DownloadNotificationManager(private val context: Context) {
     /**
      * Show error notification
      */
-    fun showError(title: String, author: String? = null, error: String) {
+    fun showError(asin: String, title: String, author: String? = null, error: String) {
         val contentText = buildString {
             append("Failed: $error")
         }
@@ -229,7 +238,7 @@ class DownloadNotificationManager(private val context: Context) {
         }
 
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setContentTitle("Download Failed")
+            .setContentTitle("Download Failed: $title")
             .setContentText(contentText)
             .setSmallIcon(android.R.drawable.stat_notify_error)
             .setAutoCancel(true)
@@ -237,10 +246,8 @@ class DownloadNotificationManager(private val context: Context) {
             .setStyle(NotificationCompat.BigTextStyle().bigText(bigText))
             .build()
 
-        notificationManager.notify(NOTIFICATION_ID + 2, notification)
-
-        // Remove progress notification
-        notificationManager.cancel(NOTIFICATION_ID)
+        // Replace this book's ongoing progress notification in place.
+        notificationManager.notify(notificationIdFor(asin), notification)
 
         Log.e(TAG, "Error notification shown: $title - $error")
     }
@@ -277,9 +284,10 @@ class DownloadNotificationManager(private val context: Context) {
             setPackage(context.packageName)
             putExtra("asin", asin)
         }
+        val reqBase = notificationIdFor(asin) * 2
         val resumePendingIntent = PendingIntent.getBroadcast(
             context,
-            2,
+            reqBase,
             resumeIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
@@ -296,7 +304,7 @@ class DownloadNotificationManager(private val context: Context) {
         }
         val cancelPendingIntent = PendingIntent.getBroadcast(
             context,
-            3,
+            reqBase + 1,
             cancelIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
@@ -313,12 +321,35 @@ class DownloadNotificationManager(private val context: Context) {
     /**
      * Cancel all notifications
      */
+    /** Cancel just one book's notification (per-book cancel from its own action button). */
+    fun cancelForAsin(asin: String) {
+        notificationManager.cancel(notificationIdFor(asin))
+        Log.d(TAG, "Cancelled notification for $asin")
+    }
+
     fun cancelAll() {
         Log.d(TAG, "Cancelling all notifications")
         notificationManager.cancel(NOTIFICATION_ID)
         notificationManager.cancel(NOTIFICATION_ID + 1)
         notificationManager.cancel(NOTIFICATION_ID + 2)
         Log.d(TAG, "All notifications cancelled")
+    }
+
+    /**
+     * Update the ongoing foreground-anchor notification (id NOTIFICATION_ID) with the
+     * count of active downloads. Per-book detail lives in the per-ASIN notifications.
+     */
+    fun showSummary(activeCount: Int) {
+        val text = if (activeCount == 1) "Downloading 1 audiobook" else "Downloading $activeCount audiobooks"
+        val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+            .setContentTitle("LibriSync")
+            .setContentText(text)
+            .setSmallIcon(android.R.drawable.stat_sys_download)
+            .setOngoing(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setOnlyAlertOnce(true)
+            .build()
+        notificationManager.notify(NOTIFICATION_ID, notification)
     }
 
     /**

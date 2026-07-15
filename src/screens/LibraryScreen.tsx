@@ -93,6 +93,8 @@ export default function LibraryScreen() {
     // Download tracking
     const [downloadTasks, setDownloadTasks] = useState<Map<string, DownloadTask>>(new Map());
     const [stageProgress, setStageProgress] = useState<Record<string, StageProgress>>({});
+    const [downloadSpeeds, setDownloadSpeeds] = useState<Record<string, number>>({}); // bytes/sec
+    const prevBytesRef = useRef<Map<string, {bytes: number; time: number}>>(new Map());
     const progressInterval = useRef<NodeJS.Timeout | null>(null);
 
     // Search, filter, and sort state
@@ -212,6 +214,23 @@ export default function LibraryScreen() {
 
                 setDownloadTasks(taskMap);
                 setStageProgress(getStageProgress());
+
+                // Derive download speed (bytes/sec) from the change in bytes between polls.
+                const now = Date.now();
+                const speeds: Record<string, number> = {};
+                const prev = prevBytesRef.current;
+                const nextPrev = new Map<string, {bytes: number; time: number}>();
+                taskMap.forEach((task, asin) => {
+                    if (task.status === 'downloading') {
+                        const p = prev.get(asin);
+                        if (p && now > p.time && task.bytes_downloaded >= p.bytes) {
+                            speeds[asin] = ((task.bytes_downloaded - p.bytes) * 1000) / (now - p.time);
+                        }
+                        nextPrev.set(asin, {bytes: task.bytes_downloaded, time: now});
+                    }
+                });
+                prevBytesRef.current = nextPrev;
+                setDownloadSpeeds(speeds);
             } catch (error) {
                 console.error('[LibraryScreen] Error polling progress:', error);
             }
@@ -812,26 +831,17 @@ export default function LibraryScreen() {
         return `~${s}s`;
     };
 
+    const formatSpeed = (bytesPerSec: number): string => {
+        if (!bytesPerSec || bytesPerSec <= 0) return '';
+        const mb = bytesPerSec / (1024 * 1024);
+        if (mb >= 1) return `${mb.toFixed(1)} MB/s`;
+        return `${(bytesPerSec / 1024).toFixed(0)} KB/s`;
+    };
+
     const getStatus = (book: Book): { text: string; color: string } => {
+        // Stage percentage + ETA come from the live store; the stage itself is the DB
+        // task status (both foreground and auto-download persist it to the DB row).
         const sp = stageProgress[book.audible_product_id];
-
-        // Post-download stages are authoritative from the live store: the DB task row
-        // may still read "downloading"/"completed" during decrypt/validate/copy — true
-        // for auto-downloads, which don't persist these stages to the DB.
-        if (sp && (sp.stage === 'decrypting' || sp.stage === 'validating' || sp.stage === 'copying')) {
-            const etaText = formatEtaShort(sp.eta_seconds);
-            const suffix = etaText ? ` · ${etaText}` : '';
-            const pct = Math.round(sp.percentage);
-            switch (sp.stage) {
-                case 'decrypting':
-                    return {text: `🔓 Decrypting ${pct}%${suffix}`, color: colors.info};
-                case 'validating':
-                    return {text: `🔍 Validating ${pct}%${suffix}`, color: colors.info};
-                case 'copying':
-                    return {text: `📁 Saving ${pct}%${suffix}`, color: colors.info};
-            }
-        }
-
         const task = downloadTasks.get(book.audible_product_id);
 
         if (task) {
@@ -842,12 +852,14 @@ export default function LibraryScreen() {
             const etaText = sp ? formatEtaShort(sp.eta_seconds) : '';
             const etaSuffix = etaText ? ` · ${etaText}` : '';
             const stagePct = sp ? Math.round(sp.percentage) : 0;
+            const speedText = formatSpeed(downloadSpeeds[book.audible_product_id]);
+            const speedSuffix = speedText ? ` · ${speedText}` : '';
 
             switch (task.status) {
                 case 'queued':
                     return {text: '⏳ Queued', color: colors.textSecondary};
                 case 'downloading':
-                    return {text: `⬇ ${percentage}%${etaSuffix}`, color: colors.info};
+                    return {text: `⬇ ${percentage}%${speedSuffix}${etaSuffix}`, color: colors.info};
                 case 'paused':
                     return {text: `⏸ Paused ${percentage}%`, color: colors.warning};
                 case 'decrypting':
@@ -1054,7 +1066,7 @@ export default function LibraryScreen() {
 
             Alert.alert(
                 'Download Started',
-                `${book.title} has been added to the download queue. You can monitor progress here or leave the app.`
+                `"${book.title}" is downloading. Monitor progress here or in the notification — you can leave the app.`
             );
 
         } catch (error: any) {

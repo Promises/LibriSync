@@ -45,6 +45,24 @@ fun copyStreamWithProgress(
 }
 
 /**
+ * Map raw FFmpeg failure output to a short, user-facing message. Falls back to a
+ * generic retry hint. The full log is still logged separately for debugging.
+ */
+fun ffmpegFailureMessage(logs: String): String {
+    val l = logs.lowercase()
+    return when {
+        "activation" in l || "invalid data found" in l ->
+            "Decryption failed — the activation bytes may be wrong. Try re-authenticating your account."
+        "no space left" in l ->
+            "Not enough free storage to convert this audiobook."
+        "permission denied" in l ->
+            "Storage permission denied while saving the audiobook."
+        else ->
+            "Audio conversion failed. Please retry."
+    }
+}
+
+/**
  * Rolling ETA estimator for a byte-counted transfer polled over time.
  *
  * Call [update] each poll with the current bytes and total; [etaSeconds] then

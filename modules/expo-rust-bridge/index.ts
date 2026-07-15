@@ -975,6 +975,20 @@ export interface ExpoRustBridgeModule {
    */
   getSmartPlayerCover(): RustResponse<{ enabled: boolean }>;
 
+  /**
+   * Set audio validation depth after download.
+   *
+   * @param level - "full" (all sample points), "quick" (ends only), or "off"
+   */
+  setValidationLevel(level: string): RustResponse<{}>;
+
+  /**
+   * Get audio validation depth preference.
+   *
+   * @returns Current validation level
+   */
+  getValidationLevel(): RustResponse<{ level: string }>;
+
   // --------------------------------------------------------------------------
   // LibriVox
   // --------------------------------------------------------------------------

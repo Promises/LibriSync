@@ -1499,6 +1499,28 @@ class ExpoRustBridgeModule : Module() {
       }
     }
 
+    Function("setValidationLevel") { level: String ->
+      try {
+        val context = appContext.reactContext ?: throw Exception("Context not available")
+        val prefs = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
+        prefs.edit().putString("validation_level", level).apply()
+        mapOf("success" to true)
+      } catch (e: Exception) {
+        mapOf("success" to false, "error" to e.message)
+      }
+    }
+
+    Function("getValidationLevel") {
+      try {
+        val context = appContext.reactContext ?: throw Exception("Context not available")
+        val prefs = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
+        val level = prefs.getString("validation_level", "full") ?: "full"
+        mapOf("success" to true, "data" to mapOf("level" to level))
+      } catch (e: Exception) {
+        mapOf("success" to false, "error" to e.message)
+      }
+    }
+
     Function("setSmartPlayerCover") { enabled: Boolean ->
       try {
         val context = appContext.reactContext ?: throw Exception("Context not available")

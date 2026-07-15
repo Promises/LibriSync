@@ -34,6 +34,7 @@ const INCLUDE_PODCASTS_KEY = 'include_podcasts';
 type SyncFrequency = 'manual' | '1h' | '6h' | '12h' | '24h';
 type NamingPattern = 'flat_file' | 'author_book_folder' | 'author_series_book';
 type PodcastNamingPattern = 'podcast_episode_folder' | 'podcast_flat_file';
+type ValidationLevel = 'full' | 'quick' | 'off';
 
 export default function SettingsScreen() {
   const styles = useStyles(createStyles);
@@ -43,6 +44,7 @@ export default function SettingsScreen() {
   const [namingPattern, setNamingPattern] = useState<NamingPattern>('author_series_book');
   const [podcastNamingPattern, setPodcastNamingPattern] = useState<PodcastNamingPattern>('podcast_episode_folder');
   const [smartPlayerCover, setSmartPlayerCover] = useState(false);
+  const [validationLevel, setValidationLevel] = useState<ValidationLevel>('full');
   const [isLoading, setIsLoading] = useState(true);
 
   // Sync settings
@@ -95,10 +97,11 @@ export default function SettingsScreen() {
       // Load naming pattern and Smart Player cover from native SharedPreferences
       if (Platform.OS === 'android') {
         try {
-          const [namingResult, podcastNamingResult, coverResult] = await Promise.all([
+          const [namingResult, podcastNamingResult, coverResult, validationResult] = await Promise.all([
             ExpoRustBridge.getNamingPattern(),
             ExpoRustBridge.getPodcastNamingPattern(),
             ExpoRustBridge.getSmartPlayerCover(),
+            ExpoRustBridge.getValidationLevel(),
           ]);
 
           if (namingResult.success && namingResult.data) {
@@ -111,6 +114,10 @@ export default function SettingsScreen() {
 
           if (coverResult.success && coverResult.data) {
             setSmartPlayerCover((coverResult.data as any).enabled);
+          }
+
+          if (validationResult.success && validationResult.data) {
+            setValidationLevel((validationResult.data as any).level as ValidationLevel);
           }
         } catch (error) {
           console.error('[Settings] Failed to load native preferences:', error);
@@ -358,6 +365,38 @@ export default function SettingsScreen() {
     } catch (error: any) {
       console.error('[Settings] Failed to save naming pattern:', error);
       Alert.alert('Error', error.message || 'Failed to update naming pattern');
+    }
+  };
+
+  const getValidationLevelLabel = (level: ValidationLevel): string => {
+    switch (level) {
+      case 'full': return 'Full';
+      case 'quick': return 'Quick';
+      case 'off': return 'Off';
+    }
+  };
+
+  const handleValidationLevelPress = () => {
+    Alert.alert(
+      'Audio Validation',
+      'How thoroughly downloaded files are checked for corruption. Less checking is faster but may miss a bad file.',
+      [
+        { text: 'Full (5 points)', onPress: () => handleValidationLevelChange('full') },
+        { text: 'Quick (start + end)', onPress: () => handleValidationLevelChange('quick') },
+        { text: 'Off (skip)', onPress: () => handleValidationLevelChange('off') },
+        { text: 'Cancel', style: 'cancel' },
+      ]
+    );
+  };
+
+  const handleValidationLevelChange = async (value: ValidationLevel) => {
+    setValidationLevel(value);
+    try {
+      await ExpoRustBridge.setValidationLevel(value);
+      console.log(`[Settings] Validation level changed to: ${value}`);
+    } catch (error: any) {
+      console.error('[Settings] Failed to save validation level:', error);
+      Alert.alert('Error', error.message || 'Failed to update validation level');
     }
   };
 
@@ -614,6 +653,22 @@ export default function SettingsScreen() {
               disabled={isLoading}
             >
               <Text style={styles.buttonText}>{getPodcastNamingPatternLabel(podcastNamingPattern)}</Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.settingItem}>
+            <View style={styles.settingInfo}>
+              <Text style={styles.settingLabel}>Audio Validation</Text>
+              <Text style={styles.settingDescription}>
+                Corruption check after download. Quick or Off speeds up large audiobooks.
+              </Text>
+            </View>
+            <TouchableOpacity
+              style={styles.button}
+              onPress={handleValidationLevelPress}
+              disabled={isLoading}
+            >
+              <Text style={styles.buttonText}>{getValidationLevelLabel(validationLevel)}</Text>
             </TouchableOpacity>
           </View>
 

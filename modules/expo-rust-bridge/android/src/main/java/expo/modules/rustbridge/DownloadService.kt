@@ -518,6 +518,10 @@ class DownloadService : Service() {
     private fun handleStopMonitoring(intent: Intent) {
         val asin = intent.getStringExtra("asin") ?: return
         Log.d(TAG, "Stopping monitoring for: $asin")
+        // Abort any in-flight conversion (decrypt/validate/copy) for this book, then stop
+        // monitoring. Without the abort, cancelling mid-decrypt/copy would leave ffmpeg or
+        // the SAF copy running to completion.
+        orchestrator.abortConversion(asin)
         orchestrator.stopMonitoring(asin)
 
         // A per-book cancel/remove routes here: drop it from active AND from the

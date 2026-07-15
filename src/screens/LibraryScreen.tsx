@@ -946,7 +946,11 @@ export default function LibraryScreen() {
         // Guard against re-selecting a book that is already downloading or queued.
         const existingStage = stageProgress[book.audible_product_id];
         const existingTask = downloadTasks.get(book.audible_product_id);
-        if (existingStage || (existingTask && existingTask.status !== 'completed' && existingTask.status !== 'failed')) {
+        // Block only when it is genuinely running: a live stage in the store, or an active
+        // download-task status. Cancelled / failed / interrupted (stale decrypt/copy) tasks
+        // stay retriable.
+        const activeStatuses = ['downloading', 'paused', 'queued'];
+        if (existingStage || (existingTask && activeStatuses.includes(existingTask.status))) {
             Alert.alert('Already in Progress', `"${book.title}" is already downloading or queued.`);
             return;
         }
@@ -1065,6 +1069,16 @@ export default function LibraryScreen() {
             }
 
             console.log('[LibraryScreen] Enqueueing download:', book.title, book.audible_product_id);
+
+            // Retry of a cancelled/failed/interrupted book: clear the stale task first so a
+            // fresh download starts cleanly (keep any partial file off the record).
+            if (existingTask) {
+                try {
+                    await clearBookDownloadState(dbPath, book.audible_product_id, false);
+                } catch (clearError) {
+                    console.warn('[LibraryScreen] Failed to clear stale download state:', clearError);
+                }
+            }
 
             const author = (book.authors?.length || 0) > 0 ? book.authors.join(', ') : undefined;
 
@@ -1389,13 +1403,19 @@ export default function LibraryScreen() {
         const task = downloadTasks.get(item.audible_product_id);
         // Sequential-mode queued books have no DB task; they are queued only in the store.
         const isSpQueued = stageProgress[item.audible_product_id]?.stage === 'queued';
-        const isDownloaded = !!item.file_path || task?.status === 'completed';
+        // Only a saved final file means "downloaded". The download-task "completed"
+        // status is also set once the download alone finishes (before decrypt/copy), so a
+        // cancelled or interrupted book could otherwise look downloaded and block retry.
+        const isDownloaded = !!item.file_path;
         const isProcessing = task?.status === 'decrypting' || task?.status === 'validating' || task?.status === 'copying';
         const canRetryConversion = task?.status === 'failed' && !!task.aaxc_key;
-        const canDownload = item.is_downloadable !== false && (!task || (task.status === 'failed' && !canRetryConversion)) && !isSpQueued;
         const isDownloading = task?.status === 'downloading';
         const isPaused = task?.status === 'paused';
         const isQueued = task?.status === 'queued' || isSpQueued;
+        const isActive = isDownloading || isPaused || isQueued || isProcessing;
+        // Retriable whenever it is not actually downloaded and nothing is actively running:
+        // covers cancelled, failed, interrupted, and a stale "completed" with no saved file.
+        const canDownload = item.is_downloadable !== false && !isDownloaded && !isActive && !canRetryConversion;
 
         return (
             <TouchableOpacity
@@ -1500,7 +1520,7 @@ export default function LibraryScreen() {
                         </TouchableOpacity>
                     )}
 
-                    {(isDownloading || isPaused || isQueued) && (
+                    {(isDownloading || isPaused || isQueued || isProcessing) && (
                         <TouchableOpacity
                             style={styles.cancelButton}
                             onPress={() => handleCancelDownload(item)}

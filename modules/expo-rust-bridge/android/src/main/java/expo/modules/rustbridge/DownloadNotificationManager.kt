@@ -37,6 +37,7 @@ class DownloadNotificationManager(private val context: Context) {
         private const val ACTION_PAUSE = "expo.modules.rustbridge.PAUSE_DOWNLOAD"
         private const val ACTION_RESUME = "expo.modules.rustbridge.RESUME_DOWNLOAD"
         private const val ACTION_CANCEL = "expo.modules.rustbridge.CANCEL_DOWNLOAD"
+        private const val ACTION_RETRY = "expo.modules.rustbridge.RETRY_DOWNLOAD"
 
         // Notification types
         const val STAGE_DOWNLOADING = "downloading"
@@ -148,17 +149,17 @@ class DownloadNotificationManager(private val context: Context) {
             .setStyle(NotificationCompat.BigTextStyle().bigText(bigText))
             .setOnlyAlertOnce(true) // Don't make sound/vibration on updates
 
-        // Add action buttons only during download stage
+        // Per-ASIN request codes: a constant code + FLAG_UPDATE_CURRENT makes every
+        // notification's button share one PendingIntent, so its extras (asin) get
+        // overwritten by the last one built — cancelling then hits the wrong book.
+        val reqBase = notificationIdFor(progress.asin) * 2
+
+        // Pause only makes sense while downloading (the Rust download supports resume).
         if (progress.stage == STAGE_DOWNLOADING) {
-            // Pause button
             val pauseIntent = Intent(ACTION_PAUSE).apply {
                 setPackage(context.packageName)
                 putExtra("asin", progress.asin)
             }
-            // Per-ASIN request codes: a constant code + FLAG_UPDATE_CURRENT makes every
-            // notification's button share one PendingIntent, so its extras (asin) get
-            // overwritten by the last one built — cancelling then hits the wrong book.
-            val reqBase = notificationIdFor(progress.asin) * 2
             val pausePendingIntent = PendingIntent.getBroadcast(
                 context,
                 reqBase,
@@ -170,24 +171,24 @@ class DownloadNotificationManager(private val context: Context) {
                 "Pause",
                 pausePendingIntent
             )
-
-            // Cancel button
-            val cancelIntent = Intent(ACTION_CANCEL).apply {
-                setPackage(context.packageName)
-                putExtra("asin", progress.asin)
-            }
-            val cancelPendingIntent = PendingIntent.getBroadcast(
-                context,
-                reqBase + 1,
-                cancelIntent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
-            builder.addAction(
-                android.R.drawable.ic_menu_close_clear_cancel,
-                "Cancel",
-                cancelPendingIntent
-            )
         }
+
+        // Cancel is available in every stage, including decrypt / validate / copy.
+        val cancelIntent = Intent(ACTION_CANCEL).apply {
+            setPackage(context.packageName)
+            putExtra("asin", progress.asin)
+        }
+        val cancelPendingIntent = PendingIntent.getBroadcast(
+            context,
+            reqBase + 1,
+            cancelIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        builder.addAction(
+            android.R.drawable.ic_menu_close_clear_cancel,
+            "Cancel",
+            cancelPendingIntent
+        )
 
         return builder.build()
     }
@@ -234,8 +235,19 @@ class DownloadNotificationManager(private val context: Context) {
             append("$title")
             author?.let { append("\nby $it") }
             append("\n\nFailed: $error")
-            append("\n\nTap to retry")
         }
+
+        // Retry action: re-runs the conversion from the cached encrypted file.
+        val retryIntent = Intent(ACTION_RETRY).apply {
+            setPackage(context.packageName)
+            putExtra("asin", asin)
+        }
+        val retryPendingIntent = PendingIntent.getBroadcast(
+            context,
+            notificationIdFor(asin) * 2 + 1,
+            retryIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
 
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setContentTitle("Download Failed: $title")
@@ -244,6 +256,7 @@ class DownloadNotificationManager(private val context: Context) {
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setStyle(NotificationCompat.BigTextStyle().bigText(bigText))
+            .addAction(android.R.drawable.ic_menu_rotate, "Retry", retryPendingIntent)
             .build()
 
         // Replace this book's ongoing progress notification in place.

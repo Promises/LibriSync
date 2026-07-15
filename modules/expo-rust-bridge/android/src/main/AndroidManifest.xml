@@ -15,6 +15,7 @@
                 <action android:name="expo.modules.rustbridge.PAUSE_DOWNLOAD" />
                 <action android:name="expo.modules.rustbridge.RESUME_DOWNLOAD" />
                 <action android:name="expo.modules.rustbridge.CANCEL_DOWNLOAD" />
+                <action android:name="expo.modules.rustbridge.RETRY_DOWNLOAD" />
             </intent-filter>
         </receiver>
     </application>

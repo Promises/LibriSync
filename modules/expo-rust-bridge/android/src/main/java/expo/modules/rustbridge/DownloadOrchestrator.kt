@@ -49,6 +49,11 @@ class DownloadOrchestrator(
 
     // Active download monitoring jobs
     private val monitoringJobs = mutableMapOf<String, Job>()
+    // Cancellation of an in-flight conversion (decrypt / validate / copy), keyed by ASIN.
+    private val cancelledConversions = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    // Running FFmpeg session id per ASIN, so a specific decrypt can be cancelled without
+    // FFmpegKit.cancel() (which would kill every parallel conversion).
+    private val activeFfmpegSessions = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
     // Callbacks
     private var progressCallback: ((String, String, Double, Long, Long, Long) -> Unit)? = null // (asin, stage, percentage, bytesDownloaded, totalBytes, etaSeconds)
@@ -548,13 +553,13 @@ class DownloadOrchestrator(
             val outputFile = safDir.createFile(mimeType, targetName)
                 ?: throw Exception("Failed to create file: $targetName")
             context.contentResolver.openOutputStream(outputFile.uri)?.use { out ->
-                sourceFile.inputStream().use { inp -> copyStreamWithProgress(inp, out, totalBytes, onCopyProgress) }
+                sourceFile.inputStream().use { inp -> copyStreamWithProgress(inp, out, totalBytes, { asin in cancelledConversions }, onCopyProgress) }
             } ?: throw Exception("Failed to write: $targetName")
             outputFile.uri.toString()
         } else {
             val outputFile = File(regularDirPath!!, targetName)
             outputFile.outputStream().use { out ->
-                sourceFile.inputStream().use { inp -> copyStreamWithProgress(inp, out, totalBytes, onCopyProgress) }
+                sourceFile.inputStream().use { inp -> copyStreamWithProgress(inp, out, totalBytes, { asin in cancelledConversions }, onCopyProgress) }
             }
             outputFile.absolutePath
         }
@@ -729,6 +734,9 @@ class DownloadOrchestrator(
         // Resolve task ID outside try so it's available in catch
         val resolvedTaskId = taskId ?: findTaskIdForAsin(asin)
 
+        // Fresh conversion: clear any stale cancel flag from a previous attempt.
+        cancelledConversions.remove(asin)
+
         try {
             Log.d(TAG, "Starting conversion for $asin...")
 
@@ -899,7 +907,7 @@ class DownloadOrchestrator(
             // FFmpeg statistics stream: time = ms of media processed, speed = realtime multiplier.
             // Throttle to whole-percent steps to avoid hammering the notification.
             var lastReportedPct = -1
-            com.arthenica.ffmpegkit.FFmpegKitConfig.enableStatisticsCallback { stat ->
+            val statsCallback = com.arthenica.ffmpegkit.StatisticsCallback { stat ->
                 if (totalDurationSec > 0.0) {
                     val processedSec = stat.time.toDouble() / 1000.0
                     val pct = ((processedSec / totalDurationSec).coerceIn(0.0, 1.0) * 100.0).toInt()
@@ -914,11 +922,24 @@ class DownloadOrchestrator(
                 }
             }
 
-            val session = try {
-                com.arthenica.ffmpegkit.FFmpegKit.execute(command)
+            // executeAsync exposes the session id up front so this specific decrypt can be
+            // cancelled; a blocking execute() would give no handle to cancel just this one.
+            val ffmpegLatch = java.util.concurrent.CountDownLatch(1)
+            val session = com.arthenica.ffmpegkit.FFmpegKit.executeAsync(
+                command,
+                { _ -> ffmpegLatch.countDown() },
+                { _ -> },
+                statsCallback
+            )
+            activeFfmpegSessions[asin] = session.sessionId
+            try {
+                ffmpegLatch.await()
             } finally {
-                // Global callback: clear so later validation/probe ffmpeg calls don't feed it.
-                com.arthenica.ffmpegkit.FFmpegKitConfig.enableStatisticsCallback(null)
+                activeFfmpegSessions.remove(asin)
+            }
+
+            if (asin in cancelledConversions) {
+                throw kotlinx.coroutines.CancellationException("Decrypt cancelled by user")
             }
 
             if (!com.arthenica.ffmpegkit.ReturnCode.isSuccess(session.returnCode)) {
@@ -969,10 +990,22 @@ class DownloadOrchestrator(
             resolvedTaskId?.let { updateTaskStatusInDb(it, "completed", finalPath) }
 
         } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException || asin in cancelledConversions) {
+                // User cancelled mid-conversion: clean up partial output, no error UI.
+                // Rethrow as cancellation so the monitor coroutine ignores it (no error
+                // notification); the finally clears the per-book cancel state.
+                Log.d(TAG, "Conversion cancelled for $asin")
+                runCatching { File(decryptedCachePath).delete() }
+                resolvedTaskId?.let { updateTaskStatusInDb(it, "cancelled") }
+                throw kotlinx.coroutines.CancellationException("Conversion cancelled")
+            }
             Log.e(TAG, "Conversion failed for $asin", e)
             // Mark as failed in DB with error
             resolvedTaskId?.let { updateTaskStatusWithError(it, "failed", e.message ?: "Conversion failed") }
             errorCallback?.invoke(asin, title, e.message ?: "Conversion failed")
+        } finally {
+            cancelledConversions.remove(asin)
+            activeFfmpegSessions.remove(asin)
         }
     }
 
@@ -1019,15 +1052,18 @@ class DownloadOrchestrator(
                 else -> "audio/*"
             }
 
-            // Navigate/create subdirectories
+            // Navigate/create subdirectories, remembering which ones we created so a
+            // cancelled copy can remove them (but never a pre-existing folder).
+            val createdDirs = mutableListOf<DocumentFile>()
             var currentDir = docDir
             for (dirName in directories) {
                 val existing = currentDir.findFile(dirName)
                 currentDir = if (existing != null && existing.isDirectory) {
                     existing
                 } else {
-                    currentDir.createDirectory(dirName)
-                        ?: throw Exception("Failed to create directory: $dirName")
+                    (currentDir.createDirectory(dirName)
+                        ?: throw Exception("Failed to create directory: $dirName"))
+                        .also { createdDirs.add(it) }
                 }
             }
 
@@ -1043,13 +1079,23 @@ class DownloadOrchestrator(
 
             // Copy (with progress + ETA — large M4B over SAF is slow)
             val totalBytes = cachedFile.length()
-            context.contentResolver.openOutputStream(outputFile.uri)?.use { outputStream ->
-                cachedFile.inputStream().use { inputStream ->
-                    copyStreamWithProgress(inputStream, outputStream, totalBytes) { pct, eta ->
-                        progressCallback?.invoke(asin, "copying", pct.toDouble(), 0, 0, eta.toLong())
+            try {
+                context.contentResolver.openOutputStream(outputFile.uri)?.use { outputStream ->
+                    cachedFile.inputStream().use { inputStream ->
+                        copyStreamWithProgress(inputStream, outputStream, totalBytes, { asin in cancelledConversions }) { pct, eta ->
+                            progressCallback?.invoke(asin, "copying", pct.toDouble(), 0, 0, eta.toLong())
+                        }
                     }
+                } ?: throw Exception("Failed to open output stream")
+            } catch (e: Exception) {
+                // Cancel or failure mid-copy: remove the partial file and any folders we
+                // created for it, so it isn't found + relinked by a later library scan.
+                runCatching { outputFile.delete() }
+                createdDirs.asReversed().forEach { dir ->
+                    runCatching { if (dir.listFiles().isEmpty()) dir.delete() }
                 }
-            } ?: throw Exception("Failed to open output stream")
+                throw e
+            }
 
             finalPath = outputFile.uri.toString()
 
@@ -1408,6 +1454,20 @@ class DownloadOrchestrator(
     }
 
     /**
+     * Abort an in-flight conversion (decrypt / validate / copy) for a book. Marks it
+     * cancelled (checked by the copy loop and between validation samples) and cancels
+     * its running FFmpeg session so a long decrypt stops promptly. Safe to call when no
+     * conversion is running.
+     */
+    fun abortConversion(asin: String) {
+        cancelledConversions.add(asin)
+        activeFfmpegSessions[asin]?.let {
+            com.arthenica.ffmpegkit.FFmpegKit.cancel(it)
+            Log.d(TAG, "Cancelled FFmpeg session $it for $asin")
+        }
+    }
+
+    /**
      * Shutdown orchestrator
      */
     fun shutdown() {
@@ -1627,6 +1687,7 @@ class DownloadOrchestrator(
             try {
                 // Step 3: Check each sample point for errors
                 for ((index, timestamp) in effectiveSamplePoints.withIndex()) {
+                    if (asin in cancelledConversions) throw kotlinx.coroutines.CancellationException("Validation cancelled by user")
                     sampleStartMs.set(System.currentTimeMillis())
                     val command = "-v error -ss $timestamp -i \"$filePath\" -t $testDuration -f null -"
 
@@ -1762,17 +1823,26 @@ class DownloadOrchestrator(
                 return@withContext false
             }
 
-            // Check if encrypted file still exists
+            // Check if the encrypted file still exists. The extension varies — AAXC
+            // downloads are ".aaxc", legacy AAX is ".aax" — so accept whichever is present
+            // (the previous hard-coded ".aax" meant AAXC retries always failed).
             val cacheDir = context.cacheDir
             val audiobooksDir = File(cacheDir, "audiobooks")
-            val encryptedPath = File(audiobooksDir, "$asin.aax").absolutePath
             val decryptedCachePath = File(audiobooksDir, "$asin.m4b").absolutePath
+            val encryptedFile = listOf("aaxc", "aax", "aa")
+                .map { File(audiobooksDir, "$asin.$it") }
+                .firstOrNull { it.exists() }
 
-            if (!File(encryptedPath).exists()) {
-                Log.e(TAG, "Encrypted file not found for retry: $encryptedPath")
-                updateTaskStatusWithError(taskId, "failed", "Cached file not found - re-download required")
+            if (encryptedFile == null) {
+                // No cached source left (validation failure deletes it): a retry can never
+                // succeed. Mark cancelled instead of failed so the library shows the
+                // download button again — failed + stored keys would keep showing a retry
+                // button that loops forever.
+                Log.e(TAG, "Encrypted file not found for retry: $asin (aaxc/aax) - resetting for re-download")
+                updateTaskStatusInDb(taskId, "cancelled")
                 return@withContext false
             }
+            val encryptedPath = encryptedFile.absolutePath
 
             // Delete any corrupt decrypted file from previous attempt
             File(decryptedCachePath).delete()

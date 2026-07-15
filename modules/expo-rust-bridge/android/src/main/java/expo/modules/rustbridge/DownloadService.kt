@@ -124,6 +124,19 @@ class DownloadService : Service() {
         }
 
         /**
+         * Clean up a book by ASIN: cancel its notification, drop it from the active and
+         * pending (sequential) queues, and advance the queue. Used by the in-app cancel /
+         * remove-from-queue actions so they get the same cleanup as the notification cancel.
+         */
+        fun stopDownloadMonitoring(context: Context, asin: String) {
+            val intent = Intent(context, DownloadService::class.java).apply {
+                action = ACTION_STOP_MONITORING
+                putExtra("asin", asin)
+            }
+            context.startService(intent)
+        }
+
+        /**
          * Retry conversion for a failed download
          */
         fun retryConversion(context: Context, dbPath: String, asin: String) {
@@ -208,7 +221,7 @@ class DownloadService : Service() {
                     eta = if (etaSeconds > 0) formatEta(etaSeconds) else null
                 )
                 notificationManager.showProgress(progress)
-                notificationManager.showSummary(activeDownloads.size)
+                refreshSummary()
             }
         }
 
@@ -296,21 +309,49 @@ class DownloadService : Service() {
         return result
     }
 
+    // Sequential mode holds not-yet-started downloads here until the current one ends.
+    private data class Pending(val asin: String, val title: String, val start: () -> Unit)
+    private val pendingDownloads = java.util.concurrent.ConcurrentLinkedQueue<Pending>()
+
+    private fun downloadMode(): String =
+        getSharedPreferences("app_settings", Context.MODE_PRIVATE)
+            .getString("download_mode", "parallel") ?: "parallel"
+
+    /** Start now, or (sequential mode with one already running) hold until a slot frees. */
+    private fun dispatchDownload(asin: String, title: String, start: () -> Unit) {
+        if (downloadMode() == "sequential" && activeDownloads.isNotEmpty()) {
+            pendingDownloads.add(Pending(asin, title, start))
+            // Surface the queued book to the UI so it can't be re-selected.
+            StageProgressStore.update(asin, "queued", 0, 0)
+            Log.d(TAG, "Sequential mode: holding $asin (${pendingDownloads.size} pending)")
+            refreshSummary()
+        } else {
+            start()
+        }
+    }
+
+    private fun refreshSummary() {
+        notificationManager.showSummary(activeDownloads.size, pendingDownloads.map { it.title })
+    }
+
     private fun onActiveDownloadsChanged() {
         if (activeDownloads.isEmpty()) {
-            // No user-initiated downloads remain, so clear the "Downloading N" summary.
-            // It uses NOTIFICATION_ID, which is also the foreground-service notification,
-            // so NotificationManager.cancel() is ignored while foregrounded — it only goes
-            // away via stopForeground(REMOVE). checkAndStopServiceIfIdle() does that only
-            // when Rust reports zero active tasks, but the just-completed task can still
-            // read as active (a race), leaving a stale summary. Detach foreground here so
-            // it clears immediately; a later enqueue re-establishes foreground via
-            // onStartCommand. cancelSummary() then covers the non-foreground case.
-            stopForegroundCompat()
-            notificationManager.cancelSummary()
-            checkAndStopServiceIfIdle()
+            val next = pendingDownloads.poll()
+            if (next != null) {
+                StageProgressStore.clear(next.asin) // progress will re-populate once it starts
+                next.start()                        // sequential mode: start the next held download
+            } else {
+                // No downloads remain, so clear the "Downloading N" summary. It uses
+                // NOTIFICATION_ID, which is also the foreground-service notification, so
+                // NotificationManager.cancel() is ignored while foregrounded — it only goes
+                // away via stopForeground(REMOVE). Detach foreground here so it clears
+                // immediately; a later enqueue re-establishes it via onStartCommand.
+                stopForegroundCompat()
+                notificationManager.cancelSummary()
+                checkAndStopServiceIfIdle()
+            }
         } else {
-            notificationManager.showSummary(activeDownloads.size)
+            refreshSummary()
         }
     }
 
@@ -363,9 +404,10 @@ class DownloadService : Service() {
 
         Log.d(TAG, "Enqueueing download via orchestrator: $asin - $title")
 
+        dispatchDownload(asin, title) {
         // Track this download for its own per-book notification (concurrent-safe).
         activeDownloads[asin] = DownloadInfo(asin = asin, title = title, author = null, totalBytes = 0)
-        notificationManager.showSummary(activeDownloads.size)
+        refreshSummary()
 
         // Use service scope to call suspend function
         serviceScope.launch {
@@ -378,6 +420,7 @@ class DownloadService : Service() {
                 notificationManager.showError(asin, download?.title ?: title, download?.author, e.message ?: "Unknown error")
                 onActiveDownloadsChanged()
             }
+        }
         }
     }
 
@@ -454,8 +497,9 @@ class DownloadService : Service() {
 
         Log.d(TAG, "Enqueueing LibriVox download: $asin - $title")
 
+        dispatchDownload(asin, title) {
         activeDownloads[asin] = DownloadInfo(asin = asin, title = title, author = author, totalBytes = 0)
-        notificationManager.showSummary(activeDownloads.size)
+        refreshSummary()
 
         serviceScope.launch {
             try {
@@ -468,6 +512,7 @@ class DownloadService : Service() {
                 onActiveDownloadsChanged()
             }
         }
+        }
     }
 
     private fun handleStopMonitoring(intent: Intent) {
@@ -475,8 +520,10 @@ class DownloadService : Service() {
         Log.d(TAG, "Stopping monitoring for: $asin")
         orchestrator.stopMonitoring(asin)
 
-        // A per-book cancel routes here: drop it and clear only its notification.
+        // A per-book cancel/remove routes here: drop it from active AND from the
+        // sequential pending queue, and clear only its notification.
         activeDownloads.remove(asin)
+        pendingDownloads.removeAll { it.asin == asin }
         lastSpeed.remove(asin)
         StageProgressStore.clear(asin)
         notificationManager.cancelForAsin(asin)

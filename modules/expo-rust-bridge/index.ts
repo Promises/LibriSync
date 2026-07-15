@@ -693,6 +693,12 @@ export interface ExpoRustBridgeModule {
    */
   cancelDownload(dbPath: string, taskId: string): RustResponse<{ success: boolean }>;
 
+  /**
+   * Clean up a book's download by ASIN: cancel its notification, remove it from the
+   * active and pending (sequential) queues, and advance the queue.
+   */
+  stopDownloadMonitoring(asin: string): RustResponse<{}>;
+
   // --------------------------------------------------------------------------
   // Background Task Manager (New System)
   // --------------------------------------------------------------------------
@@ -974,6 +980,20 @@ export interface ExpoRustBridgeModule {
    * @returns Current setting
    */
   getSmartPlayerCover(): RustResponse<{ enabled: boolean }>;
+
+  /**
+   * Set concurrent-download mode.
+   *
+   * @param mode - "parallel" (up to the native limit) or "sequential" (one at a time)
+   */
+  setDownloadMode(mode: string): RustResponse<{}>;
+
+  /**
+   * Get concurrent-download mode preference.
+   *
+   * @returns Current download mode
+   */
+  getDownloadMode(): RustResponse<{ mode: string }>;
 
   /**
    * Set audio validation depth after download.
@@ -1677,6 +1697,10 @@ function resumeDownload(dbPath: string, taskId: string): void {
  * @param dbPath - Path to database file
  * @param taskId - Task ID to cancel
  */
+function stopDownloadMonitoring(asin: string): void {
+  NativeModule!.stopDownloadMonitoring(asin);
+}
+
 function cancelDownload(dbPath: string, taskId: string): void {
   const response = NativeModule!.cancelDownload(dbPath, taskId);
   unwrapResult(response);
@@ -2364,6 +2388,7 @@ export {
   pauseDownload,
   resumeDownload,
   cancelDownload,
+  stopDownloadMonitoring,
   // Background Task Manager (New System)
   startBackgroundService,
   stopBackgroundService,

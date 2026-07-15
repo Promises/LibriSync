@@ -35,6 +35,7 @@ type SyncFrequency = 'manual' | '1h' | '6h' | '12h' | '24h';
 type NamingPattern = 'flat_file' | 'author_book_folder' | 'author_series_book';
 type PodcastNamingPattern = 'podcast_episode_folder' | 'podcast_flat_file';
 type ValidationLevel = 'full' | 'quick' | 'off';
+type DownloadMode = 'parallel' | 'sequential';
 
 export default function SettingsScreen() {
   const styles = useStyles(createStyles);
@@ -45,6 +46,7 @@ export default function SettingsScreen() {
   const [podcastNamingPattern, setPodcastNamingPattern] = useState<PodcastNamingPattern>('podcast_episode_folder');
   const [smartPlayerCover, setSmartPlayerCover] = useState(false);
   const [validationLevel, setValidationLevel] = useState<ValidationLevel>('full');
+  const [downloadMode, setDownloadMode] = useState<DownloadMode>('parallel');
   const [isLoading, setIsLoading] = useState(true);
 
   // Sync settings
@@ -97,11 +99,12 @@ export default function SettingsScreen() {
       // Load naming pattern and Smart Player cover from native SharedPreferences
       if (Platform.OS === 'android') {
         try {
-          const [namingResult, podcastNamingResult, coverResult, validationResult] = await Promise.all([
+          const [namingResult, podcastNamingResult, coverResult, validationResult, downloadModeResult] = await Promise.all([
             ExpoRustBridge.getNamingPattern(),
             ExpoRustBridge.getPodcastNamingPattern(),
             ExpoRustBridge.getSmartPlayerCover(),
             ExpoRustBridge.getValidationLevel(),
+            ExpoRustBridge.getDownloadMode(),
           ]);
 
           if (namingResult.success && namingResult.data) {
@@ -118,6 +121,10 @@ export default function SettingsScreen() {
 
           if (validationResult.success && validationResult.data) {
             setValidationLevel((validationResult.data as any).level as ValidationLevel);
+          }
+
+          if (downloadModeResult.success && downloadModeResult.data) {
+            setDownloadMode((downloadModeResult.data as any).mode as DownloadMode);
           }
         } catch (error) {
           console.error('[Settings] Failed to load native preferences:', error);
@@ -400,6 +407,36 @@ export default function SettingsScreen() {
     }
   };
 
+  const getDownloadModeLabel = (mode: DownloadMode): string => {
+    switch (mode) {
+      case 'parallel': return 'Parallel';
+      case 'sequential': return 'One at a time';
+    }
+  };
+
+  const handleDownloadModePress = () => {
+    Alert.alert(
+      'Download Mode',
+      'How simultaneous downloads run.',
+      [
+        { text: 'Parallel', onPress: () => handleDownloadModeChange('parallel') },
+        { text: 'One at a time', onPress: () => handleDownloadModeChange('sequential') },
+        { text: 'Cancel', style: 'cancel' },
+      ]
+    );
+  };
+
+  const handleDownloadModeChange = async (value: DownloadMode) => {
+    setDownloadMode(value);
+    try {
+      await ExpoRustBridge.setDownloadMode(value);
+      console.log(`[Settings] Download mode changed to: ${value}`);
+    } catch (error: any) {
+      console.error('[Settings] Failed to save download mode:', error);
+      Alert.alert('Error', error.message || 'Failed to update download mode');
+    }
+  };
+
   const getPodcastNamingPatternLabel = (pattern: PodcastNamingPattern): string => {
     switch (pattern) {
       case 'podcast_episode_folder': return 'Episode Folder';
@@ -669,6 +706,22 @@ export default function SettingsScreen() {
               disabled={isLoading}
             >
               <Text style={styles.buttonText}>{getValidationLevelLabel(validationLevel)}</Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.settingItem}>
+            <View style={styles.settingInfo}>
+              <Text style={styles.settingLabel}>Download Mode</Text>
+              <Text style={styles.settingDescription}>
+                Run simultaneous downloads in parallel, or one at a time.
+              </Text>
+            </View>
+            <TouchableOpacity
+              style={styles.button}
+              onPress={handleDownloadModePress}
+              disabled={isLoading}
+            >
+              <Text style={styles.buttonText}>{getDownloadModeLabel(downloadMode)}</Text>
             </TouchableOpacity>
           </View>
 

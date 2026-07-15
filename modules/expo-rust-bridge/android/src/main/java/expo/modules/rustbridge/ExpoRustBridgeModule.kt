@@ -637,6 +637,20 @@ class ExpoRustBridgeModule : Module() {
       parseJsonResponse(nativeCancelDownload(params.toString()))
     }
 
+    /**
+     * Clean up a book's download by ASIN (notification, active + pending queues, queue
+     * advance). Complements cancelDownload, which only cancels the native Rust task.
+     */
+    Function("stopDownloadMonitoring") { asin: String ->
+      try {
+        val context = appContext.reactContext ?: throw Exception("Context not available")
+        DownloadService.stopDownloadMonitoring(context, asin)
+        mapOf("success" to true)
+      } catch (e: Exception) {
+        mapOf("success" to false, "error" to e.message)
+      }
+    }
+
     // ============================================================================
     // BACKGROUND TASK MANAGER FUNCTIONS (New System)
     // ============================================================================
@@ -1494,6 +1508,28 @@ class ExpoRustBridgeModule : Module() {
         val pattern = prefs.getString("podcast_naming_pattern", "podcast_episode_folder")
           ?: "podcast_episode_folder"
         mapOf("success" to true, "data" to mapOf("pattern" to pattern))
+      } catch (e: Exception) {
+        mapOf("success" to false, "error" to e.message)
+      }
+    }
+
+    Function("setDownloadMode") { mode: String ->
+      try {
+        val context = appContext.reactContext ?: throw Exception("Context not available")
+        val prefs = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
+        prefs.edit().putString("download_mode", mode).apply()
+        mapOf("success" to true)
+      } catch (e: Exception) {
+        mapOf("success" to false, "error" to e.message)
+      }
+    }
+
+    Function("getDownloadMode") {
+      try {
+        val context = appContext.reactContext ?: throw Exception("Context not available")
+        val prefs = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
+        val mode = prefs.getString("download_mode", "parallel") ?: "parallel"
+        mapOf("success" to true, "data" to mapOf("mode" to mode))
       } catch (e: Exception) {
         mapOf("success" to false, "error" to e.message)
       }

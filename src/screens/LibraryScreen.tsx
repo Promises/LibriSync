@@ -20,6 +20,7 @@ import {
     pauseDownload,
     resumeDownload,
     cancelDownload,
+    stopDownloadMonitoring,
     retryConversion,
     getBookFilePath,
     clearBookDownloadState,
@@ -842,6 +843,13 @@ export default function LibraryScreen() {
         // Stage percentage + ETA come from the live store; the stage itself is the DB
         // task status (both foreground and auto-download persist it to the DB row).
         const sp = stageProgress[book.audible_product_id];
+
+        // Sequential-mode queued books have no DB task yet; surface them so they read
+        // as queued instead of available and can't be accidentally re-selected.
+        if (sp && sp.stage === 'queued') {
+            return {text: '⏳ Queued', color: colors.textSecondary};
+        }
+
         const task = downloadTasks.get(book.audible_product_id);
 
         if (task) {
@@ -935,6 +943,13 @@ export default function LibraryScreen() {
     };
 
     const handleDownload = async (book: Book) => {
+        // Guard against re-selecting a book that is already downloading or queued.
+        const existingStage = stageProgress[book.audible_product_id];
+        const existingTask = downloadTasks.get(book.audible_product_id);
+        if (existingStage || (existingTask && existingTask.status !== 'completed' && existingTask.status !== 'failed')) {
+            Alert.alert('Already in Progress', `"${book.title}" is already downloading or queued.`);
+            return;
+        }
         try {
             // Demo mode: real LibriVox MP3 download to the app sandbox (no SAF dir,
             // no DRM, no native pipeline). Progress shows through the same UI.
@@ -1132,25 +1147,30 @@ export default function LibraryScreen() {
             }
 
             const dbPath = getDatabasePath();
-
             const task = downloadTasks.get(book.audible_product_id);
-            if (task) {
-                Alert.alert(
-                    'Cancel Download',
-                    `Are you sure you want to cancel downloading "${book.title}"?`,
-                    [
-                        { text: 'No', style: 'cancel' },
-                        {
-                            text: 'Yes',
-                            style: 'destructive',
-                            onPress: () => {
-                                cancelDownload(dbPath, task.task_id);
-                                console.log('[LibraryScreen] Cancelled download:', book.title);
-                            }
+            const isQueued = stageProgress[book.audible_product_id]?.stage === 'queued';
+
+            Alert.alert(
+                isQueued ? 'Remove from Queue' : 'Cancel Download',
+                isQueued
+                    ? `Remove "${book.title}" from the download queue?`
+                    : `Are you sure you want to cancel downloading "${book.title}"?`,
+                [
+                    { text: 'No', style: 'cancel' },
+                    {
+                        text: 'Yes',
+                        style: 'destructive',
+                        onPress: () => {
+                            // Cancel the native task if it is already running, then run the
+                            // service-side cleanup (notification, active + pending queue,
+                            // advance) which also removes a still-queued book.
+                            if (task) cancelDownload(dbPath, task.task_id);
+                            stopDownloadMonitoring(book.audible_product_id);
+                            console.log('[LibraryScreen] Cancelled/removed download:', book.title);
                         }
-                    ]
-                );
-            }
+                    }
+                ]
+            );
         } catch (error) {
             console.error('[LibraryScreen] Cancel error:', error);
         }
@@ -1367,13 +1387,15 @@ export default function LibraryScreen() {
             : (item.authors?.length || 0) > 0 ? item.authors.join(', ') : 'Unknown Author';
         const coverUrl = getCoverUrl(item);
         const task = downloadTasks.get(item.audible_product_id);
+        // Sequential-mode queued books have no DB task; they are queued only in the store.
+        const isSpQueued = stageProgress[item.audible_product_id]?.stage === 'queued';
         const isDownloaded = !!item.file_path || task?.status === 'completed';
         const isProcessing = task?.status === 'decrypting' || task?.status === 'validating' || task?.status === 'copying';
         const canRetryConversion = task?.status === 'failed' && !!task.aaxc_key;
-        const canDownload = item.is_downloadable !== false && (!task || (task.status === 'failed' && !canRetryConversion));
+        const canDownload = item.is_downloadable !== false && (!task || (task.status === 'failed' && !canRetryConversion)) && !isSpQueued;
         const isDownloading = task?.status === 'downloading';
         const isPaused = task?.status === 'paused';
-        const isQueued = task?.status === 'queued';
+        const isQueued = task?.status === 'queued' || isSpQueued;
 
         return (
             <TouchableOpacity

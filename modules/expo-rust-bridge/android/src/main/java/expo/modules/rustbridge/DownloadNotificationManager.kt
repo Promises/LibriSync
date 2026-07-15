@@ -339,8 +339,18 @@ class DownloadNotificationManager(private val context: Context) {
      * Update the ongoing foreground-anchor notification (id NOTIFICATION_ID) with the
      * count of active downloads. Per-book detail lives in the per-ASIN notifications.
      */
-    fun showSummary(activeCount: Int) {
-        val text = if (activeCount == 1) "Downloading 1 audiobook" else "Downloading $activeCount audiobooks"
+    fun showSummary(activeCount: Int, queuedTitles: List<String> = emptyList()) {
+        val text = buildString {
+            append(if (activeCount == 1) "Downloading 1 audiobook" else "Downloading $activeCount audiobooks")
+            if (queuedTitles.isNotEmpty()) append(" • ${queuedTitles.size} queued")
+        }
+        val bigText = buildString {
+            append(text)
+            if (queuedTitles.isNotEmpty()) {
+                append("\n\nQueued:")
+                queuedTitles.forEach { append("\n• $it") }
+            }
+        }
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setContentTitle("LibriSync")
             .setContentText(text)
@@ -348,6 +358,7 @@ class DownloadNotificationManager(private val context: Context) {
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setOnlyAlertOnce(true)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(bigText))
             .build()
         notificationManager.notify(NOTIFICATION_ID, notification)
     }

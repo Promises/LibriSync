@@ -167,7 +167,11 @@ class DownloadService : Service() {
     private var isForeground = false
 
     // Track current download info for notifications
-    private var currentDownload: DownloadInfo? = null
+    // All in-flight downloads, keyed by ASIN (supports concurrent downloads).
+    private val activeDownloads = java.util.concurrent.ConcurrentHashMap<String, DownloadInfo>()
+
+    // Per-ASIN last (bytes, timeMs) for deriving download speed between progress ticks.
+    private val lastSpeed = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, Long>>()
 
     data class DownloadInfo(
         val asin: String,
@@ -187,35 +191,41 @@ class DownloadService : Service() {
         notificationManager = DownloadNotificationManager(applicationContext)
 
         // Set up orchestrator callbacks
-        orchestrator.setProgressCallback { asin, stage, percentage, bytesDownloaded, totalBytes ->
-            currentDownload?.let { download ->
+        orchestrator.setProgressCallback { asin, stage, percentage, bytesDownloaded, totalBytes, etaSeconds ->
+            // Expose stage percentage + ETA to the JS UI (LibraryScreen polls this).
+            StageProgressStore.update(asin, stage, percentage.toInt(), etaSeconds)
+            val speedStr = if (stage == "downloading") computeDownloadSpeed(asin, bytesDownloaded) else null
+            activeDownloads[asin]?.let { download ->
                 val progress = DownloadNotificationManager.DownloadProgress(
-                    asin = download.asin,
+                    asin = asin,
                     title = download.title,
                     author = download.author,
                     stage = stage,
                     percentage = percentage.toInt(),
                     bytesDownloaded = bytesDownloaded,
-                    totalBytes = totalBytes
+                    totalBytes = totalBytes,
+                    speed = speedStr,
+                    eta = if (etaSeconds > 0) formatEta(etaSeconds) else null
                 )
                 notificationManager.showProgress(progress)
+                notificationManager.showSummary(activeDownloads.size)
             }
         }
 
         orchestrator.setCompletionCallback { asin, title, outputPath ->
-            currentDownload?.let { download ->
-                notificationManager.showCompletion(download.title, download.author, outputPath)
-            }
-            currentDownload = null
-            checkAndStopServiceIfIdle()
+            StageProgressStore.clear(asin)
+            val download = activeDownloads.remove(asin)
+            notificationManager.showCompletion(asin, download?.title ?: title, download?.author, outputPath)
+            lastSpeed.remove(asin)
+            onActiveDownloadsChanged()
         }
 
         orchestrator.setErrorCallback { asin, title, error ->
-            currentDownload?.let { download ->
-                notificationManager.showError(download.title, download.author, error)
-            }
-            currentDownload = null
-            checkAndStopServiceIfIdle()
+            StageProgressStore.clear(asin)
+            val download = activeDownloads.remove(asin)
+            notificationManager.showError(asin, download?.title ?: title, download?.author, error)
+            lastSpeed.remove(asin)
+            onActiveDownloadsChanged()
         }
     }
 
@@ -274,6 +284,38 @@ class DownloadService : Service() {
         return action == ACTION_ENQUEUE_DOWNLOAD || action == ACTION_RETRY_CONVERSION || action == ACTION_ENQUEUE_LIBRIVOX
     }
 
+    private fun computeDownloadSpeed(asin: String, bytesDownloaded: Long): String? {
+        val now = System.currentTimeMillis()
+        val prev = lastSpeed[asin]
+        val result = if (prev != null && now > prev.second && bytesDownloaded >= prev.first) {
+            val bps = (bytesDownloaded - prev.first) * 1000.0 / (now - prev.second)
+            val mb = bps / (1024.0 * 1024.0)
+            if (mb >= 1.0) "%.1f MB/s".format(mb) else "%.0f KB/s".format(bps / 1024.0)
+        } else null
+        lastSpeed[asin] = bytesDownloaded to now
+        return result
+    }
+
+    private fun onActiveDownloadsChanged() {
+        if (activeDownloads.isEmpty()) {
+            // stopForeground(REMOVE) clears the anchor notification when truly idle.
+            checkAndStopServiceIfIdle()
+        } else {
+            notificationManager.showSummary(activeDownloads.size)
+        }
+    }
+
+    private fun formatEta(seconds: Long): String {
+        val h = seconds / 3600
+        val m = (seconds % 3600) / 60
+        val s = seconds % 60
+        return when {
+            h > 0 -> "~${h}h ${m}m remaining"
+            m > 0 -> "~${m}m ${s}s remaining"
+            else -> "~${s}s remaining"
+        }
+    }
+
     private fun startDataSyncForeground(notification: Notification) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
@@ -312,13 +354,9 @@ class DownloadService : Service() {
 
         Log.d(TAG, "Enqueueing download via orchestrator: $asin - $title")
 
-        // Store current download info for notifications
-        currentDownload = DownloadInfo(
-            asin = asin,
-            title = title,
-            author = null, // TODO: Pass author from intent
-            totalBytes = 0
-        )
+        // Track this download for its own per-book notification (concurrent-safe).
+        activeDownloads[asin] = DownloadInfo(asin = asin, title = title, author = null, totalBytes = 0)
+        notificationManager.showSummary(activeDownloads.size)
 
         // Use service scope to call suspend function
         serviceScope.launch {
@@ -327,10 +365,9 @@ class DownloadService : Service() {
                 Log.d(TAG, "Book enqueued successfully: $asin")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to enqueue book", e)
-                currentDownload?.let { download ->
-                    notificationManager.showError(download.title, download.author, e.message ?: "Unknown error")
-                }
-                currentDownload = null
+                val download = activeDownloads.remove(asin)
+                notificationManager.showError(asin, download?.title ?: title, download?.author, e.message ?: "Unknown error")
+                onActiveDownloadsChanged()
             }
         }
     }
@@ -408,12 +445,8 @@ class DownloadService : Service() {
 
         Log.d(TAG, "Enqueueing LibriVox download: $asin - $title")
 
-        currentDownload = DownloadInfo(
-            asin = asin,
-            title = title,
-            author = author,
-            totalBytes = 0
-        )
+        activeDownloads[asin] = DownloadInfo(asin = asin, title = title, author = author, totalBytes = 0)
+        notificationManager.showSummary(activeDownloads.size)
 
         serviceScope.launch {
             try {
@@ -421,10 +454,9 @@ class DownloadService : Service() {
                 Log.d(TAG, "LibriVox book enqueued successfully: $asin")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to enqueue LibriVox book", e)
-                currentDownload?.let { download ->
-                    notificationManager.showError(download.title, download.author, e.message ?: "Unknown error")
-                }
-                currentDownload = null
+                val download = activeDownloads.remove(asin)
+                notificationManager.showError(asin, download?.title ?: title, download?.author, e.message ?: "Unknown error")
+                onActiveDownloadsChanged()
             }
         }
     }
@@ -434,8 +466,15 @@ class DownloadService : Service() {
         Log.d(TAG, "Stopping monitoring for: $asin")
         orchestrator.stopMonitoring(asin)
 
-        // Check if there are any active downloads left
-        checkAndStopServiceIfIdle()
+        // A per-book cancel routes here: drop it and clear only its notification.
+        activeDownloads.remove(asin)
+        lastSpeed.remove(asin)
+        StageProgressStore.clear(asin)
+        notificationManager.cancelForAsin(asin)
+        // Cancelling frees a Rust concurrency slot; start the next queued download
+        // (only completion did this before, so a cancelled slot left the queue stuck).
+        orchestrator.kickDownloadQueue()
+        onActiveDownloadsChanged()
     }
 
     /**

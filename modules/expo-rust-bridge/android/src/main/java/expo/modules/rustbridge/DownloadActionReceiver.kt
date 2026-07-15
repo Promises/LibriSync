@@ -177,7 +177,7 @@ class DownloadActionReceiver : BroadcastReceiver() {
                         // The progress notification will be shown automatically by orchestrator
                         // Just cancel the paused notification
                         val notificationManager = DownloadNotificationManager(context)
-                        notificationManager.cancelAll()
+                        asin?.let { notificationManager.cancelForAsin(it) }
                     } else {
                         Log.e(TAG, "Failed to resume: ${resumeParsed["error"]}")
                     }
@@ -234,7 +234,7 @@ class DownloadActionReceiver : BroadcastReceiver() {
 
                         // Cancel all notifications
                         val notificationManager = DownloadNotificationManager(context)
-                        notificationManager.cancelAll()
+                        asin?.let { notificationManager.cancelForAsin(it) }
                         Log.d(TAG, "Cleared all notifications for cancelled download")
                     } else {
                         Log.e(TAG, "Failed to cancel: ${cancelParsed["error"]}")

@@ -583,6 +583,16 @@ class ExpoRustBridgeModule : Module() {
     }
 
     /**
+     * Live per-ASIN stage progress (decrypting/validating/copying) + ETA for the
+     * foreground download pipeline. Returns a JSON string:
+     *   { "<asin>": { "stage": String, "percentage": Int, "eta_seconds": Long } }
+     * Complements listDownloadTasks, whose DB rows lack stage percentage and ETA.
+     */
+    Function("getStageProgress") {
+      StageProgressStore.snapshotJson()
+    }
+
+    /**
      * Pause a download.
      *
      * @param dbPath Path to SQLite database
@@ -1484,6 +1494,28 @@ class ExpoRustBridgeModule : Module() {
         val pattern = prefs.getString("podcast_naming_pattern", "podcast_episode_folder")
           ?: "podcast_episode_folder"
         mapOf("success" to true, "data" to mapOf("pattern" to pattern))
+      } catch (e: Exception) {
+        mapOf("success" to false, "error" to e.message)
+      }
+    }
+
+    Function("setValidationLevel") { level: String ->
+      try {
+        val context = appContext.reactContext ?: throw Exception("Context not available")
+        val prefs = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
+        prefs.edit().putString("validation_level", level).apply()
+        mapOf("success" to true)
+      } catch (e: Exception) {
+        mapOf("success" to false, "error" to e.message)
+      }
+    }
+
+    Function("getValidationLevel") {
+      try {
+        val context = appContext.reactContext ?: throw Exception("Context not available")
+        val prefs = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
+        val level = prefs.getString("validation_level", "full") ?: "full"
+        mapOf("success" to true, "data" to mapOf("level" to level))
       } catch (e: Exception) {
         mapOf("success" to false, "error" to e.message)
       }

@@ -16,6 +16,7 @@ import {
     refreshToken,
     enqueueDownloadNew,
     listDownloadTasks,
+    getStageProgress,
     pauseDownload,
     resumeDownload,
     cancelDownload,
@@ -31,7 +32,7 @@ import {
     downloadLibrivoxFile,
     copyTextToClipboard,
 } from '../../modules/expo-rust-bridge';
-import type {Book, Account, DownloadTask} from '../../modules/expo-rust-bridge';
+import type {Book, Account, DownloadTask, StageProgress} from '../../modules/expo-rust-bridge';
 import * as SecureStore from 'expo-secure-store';
 import * as DocumentPicker from 'expo-document-picker';
 import {Directory, Paths} from 'expo-file-system';
@@ -91,6 +92,9 @@ export default function LibraryScreen() {
 
     // Download tracking
     const [downloadTasks, setDownloadTasks] = useState<Map<string, DownloadTask>>(new Map());
+    const [stageProgress, setStageProgress] = useState<Record<string, StageProgress>>({});
+    const [downloadSpeeds, setDownloadSpeeds] = useState<Record<string, number>>({}); // bytes/sec
+    const prevBytesRef = useRef<Map<string, {bytes: number; time: number}>>(new Map());
     const progressInterval = useRef<NodeJS.Timeout | null>(null);
 
     // Search, filter, and sort state
@@ -209,6 +213,24 @@ export default function LibraryScreen() {
                 });
 
                 setDownloadTasks(taskMap);
+                setStageProgress(getStageProgress());
+
+                // Derive download speed (bytes/sec) from the change in bytes between polls.
+                const now = Date.now();
+                const speeds: Record<string, number> = {};
+                const prev = prevBytesRef.current;
+                const nextPrev = new Map<string, {bytes: number; time: number}>();
+                taskMap.forEach((task, asin) => {
+                    if (task.status === 'downloading') {
+                        const p = prev.get(asin);
+                        if (p && now > p.time && task.bytes_downloaded >= p.bytes) {
+                            speeds[asin] = ((task.bytes_downloaded - p.bytes) * 1000) / (now - p.time);
+                        }
+                        nextPrev.set(asin, {bytes: task.bytes_downloaded, time: now});
+                    }
+                });
+                prevBytesRef.current = nextPrev;
+                setDownloadSpeeds(speeds);
             } catch (error) {
                 console.error('[LibraryScreen] Error polling progress:', error);
             }
@@ -799,7 +821,27 @@ export default function LibraryScreen() {
         return book.cover_url.replace(/_SL\d+_/, '_SL150_');
     };
 
+    const formatEtaShort = (sec: number): string => {
+        if (!sec || sec <= 0) return '';
+        const h = Math.floor(sec / 3600);
+        const m = Math.floor((sec % 3600) / 60);
+        const s = Math.floor(sec % 60);
+        if (h > 0) return `~${h}h ${m}m`;
+        if (m > 0) return `~${m}m ${s}s`;
+        return `~${s}s`;
+    };
+
+    const formatSpeed = (bytesPerSec: number): string => {
+        if (!bytesPerSec || bytesPerSec <= 0) return '';
+        const mb = bytesPerSec / (1024 * 1024);
+        if (mb >= 1) return `${mb.toFixed(1)} MB/s`;
+        return `${(bytesPerSec / 1024).toFixed(0)} KB/s`;
+    };
+
     const getStatus = (book: Book): { text: string; color: string } => {
+        // Stage percentage + ETA come from the live store; the stage itself is the DB
+        // task status (both foreground and auto-download persist it to the DB row).
+        const sp = stageProgress[book.audible_product_id];
         const task = downloadTasks.get(book.audible_product_id);
 
         if (task) {
@@ -807,19 +849,25 @@ export default function LibraryScreen() {
                 ? ((task.bytes_downloaded / task.total_bytes) * 100).toFixed(1)
                 : '0.0';
 
+            const etaText = sp ? formatEtaShort(sp.eta_seconds) : '';
+            const etaSuffix = etaText ? ` · ${etaText}` : '';
+            const stagePct = sp ? Math.round(sp.percentage) : 0;
+            const speedText = formatSpeed(downloadSpeeds[book.audible_product_id]);
+            const speedSuffix = speedText ? ` · ${speedText}` : '';
+
             switch (task.status) {
                 case 'queued':
                     return {text: '⏳ Queued', color: colors.textSecondary};
                 case 'downloading':
-                    return {text: `⬇ ${percentage}%`, color: colors.info};
+                    return {text: `⬇ ${percentage}%${speedSuffix}${etaSuffix}`, color: colors.info};
                 case 'paused':
                     return {text: `⏸ Paused ${percentage}%`, color: colors.warning};
                 case 'decrypting':
-                    return {text: '🔓 Decrypting...', color: colors.info};
+                    return {text: `🔓 Decrypting ${stagePct}%${etaSuffix}`, color: colors.info};
                 case 'validating':
-                    return {text: '🔍 Validating...', color: colors.info};
+                    return {text: `🔍 Validating ${stagePct}%${etaSuffix}`, color: colors.info};
                 case 'copying':
-                    return {text: '📁 Saving...', color: colors.info};
+                    return {text: `📁 Saving ${stagePct}%${etaSuffix}`, color: colors.info};
                 case 'completed':
                     return {text: '✓ Downloaded', color: colors.success};
                 case 'failed':
@@ -1018,7 +1066,7 @@ export default function LibraryScreen() {
 
             Alert.alert(
                 'Download Started',
-                `${book.title} has been added to the download queue. You can monitor progress here or leave the app.`
+                `"${book.title}" is downloading. Monitor progress here or in the notification — you can leave the app.`
             );
 
         } catch (error: any) {

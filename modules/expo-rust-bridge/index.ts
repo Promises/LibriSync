@@ -291,6 +291,16 @@ export interface DownloadProgress {
   state: TaskStatus;
 }
 
+/**
+ * Live per-ASIN stage progress from the foreground download pipeline.
+ * Covers the stages whose progress is not in the task DB row.
+ */
+export interface StageProgress {
+  stage: TaskStatus;
+  percentage: number;   // 0..100
+  eta_seconds: number;  // 0 = unknown
+}
+
 // ============================================================================
 // Native Module Interface
 // ============================================================================
@@ -651,6 +661,12 @@ export interface ExpoRustBridgeModule {
   listDownloadTasks(dbPath: string, filter?: TaskStatus): RustResponse<{ tasks: DownloadTask[] }>;
 
   /**
+   * Live stage progress + ETA for the foreground download pipeline.
+   * Returns a JSON string keyed by ASIN; parse with getStageProgress().
+   */
+  getStageProgress(): string;
+
+  /**
    * Pause a download.
    *
    * @param dbPath - Path to SQLite database
@@ -958,6 +974,20 @@ export interface ExpoRustBridgeModule {
    * @returns Current setting
    */
   getSmartPlayerCover(): RustResponse<{ enabled: boolean }>;
+
+  /**
+   * Set audio validation depth after download.
+   *
+   * @param level - "full" (all sample points), "quick" (ends only), or "off"
+   */
+  setValidationLevel(level: string): RustResponse<{}>;
+
+  /**
+   * Get audio validation depth preference.
+   *
+   * @returns Current validation level
+   */
+  getValidationLevel(): RustResponse<{ level: string }>;
 
   // --------------------------------------------------------------------------
   // LibriVox
@@ -1601,6 +1631,22 @@ function listDownloadTasks(dbPath: string, filter?: TaskStatus): DownloadTask[] 
   const response = NativeModule!.listDownloadTasks(dbPath, filter);
   const data = unwrapResult(response);
   return data.tasks;
+}
+
+/**
+ * Live stage progress + ETA for the foreground download pipeline, keyed by ASIN.
+ *
+ * The download-task DB row only carries status + byte counts; this exposes the
+ * per-stage percentage and ETA (decrypting/validating/copying, plus download ETA)
+ * that the notification already shows. Empty for books not currently processing.
+ */
+function getStageProgress(): Record<string, StageProgress> {
+  try {
+    const json = NativeModule!.getStageProgress();
+    return json ? JSON.parse(json) : {};
+  } catch {
+    return {};
+  }
 }
 
 /**
@@ -2314,6 +2360,7 @@ export {
   retryConversion,
   getDownloadTask,
   listDownloadTasks,
+  getStageProgress,
   pauseDownload,
   resumeDownload,
   cancelDownload,

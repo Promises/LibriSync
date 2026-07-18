@@ -34,6 +34,7 @@ class DownloadService : Service() {
         private const val ACTION_SET_WIFI_ONLY = "expo.modules.rustbridge.SET_WIFI_ONLY"
         private const val ACTION_RETRY_CONVERSION = "expo.modules.rustbridge.RETRY_CONVERSION"
         private const val ACTION_ENQUEUE_LIBRIVOX = "expo.modules.rustbridge.ENQUEUE_LIBRIVOX"
+        private const val ACTION_CANCEL_ALL = "expo.modules.rustbridge.CANCEL_ALL"
 
         private const val EXTRA_DB_PATH = "db_path"
         private const val EXTRA_ACCOUNT_JSON = "account_json"
@@ -119,6 +120,17 @@ class DownloadService : Service() {
                 action = ACTION_CANCEL_TASK
                 putExtra(EXTRA_DB_PATH, dbPath)
                 putExtra(EXTRA_TASK_ID, taskId)
+            }
+            context.startService(intent)
+        }
+
+        /**
+         * Stop every active/pending download and abort every in-flight conversion. The Rust
+         * download tasks are cancelled by the caller; this tears down the foreground engine.
+         */
+        fun cancelAllDownloads(context: Context) {
+            val intent = Intent(context, DownloadService::class.java).apply {
+                action = ACTION_CANCEL_ALL
             }
             context.startService(intent)
         }
@@ -263,6 +275,7 @@ class DownloadService : Service() {
             ACTION_RESUME_TASK -> handleResumeTask(intent)
             ACTION_CANCEL_TASK -> handleCancelTask(intent)
             ACTION_STOP_MONITORING -> handleStopMonitoring(intent)
+            ACTION_CANCEL_ALL -> handleCancelAll()
             ACTION_SET_WIFI_ONLY -> handleSetWifiOnly(intent)
             ACTION_RETRY_CONVERSION -> handleRetryConversion(intent)
             ACTION_ENQUEUE_LIBRIVOX -> handleEnqueueLibrivox(intent)
@@ -402,6 +415,14 @@ class DownloadService : Service() {
         val outputDir = intent.getStringExtra(EXTRA_OUTPUT_DIR) ?: return
         val quality = intent.getStringExtra(EXTRA_QUALITY) ?: "High"
 
+        // Idempotent per book: manual and auto-download both route here, and an auto-download
+        // check can re-run while a book is still in flight — a second enqueue would create two
+        // Rust rows racing over the same cache file.
+        if (activeDownloads.containsKey(asin) || pendingDownloads.any { it.asin == asin }) {
+            Log.d(TAG, "Download already active or pending for $asin; ignoring duplicate enqueue")
+            return
+        }
+
         Log.d(TAG, "Enqueueing download via orchestrator: $asin - $title")
 
         dispatchDownload(asin, title) {
@@ -534,6 +555,30 @@ class DownloadService : Service() {
         // Cancelling frees a Rust concurrency slot; start the next queued download
         // (only completion did this before, so a cancelled slot left the queue stuck).
         orchestrator.kickDownloadQueue()
+        onActiveDownloadsChanged()
+    }
+
+    /**
+     * Stop everything the download engine is doing: abort in-flight conversions, stop all
+     * monitoring, drop the active + sequential-pending queues, clear per-book notifications and
+     * progress, then detach the foreground notification. The Rust download rows are cancelled by
+     * the caller (the module's cancelAllDownloads). Used by the master "stop all" control.
+     */
+    private fun handleCancelAll() {
+        Log.d(TAG, "Cancelling all downloads")
+        val asins = (activeDownloads.keys + pendingDownloads.map { it.asin }).toSet()
+        asins.forEach { asin ->
+            orchestrator.abortConversion(asin)
+            orchestrator.stopMonitoring(asin)
+            lastSpeed.remove(asin)
+            StageProgressStore.clear(asin)
+            notificationManager.cancelForAsin(asin)
+        }
+        activeDownloads.clear()
+        pendingDownloads.clear()
+        // Belt: abort/stop anything the orchestrator still tracks that wasn't in activeDownloads.
+        orchestrator.cancelAll()
+        // Now empty → clears the summary + detaches the foreground notification + stops if idle.
         onActiveDownloadsChanged()
     }
 

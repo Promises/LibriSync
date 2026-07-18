@@ -13,6 +13,7 @@ import {
   cancelTask,
   enableAutoDownload,
   disableAutoDownload,
+  isAutoDownloadEnabled,
   enableAutoSync,
   disableAutoSync,
   startLibrarySyncNew,
@@ -84,6 +85,8 @@ export default function TaskDebugScreen() {
     try {
       const isRunning = isBackgroundServiceRunning();
       setServiceStarted(isRunning);
+      // Sync the toggle with the real persisted state instead of trusting local state.
+      setAutoDownloadEnabled(isAutoDownloadEnabled());
     } catch (error) {
       console.error('[TaskDebug] Error checking service status:', error);
       setServiceStarted(false);

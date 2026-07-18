@@ -1,6 +1,8 @@
 package expo.modules.rustbridge.tasks
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.util.Log
 import expo.modules.rustbridge.AppPaths
 import expo.modules.rustbridge.StageProgressStore
@@ -90,6 +92,10 @@ class BackgroundTaskManager private constructor(
         // tokenRefreshWorker = TokenRefreshWorker(context, this) // REMOVED: Now using WorkManager
         // librarySyncWorker = LibrarySyncWorker(context, this)   // REMOVED: Now using WorkManager
         autoDownloadWorker = AutoDownloadWorker(context, this)
+        // If auto-download was left enabled in a previous session, re-arm its sync listener —
+        // enable() is otherwise only called from the UI, so after a cold start nothing would
+        // be listening for LibrarySyncComplete and a sync would never trigger a download.
+        autoDownloadWorker.resumeIfEnabled()
 
         // Start event loop
         startEventLoop()
@@ -147,6 +153,14 @@ class BackgroundTaskManager private constructor(
         Log.d(TAG, "Enqueueing download: $asin - $title")
 
         val taskId = "download_$asin"
+        // Idempotent: a book already downloading or waiting in the queue must not be stacked
+        // a second time, e.g. when successive sync-complete checks pick the same book.
+        val alreadyQueued = synchronized(taskQueue) { taskQueue.any { it.id == taskId } }
+        if (activeTasks.containsKey(taskId) || alreadyQueued) {
+            Log.d(TAG, "Download already active or queued for $asin; skipping duplicate enqueue")
+            return taskId
+        }
+
         val task = Task(
             id = taskId,
             type = TaskType.DOWNLOAD,
@@ -194,10 +208,22 @@ class BackgroundTaskManager private constructor(
         return taskId
     }
 
+    /** Whether the task manager (and thus background work) is currently running. */
+    fun isRunning(): Boolean = isStarted
+
+    /** Whether auto-download is enabled. Reads the pref directly so it works even before start(). */
+    fun isAutoDownloadEnabled(): Boolean =
+        context.getSharedPreferences("auto_download_prefs", Context.MODE_PRIVATE)
+            .getBoolean("enabled", false)
+
     /**
      * Enable automatic downloads
      */
     fun enableAutoDownload() {
+        // The workers are created in start(); enabling from a stopped service must not
+        // crash on the lateinit. start() is idempotent, and it also starts the event loop
+        // that relays LibrarySyncComplete to the auto-download listener.
+        if (!isStarted) start()
         Log.d(TAG, "Enabling auto-download")
         autoDownloadWorker.enable()
     }
@@ -206,8 +232,38 @@ class BackgroundTaskManager private constructor(
      * Disable automatic downloads
      */
     fun disableAutoDownload() {
+        if (!isStarted) start()
         Log.d(TAG, "Disabling auto-download")
         autoDownloadWorker.disable()
+    }
+
+    /**
+     * Signal that a library sync finished. This is the trigger the auto-download worker
+     * listens for (LibrarySyncComplete was defined and listened for but never emitted, so
+     * auto-download never ran after a sync). If the manager isn't started yet, it is started
+     * on demand when auto-download is enabled; otherwise this is a no-op.
+     */
+    fun notifyLibrarySyncComplete(totalItems: Int = 0, itemsAdded: Int = 0, itemsUpdated: Int = 0) {
+        if (!isStarted) {
+            // A sync can finish before anything started the manager (e.g. the service never
+            // came up). If auto-download is on, start now so the listener is armed; otherwise
+            // there's nothing to notify.
+            val autoOn = context.getSharedPreferences("auto_download_prefs", Context.MODE_PRIVATE)
+                .getBoolean("enabled", false)
+            if (!autoOn) return
+            start()
+        }
+        scope.launch {
+            emitEvent(
+                TaskEvent.LibrarySyncComplete(
+                    taskId = "library_sync_${System.currentTimeMillis()}",
+                    totalItems = totalItems,
+                    itemsAdded = itemsAdded,
+                    itemsUpdated = itemsUpdated
+                )
+            )
+            Log.d(TAG, "Emitted LibrarySyncComplete → auto-download check")
+        }
     }
 
     /**
@@ -287,6 +343,14 @@ class BackgroundTaskManager private constructor(
      */
     fun clearAllTasks() {
         Log.d(TAG, "Clearing all tasks")
+
+        // Stop the download worker's monitoring loops and abort any in-flight conversion so a
+        // cleared task actually stops (otherwise it keeps polling/logging forever — the
+        // "residual undeletable task" symptom). Guarded: the worker only exists once started.
+        if (isStarted) {
+            runCatching { downloadWorker.cancelAllMonitoring() }
+                .onFailure { Log.w(TAG, "cancelAllMonitoring failed", it) }
+        }
 
         // Cancel all active tasks
         activeTasks.keys.toList().forEach { taskId ->
@@ -371,9 +435,21 @@ class BackgroundTaskManager private constructor(
     }
 
     /**
-     * Check if WiFi is available
+     * Check if WiFi (or Ethernet) is available.
+     *
+     * Queried live from ConnectivityManager. The old design relied on
+     * BackgroundTaskService pushing status via setWifiAvailable(), but that service is a
+     * no-op now (WorkManager owns periodic work), so the pushed flag stayed false and the
+     * auto-download WiFi gate always failed. Falls back to the pushed flag if the system
+     * service is somehow unavailable.
      */
-    fun isWifiAvailable(): Boolean = isWifiAvailable
+    fun isWifiAvailable(): Boolean {
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            ?: return isWifiAvailable
+        val caps = cm.getNetworkCapabilities(cm.activeNetwork) ?: return false
+        return caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
+    }
 
     /**
      * Update WiFi availability
@@ -516,8 +592,8 @@ class BackgroundTaskManager private constructor(
                 true
             }
             TaskType.AUTO_DOWNLOAD -> {
-                // Auto-download requires WiFi
-                isWifiAvailable
+                // Auto-download requires WiFi (queried live)
+                isWifiAvailable()
             }
         }
     }

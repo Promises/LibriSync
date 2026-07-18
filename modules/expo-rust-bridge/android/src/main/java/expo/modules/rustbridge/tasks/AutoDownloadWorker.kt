@@ -29,6 +29,7 @@ class AutoDownloadWorker(
         private const val PREF_WIFI_ONLY = "wifi_only"
         private const val PREF_MAX_DOWNLOADS = "max_downloads"
         private const val PREF_CRITERIA = "criteria"
+        private const val PAGE_SIZE = 200
     }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -41,7 +42,34 @@ class AutoDownloadWorker(
     fun enable() {
         Log.d(TAG, "Enabling auto-download")
         prefs.edit().putBoolean(PREF_ENABLED, true).apply()
+        // Only arm the listener: auto-download runs after the NEXT library sync, not
+        // immediately on enable (enabling should not suddenly start a batch of downloads).
         startEventListener()
+    }
+
+    /**
+     * Re-arm the sync listener after a cold start if auto-download was left enabled in a
+     * previous session. Does NOT scan immediately — only a sync should trigger downloads on
+     * launch — this just ensures the listener exists (enable() is otherwise only called from
+     * the UI, so a relaunch would leave nothing listening for LibrarySyncComplete).
+     */
+    fun resumeIfEnabled() {
+        if (isEnabled()) {
+            Log.d(TAG, "Auto-download was enabled previously; re-arming sync listener")
+            startEventListener()
+        }
+    }
+
+    /** Build and run one auto-download check (scan library, enqueue matches). */
+    private suspend fun runCheck() {
+        execute(
+            Task(
+                id = "auto_download_${System.currentTimeMillis()}",
+                type = TaskType.AUTO_DOWNLOAD,
+                priority = TaskPriority.MEDIUM,
+                status = TaskStatus.PENDING
+            )
+        )
     }
 
     /**
@@ -143,23 +171,17 @@ class AutoDownloadWorker(
 
         Log.d(TAG, "Starting event listener for library sync completion")
 
+        // The shared event flow replays buffered events to new collectors, so without this
+        // cutoff, enabling auto-download after a sync already ran this session would replay
+        // that old LibrarySyncComplete and start downloads immediately — exactly the
+        // "downloads on enable" behavior this listener-only design avoids.
+        val armedAt = System.currentTimeMillis()
         eventListenerJob = scope.launch {
             manager.eventFlow
-                .filter { it is TaskEvent.LibrarySyncComplete }
+                .filter { it is TaskEvent.LibrarySyncComplete && it.emittedAt >= armedAt }
                 .collect { event ->
                     Log.d(TAG, "Library sync completed, triggering auto-download check")
-
-                    // Create and enqueue auto-download task
-                    val taskId = "auto_download_${System.currentTimeMillis()}"
-                    val task = Task(
-                        id = taskId,
-                        type = TaskType.AUTO_DOWNLOAD,
-                        priority = TaskPriority.MEDIUM,
-                        status = TaskStatus.PENDING
-                    )
-
-                    // Execute immediately
-                    execute(task)
+                    runCheck()
                 }
         }
     }
@@ -180,49 +202,71 @@ class AutoDownloadWorker(
         try {
             val dbPath = manager.getDbPath()
             val maxDownloads = prefs.getInt(PREF_MAX_DOWNLOADS, 10)
+            val candidates = mutableListOf<Map<String, Any>>()
+            var offset = 0
 
-            // Get all books from database
-            val getBooksParams = JSONObject().apply {
-                put("db_path", dbPath)
-                put("offset", 0)
-                put("limit", 1000)
-            }
-            val booksResultJson = ExpoRustBridgeModule.nativeGetBooks(getBooksParams.toString())
-            val booksResultObj = JSONObject(booksResultJson)
-
-            if (!booksResultObj.getBoolean("success")) {
-                Log.w(TAG, "Failed to get books: ${booksResultObj.optString("error")}")
-                return@withContext emptyList()
-            }
-
-            val dataObj = booksResultObj.getJSONObject("data")
-            val booksArray = dataObj.getJSONArray("books")
-
-            // Convert JSONArray to List<Map<String, Any>>
-            val books = mutableListOf<Map<String, Any>>()
-            for (i in 0 until booksArray.length()) {
-                val bookObj = booksArray.getJSONObject(i)
-                val bookMap = mutableMapOf<String, Any>()
-                bookObj.keys().forEach { key ->
-                    bookMap[key] = bookObj.get(key)
+            // Page through the library exactly like ExistingDownloadScanner. The `file_path`
+            // (the "already downloaded" signal) is only populated by the filtered query, and
+            // books expose `audible_product_id`/`authors[]`, not `asin`/`author` — the plain
+            // getBooks call and the old `download_status` field never carried this data.
+            while (candidates.size < maxDownloads) {
+                val params = JSONObject().apply {
+                    put("db_path", dbPath)
+                    put("offset", offset)
+                    put("limit", PAGE_SIZE)
+                    put("sort_field", "title")
+                    put("sort_direction", "asc")
                 }
-                books.add(bookMap)
+                val resultObj = JSONObject(ExpoRustBridgeModule.nativeGetBooksWithFilters(params.toString()))
+                if (!resultObj.optBoolean("success")) {
+                    // Error, not warning: a failure on the first page means auto-download is
+                    // effectively dead this round while the task still ends "completed".
+                    Log.e(TAG, "Failed to get books (offset=$offset): ${resultObj.optString("error")}")
+                    break
+                }
+
+                val data = resultObj.optJSONObject("data") ?: break
+                val booksArray = data.optJSONArray("books") ?: break
+                if (booksArray.length() == 0) break
+
+                for (i in 0 until booksArray.length()) {
+                    val book = booksArray.optJSONObject(i) ?: continue
+                    // Skip books that can't be downloaded or are already downloaded (have a file).
+                    if (!book.optBoolean("is_downloadable", false)) continue
+                    val filePath = if (book.isNull("file_path")) "" else book.optString("file_path")
+                    if (filePath.isNotBlank()) continue
+
+                    val asin = book.optString("audible_product_id")
+                    val title = book.optString("title")
+                    if (asin.isBlank() || title.isBlank()) continue
+
+                    candidates.add(
+                        mapOf(
+                            "asin" to asin,
+                            "title" to title,
+                            "author" to joinStrings(book.optJSONArray("authors"))
+                        )
+                    )
+                    if (candidates.size >= maxDownloads) break
+                }
+
+                offset += booksArray.length()
             }
 
-            // Filter books based on criteria
-            // TODO: Implement configurable criteria (wishlist, series, new releases, etc.)
-            val matchingBooks = books.filter { book: Map<String, Any> ->
-                // Example criteria: Books not already downloaded
-                val downloadStatus = book.getOrDefault("download_status", "not_downloaded") as? String
-                downloadStatus != "downloaded"
-            }.take(maxDownloads)
-
-            matchingBooks
+            candidates
 
         } catch (e: Exception) {
             Log.e(TAG, "Error finding books to download", e)
             emptyList()
         }
+    }
+
+    /** Join a JSON string array (e.g. authors) into a display string. */
+    private fun joinStrings(arr: org.json.JSONArray?): String {
+        if (arr == null) return ""
+        return (0 until arr.length())
+            .mapNotNull { arr.optString(it).takeIf { s -> s.isNotBlank() } }
+            .joinToString(", ")
     }
 
     /**
@@ -232,22 +276,25 @@ class AutoDownloadWorker(
         try {
             val asin = book["asin"] as? String ?: throw Exception("No ASIN")
             val title = book["title"] as? String ?: throw Exception("No title")
-            val author = book["author"] as? String
 
             // Load account and output directory from preferences
             val accountJson = getAccountJson() ?: throw Exception("No account")
             val outputDir = getOutputDirectory() ?: throw Exception("No output directory")
 
-            Log.d(TAG, "Enqueueing auto-download: $asin - $title")
+            Log.d(TAG, "Enqueueing auto-download via the foreground download pipeline: $asin - $title")
 
-            // Use manager to enqueue download
-            manager.enqueueDownload(
-                asin = asin,
-                title = title,
-                author = author,
-                accountJson = accountJson,
-                outputDirectory = outputDir,
-                quality = "High"
+            // One engine: route auto-downloads through the same DownloadService/DownloadOrchestrator
+            // that manual downloads use, so they get identical stage controls, per-stage cancel,
+            // cleanup, per-book notifications and ASIN de-duplication — no second pipeline to keep
+            // in sync (the two-engine split is what caused the stuck tasks and cross-cancel bugs).
+            expo.modules.rustbridge.DownloadService.enqueueBook(
+                context,
+                manager.getDbPath(),
+                accountJson,
+                asin,
+                title,
+                outputDir,
+                "High"
             )
 
         } catch (e: Exception) {

@@ -4,6 +4,15 @@ All notable user-facing changes to LibriSync. Entries are phrased for the
 Google Play "What's new" field. Earlier entries were reconstructed from git
 history (no changelog was kept before v0.0.24), so wording is approximate.
 
+## v0.0.25
+
+- Auto-download new books after each library sync (optional, off by default, Wi-Fi only).
+- Batch mode: select multiple books and download them all at once.
+- "Stop All" — cancel every download, or every running process, in one tap.
+- Cancel a download at any stage — downloading, decrypting, validating, or saving.
+- Retry a failed download straight from its notification.
+- Cancelling now cleans up partial files and never un-marks an already-downloaded book.
+
 ## v0.0.24
 
 - Download multiple audiobooks at once, or switch to one-at-a-time in Settings.

@@ -10,6 +10,7 @@ import androidx.work.WorkerParameters
 import expo.modules.rustbridge.AppPaths
 import expo.modules.rustbridge.ExpoRustBridgeModule
 import expo.modules.rustbridge.ExistingDownloadScanner
+import expo.modules.rustbridge.tasks.BackgroundTaskManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -163,6 +164,18 @@ class LibrarySyncWorker(
                 }
             } else {
                 Log.d(TAG, "No download directory configured; skipping existing download scan")
+            }
+
+            // Let auto-download react to the freshly synced library. This is the WorkManager
+            // sync path (debug "Start Library Sync" and scheduled auto-sync); it goes through
+            // nativeSyncLibraryPage directly, so it must notify the manager itself — no-op
+            // unless auto-download is enabled. Runs after the existing-download scan so books
+            // already present on disk are linked (and thus skipped) first.
+            try {
+                BackgroundTaskManager.getInstance(applicationContext)
+                    .notifyLibrarySyncComplete(totalItemsSynced, totalItemsAdded, totalItemsUpdated)
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to notify auto-download after library sync", e)
             }
 
             return@withContext Result.success()

@@ -15,6 +15,7 @@ fun copyStreamWithProgress(
     input: InputStream,
     output: OutputStream,
     totalBytes: Long,
+    isCancelled: () -> Boolean = { false },
     onProgress: (Int, Int) -> Unit
 ) {
     val buffer = ByteArray(256 * 1024)
@@ -23,6 +24,8 @@ fun copyStreamWithProgress(
     val startMs = System.currentTimeMillis()
 
     while (true) {
+        // Cooperative cancellation: abort a long copy promptly when the user cancels.
+        if (isCancelled()) throw kotlinx.coroutines.CancellationException("Copy cancelled")
         val read = input.read(buffer)
         if (read < 0) break
         output.write(buffer, 0, read)

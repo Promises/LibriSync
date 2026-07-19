@@ -156,7 +156,10 @@ sealed class TaskEvent {
         val taskId: String,
         val totalItems: Int,
         val itemsAdded: Int,
-        val itemsUpdated: Int
+        val itemsUpdated: Int,
+        // When the sync finished. The event flow replays buffered events to new collectors;
+        // the auto-download listener uses this to ignore syncs from before it was armed.
+        val emittedAt: Long = System.currentTimeMillis()
     ) : TaskEvent()
 
     // Auto-download events

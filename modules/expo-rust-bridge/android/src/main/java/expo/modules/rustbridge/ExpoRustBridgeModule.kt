@@ -195,7 +195,22 @@ class ExpoRustBridgeModule : Module() {
           put("page", page)
         }
         val result = nativeSyncLibraryPage(params.toString())
-        parseJsonResponse(result)
+        val parsed = parseJsonResponse(result)
+        // On the final page of a full sync, tell the background manager the library sync
+        // finished so auto-download (if enabled) checks for newly added books. Nothing
+        // emitted this before, so auto-download never triggered after a sync.
+        val data = parsed["data"] as? Map<*, *>
+        val hasMore = (data?.get("has_more") as? Boolean) ?: (parsed["has_more"] as? Boolean) ?: true
+        if (parsed["success"] == true && !hasMore) {
+          // Best-effort: the sync itself already succeeded and is persisted; a failure to
+          // notify auto-download must not turn the final page into a sync error.
+          runCatching {
+            appContext.reactContext?.let { ctx ->
+              expo.modules.rustbridge.tasks.BackgroundTaskManager.getInstance(ctx).notifyLibrarySyncComplete()
+            }
+          }.onFailure { android.util.Log.w("ExpoRustBridge", "Failed to notify auto-download after sync", it) }
+        }
+        parsed
       } catch (e: Exception) {
         mapOf(
           "success" to false,
@@ -1046,7 +1061,24 @@ class ExpoRustBridgeModule : Module() {
      */
     Function("isBackgroundServiceRunning") {
       try {
-        mapOf("success" to true, "data" to mapOf("isRunning" to false))
+        val context = appContext.reactContext
+        val running = context?.let {
+          expo.modules.rustbridge.tasks.BackgroundTaskManager.getInstance(it).isRunning()
+        } ?: false
+        mapOf("success" to true, "data" to mapOf("isRunning" to running))
+      } catch (e: Exception) {
+        mapOf("success" to false, "error" to e.message)
+      }
+    }
+
+    /**
+     * Whether auto-download is currently enabled (reads the persisted pref).
+     */
+    Function("isAutoDownloadEnabled") {
+      try {
+        val context = appContext.reactContext ?: throw Exception("Context not available")
+        val enabled = expo.modules.rustbridge.tasks.BackgroundTaskManager.getInstance(context).isAutoDownloadEnabled()
+        mapOf("success" to true, "data" to mapOf("isEnabled" to enabled))
       } catch (e: Exception) {
         mapOf("success" to false, "error" to e.message)
       }
@@ -1424,6 +1456,40 @@ class ExpoRustBridgeModule : Module() {
     }
 
     /**
+     * Master stop — cancel all downloads only: cancel every Rust download row (active, queued,
+     * paused) and tear down the foreground download engine (abort conversions, clear queues +
+     * notifications). Leaves scheduled sync/token work alone.
+     */
+    Function("cancelAllDownloads") {
+      try {
+        val context = appContext.reactContext ?: throw Exception("Context not available")
+        val cancelled = cancelAllPersistentDownloads(AppPaths.databasePath(context))
+        expo.modules.rustbridge.DownloadService.cancelAllDownloads(context)
+        mapOf("success" to true, "data" to mapOf("cancelled" to cancelled))
+      } catch (e: Exception) {
+        mapOf("success" to false, "error" to e.message)
+      }
+    }
+
+    /**
+     * Master stop — cancel all running processes: everything cancelAllDownloads does, plus
+     * quiescing the background task manager (DownloadWorker monitoring + queued tasks) and
+     * cancelling all scheduled WorkManager jobs (library sync + token refresh).
+     */
+    Function("cancelAllProcesses") {
+      try {
+        val context = appContext.reactContext ?: throw Exception("Context not available")
+        val cancelled = cancelAllPersistentDownloads(AppPaths.databasePath(context))
+        expo.modules.rustbridge.DownloadService.cancelAllDownloads(context)
+        expo.modules.rustbridge.tasks.BackgroundTaskManager.getInstance(context).clearAllTasks()
+        WorkerScheduler.cancelAllWork(context)
+        mapOf("success" to true, "data" to mapOf("cancelled" to cancelled))
+      } catch (e: Exception) {
+        mapOf("success" to false, "error" to e.message)
+      }
+    }
+
+    /**
      * Get status of token refresh worker.
      *
      * @return Map with worker state
@@ -1594,6 +1660,41 @@ class ExpoRustBridgeModule : Module() {
       .replace("\\", "\\\\")  // Escape backslashes
       .replace("\"", "\\\"")  // Escape double quotes
     return "\"$escaped\""  // Wrap in double quotes
+  }
+
+  /**
+   * Cancel every in-flight/pending Rust download task. Returns the count actually cancelled.
+   *
+   * Only cancels work that is actually running or waiting; terminal rows are left untouched.
+   * Cancelling deletes the DownloadTasks row, and a "completed" row is what links a downloaded
+   * book to its file — deleting it would drop the book back to "not downloaded" and force a
+   * re-sync. So completed/failed/cancelled rows are preserved.
+   */
+  private fun cancelAllPersistentDownloads(dbPath: String): Int {
+    val cancelable = setOf("queued", "downloading", "paused", "decrypting", "validating", "copying")
+    var cancelled = 0
+    val listParsed = parseJsonResponse(nativeListDownloadTasks(JSONObject().apply { put("db_path", dbPath) }.toString()))
+    if (listParsed["success"] != true) {
+      android.util.Log.w("ExpoRustBridge", "cancelAll: listing download tasks failed: ${listParsed["error"]}")
+      return 0
+    }
+    val data = listParsed["data"] as? Map<*, *>
+    @Suppress("UNCHECKED_CAST")
+    val tasks = (data?.get("tasks") as? List<Map<*, *>>) ?: emptyList()
+    tasks.forEach { t ->
+      val status = (t["status"] as? String)?.lowercase() ?: ""
+      if (status !in cancelable) return@forEach  // preserve completed (downloaded) + failed/cancelled
+      val tid = t["task_id"] as? String ?: return@forEach
+      val result = runCatching {
+        parseJsonResponse(nativeCancelDownload(JSONObject().apply { put("db_path", dbPath); put("task_id", tid) }.toString()))
+      }.getOrNull()
+      if (result?.get("success") == true) {
+        cancelled++
+      } else {
+        android.util.Log.w("ExpoRustBridge", "cancelAll: failed to cancel $tid: ${result?.get("error")}")
+      }
+    }
+    return cancelled
   }
 
   /**

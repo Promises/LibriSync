@@ -785,6 +785,13 @@ export interface ExpoRustBridgeModule {
    */
   isBackgroundServiceRunning(): RustResponse<{ isRunning: boolean }>;
 
+  /**
+   * Check whether auto-download is enabled (persisted preference).
+   *
+   * @returns Response with isEnabled flag
+   */
+  isAutoDownloadEnabled(): RustResponse<{ isEnabled: boolean }>;
+
   // --------------------------------------------------------------------------
   // Account Storage (SQLite)
   // --------------------------------------------------------------------------
@@ -928,6 +935,8 @@ export interface ExpoRustBridgeModule {
    * Cancel all background workers.
    */
   cancelAllBackgroundTasks(): RustResponse<{ success: boolean }>;
+  cancelAllDownloads(): RustResponse<{ cancelled: number }>;
+  cancelAllProcesses(): RustResponse<{ cancelled: number }>;
 
   /**
    * Get status of token refresh worker.
@@ -1932,6 +1941,19 @@ function isBackgroundServiceRunning(): boolean {
 }
 
 /**
+ * Check whether auto-download is currently enabled (persisted preference).
+ *
+ * @returns true if auto-download is enabled, false otherwise
+ */
+function isAutoDownloadEnabled(): boolean {
+  const response = NativeModule!.isAutoDownloadEnabled();
+  if (!response.success || !response.data) {
+    return false;
+  }
+  return response.data.isEnabled;
+}
+
+/**
  * Save account to SQLite database (single source of truth).
  *
  * @param dbPath - Database path
@@ -2260,6 +2282,30 @@ function cancelAllBackgroundTasks(): void {
 }
 
 /**
+ * Master stop — cancel all downloads only (leaves scheduled sync/token work running).
+ * @returns number of persistent download tasks cancelled
+ */
+function cancelAllDownloads(): number {
+  const response = NativeModule!.cancelAllDownloads();
+  if (!response.success) {
+    throw new RustBridgeError(response.error || 'Failed to cancel downloads');
+  }
+  return response.data?.cancelled ?? 0;
+}
+
+/**
+ * Master stop — cancel all running processes (downloads + background task manager + scheduled work).
+ * @returns number of persistent download tasks cancelled
+ */
+function cancelAllProcesses(): number {
+  const response = NativeModule!.cancelAllProcesses();
+  if (!response.success) {
+    throw new RustBridgeError(response.error || 'Failed to cancel processes');
+  }
+  return response.data?.cancelled ?? 0;
+}
+
+/**
  * Get status of token refresh worker.
  *
  * @returns Worker state (NOT_SCHEDULED, ENQUEUED, RUNNING, SUCCEEDED, FAILED, CANCELLED)
@@ -2405,6 +2451,7 @@ export {
   getTask,
   clearAllTasks,
   isBackgroundServiceRunning,
+  isAutoDownloadEnabled,
   // Account Storage (SQLite)
   saveAccount,
   getPrimaryAccount,
@@ -2427,6 +2474,8 @@ export {
   cancelTokenRefresh,
   cancelLibrarySync,
   cancelAllBackgroundTasks,
+  cancelAllDownloads,
+  cancelAllProcesses,
   getTokenRefreshStatus,
   getLibrarySyncStatus,
   // Permission Management

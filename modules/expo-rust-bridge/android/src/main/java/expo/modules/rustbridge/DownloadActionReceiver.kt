@@ -20,6 +20,7 @@ class DownloadActionReceiver : BroadcastReceiver() {
         const val ACTION_PAUSE = "expo.modules.rustbridge.PAUSE_DOWNLOAD"
         const val ACTION_RESUME = "expo.modules.rustbridge.RESUME_DOWNLOAD"
         const val ACTION_CANCEL = "expo.modules.rustbridge.CANCEL_DOWNLOAD"
+        const val ACTION_RETRY = "expo.modules.rustbridge.RETRY_DOWNLOAD"
     }
 
     override fun onReceive(context: Context, intent: Intent) {
@@ -47,6 +48,10 @@ class DownloadActionReceiver : BroadcastReceiver() {
             ACTION_CANCEL -> {
                 Log.d(TAG, "Handling cancel action")
                 handleCancel(context, dbPath, asin)
+            }
+            ACTION_RETRY -> {
+                Log.d(TAG, "Handling retry action")
+                handleRetry(context, dbPath, asin)
             }
             else -> {
                 Log.w(TAG, "Unknown action: ${intent.action}")
@@ -190,6 +195,17 @@ class DownloadActionReceiver : BroadcastReceiver() {
         }
     }
 
+    private fun handleRetry(context: Context, dbPath: String, asin: String) {
+        try {
+            Log.d(TAG, "Retrying conversion for $asin")
+            DownloadService.retryConversion(context, dbPath, asin)
+            // Dismiss the failure notification; a progress notification replaces it.
+            DownloadNotificationManager(context).cancelForAsin(asin)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error handling retry", e)
+        }
+    }
+
     private fun handleCancel(context: Context, dbPath: String, asin: String) {
         try {
             // Find the task ID for this ASIN
@@ -208,40 +224,36 @@ class DownloadActionReceiver : BroadcastReceiver() {
                 val task = tasks.find { it["asin"] == asin }
                 val taskId = task?.get("task_id") as? String
 
+                // Best-effort: cancel the Rust download if it is still running. Past the
+                // download stage (decrypt/validate/copy) the download has already finished,
+                // so this can report failure — that is fine, the cleanup below still runs.
                 if (taskId != null) {
-                    // Cancel the download
                     val cancelParams = JSONObject().apply {
                         put("db_path", dbPath)
                         put("task_id", taskId)
                     }
-
-                    val cancelResult = ExpoRustBridgeModule.nativeCancelDownload(cancelParams.toString())
-                    val cancelParsed = parseJsonResponse(cancelResult)
-
-                    if (cancelParsed["success"] == true) {
-                        // Clear manual pause marker
-                        clearManuallyPaused(context, asin)
-
-                        Log.d(TAG, "Successfully cancelled download: $asin")
-
-                        // Stop orchestrator monitoring (stops any ongoing conversion)
-                        val stopIntent = Intent(context, DownloadService::class.java).apply {
-                            action = "expo.modules.rustbridge.STOP_MONITORING"
-                            putExtra("asin", asin)
-                        }
-                        context.startService(stopIntent)
-                        Log.d(TAG, "Sent stop monitoring intent for $asin")
-
-                        // Cancel all notifications
-                        val notificationManager = DownloadNotificationManager(context)
-                        asin?.let { notificationManager.cancelForAsin(it) }
-                        Log.d(TAG, "Cleared all notifications for cancelled download")
-                    } else {
-                        Log.e(TAG, "Failed to cancel: ${cancelParsed["error"]}")
+                    val cancelParsed = parseJsonResponse(
+                        ExpoRustBridgeModule.nativeCancelDownload(cancelParams.toString())
+                    )
+                    if (cancelParsed["success"] != true) {
+                        Log.w(TAG, "nativeCancelDownload did not cancel $asin (likely past the download stage): ${cancelParsed["error"]}")
                     }
                 } else {
-                    Log.e(TAG, "Task not found for ASIN: $asin")
+                    Log.w(TAG, "No download task for $asin; treating as a conversion/queue cancel")
                 }
+
+                // Always stop monitoring — this aborts an in-flight conversion (decrypt /
+                // validate / copy) and dequeues a queued book. Previously this was gated on
+                // the Rust cancel succeeding, so a mid-copy cancel never reached the abort
+                // and the copy ran to completion.
+                clearManuallyPaused(context, asin)
+                val stopIntent = Intent(context, DownloadService::class.java).apply {
+                    action = "expo.modules.rustbridge.STOP_MONITORING"
+                    putExtra("asin", asin)
+                }
+                context.startService(stopIntent)
+                DownloadNotificationManager(context).cancelForAsin(asin)
+                Log.d(TAG, "Cancelled/cleaned up download: $asin")
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error handling cancel", e)

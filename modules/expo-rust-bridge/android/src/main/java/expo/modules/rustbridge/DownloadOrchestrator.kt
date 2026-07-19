@@ -49,6 +49,11 @@ class DownloadOrchestrator(
 
     // Active download monitoring jobs
     private val monitoringJobs = mutableMapOf<String, Job>()
+    // Cancellation of an in-flight conversion (decrypt / validate / copy), keyed by ASIN.
+    private val cancelledConversions = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    // Running FFmpeg session id per ASIN, so a specific decrypt can be cancelled without
+    // FFmpegKit.cancel() (which would kill every parallel conversion).
+    private val activeFfmpegSessions = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
     // Callbacks
     private var progressCallback: ((String, String, Double, Long, Long, Long) -> Unit)? = null // (asin, stage, percentage, bytesDownloaded, totalBytes, etaSeconds)
@@ -548,13 +553,13 @@ class DownloadOrchestrator(
             val outputFile = safDir.createFile(mimeType, targetName)
                 ?: throw Exception("Failed to create file: $targetName")
             context.contentResolver.openOutputStream(outputFile.uri)?.use { out ->
-                sourceFile.inputStream().use { inp -> copyStreamWithProgress(inp, out, totalBytes, onCopyProgress) }
+                sourceFile.inputStream().use { inp -> copyStreamWithProgress(inp, out, totalBytes, { asin in cancelledConversions }, onCopyProgress) }
             } ?: throw Exception("Failed to write: $targetName")
             outputFile.uri.toString()
         } else {
             val outputFile = File(regularDirPath!!, targetName)
             outputFile.outputStream().use { out ->
-                sourceFile.inputStream().use { inp -> copyStreamWithProgress(inp, out, totalBytes, onCopyProgress) }
+                sourceFile.inputStream().use { inp -> copyStreamWithProgress(inp, out, totalBytes, { asin in cancelledConversions }, onCopyProgress) }
             }
             outputFile.absolutePath
         }
@@ -663,6 +668,12 @@ class DownloadOrchestrator(
                         break
                     }
                 }
+            } catch (e: CancellationException) {
+                // Normal path: the download/conversion was cancelled or the coroutine scope was
+                // torn down. Not an error — log quietly and rethrow to respect structured
+                // concurrency (previously this was logged at ERROR, spamming the log on cancel).
+                Log.d(TAG, "Monitoring cancelled for $asin")
+                throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Error monitoring download $asin", e)
             } finally {
@@ -729,8 +740,26 @@ class DownloadOrchestrator(
         // Resolve task ID outside try so it's available in catch
         val resolvedTaskId = taskId ?: findTaskIdForAsin(asin)
 
+        // Fresh conversion: clear any stale cancel flag from a previous attempt.
+        cancelledConversions.remove(asin)
+
         try {
             Log.d(TAG, "Starting conversion for $asin...")
+
+            // Guard: a stale "completed" download task (its cache deleted by an earlier failed
+            // convert) or a 0-byte download (e.g. an auth-failed response) leaves the encrypted
+            // source empty or missing. Decrypting it yields a misleading "activation bytes wrong"
+            // error. Detect it up front, reset the task to "cancelled" so the library offers a
+            // fresh download, and report an honest message. Audiobooks are always far larger than
+            // this floor, so it only trips on empty/truncated files.
+            val encFile = File(encryptedPath)
+            if (!encFile.exists() || encFile.length() < 64 * 1024L) {
+                val len = if (encFile.exists()) encFile.length() else -1L
+                Log.e(TAG, "Encrypted source missing/too small for $asin ($len bytes) — download incomplete; resetting for re-download")
+                resolvedTaskId?.let { updateTaskStatusInDb(it, "cancelled") }
+                errorCallback?.invoke(asin, title, "Download incomplete — please download again")
+                return@withContext
+            }
 
             // Persist decrypting stage to DB
             resolvedTaskId?.let { updateTaskStatusInDb(it, "decrypting") }
@@ -899,7 +928,7 @@ class DownloadOrchestrator(
             // FFmpeg statistics stream: time = ms of media processed, speed = realtime multiplier.
             // Throttle to whole-percent steps to avoid hammering the notification.
             var lastReportedPct = -1
-            com.arthenica.ffmpegkit.FFmpegKitConfig.enableStatisticsCallback { stat ->
+            val statsCallback = com.arthenica.ffmpegkit.StatisticsCallback { stat ->
                 if (totalDurationSec > 0.0) {
                     val processedSec = stat.time.toDouble() / 1000.0
                     val pct = ((processedSec / totalDurationSec).coerceIn(0.0, 1.0) * 100.0).toInt()
@@ -914,11 +943,24 @@ class DownloadOrchestrator(
                 }
             }
 
-            val session = try {
-                com.arthenica.ffmpegkit.FFmpegKit.execute(command)
+            // executeAsync exposes the session id up front so this specific decrypt can be
+            // cancelled; a blocking execute() would give no handle to cancel just this one.
+            val ffmpegLatch = java.util.concurrent.CountDownLatch(1)
+            val session = com.arthenica.ffmpegkit.FFmpegKit.executeAsync(
+                command,
+                { _ -> ffmpegLatch.countDown() },
+                { _ -> },
+                statsCallback
+            )
+            activeFfmpegSessions[asin] = session.sessionId
+            try {
+                ffmpegLatch.await()
             } finally {
-                // Global callback: clear so later validation/probe ffmpeg calls don't feed it.
-                com.arthenica.ffmpegkit.FFmpegKitConfig.enableStatisticsCallback(null)
+                activeFfmpegSessions.remove(asin)
+            }
+
+            if (asin in cancelledConversions) {
+                throw kotlinx.coroutines.CancellationException("Decrypt cancelled by user")
             }
 
             if (!com.arthenica.ffmpegkit.ReturnCode.isSuccess(session.returnCode)) {
@@ -935,7 +977,11 @@ class DownloadOrchestrator(
             resolvedTaskId?.let { updateTaskStatusInDb(it, "validating") }
             progressCallback?.invoke(asin, "validating", 0.0, 0, 0, 0L)
 
-            val validationResult = validateAudioFile(decryptedCachePath, asin)
+            val validationResult = validateAudioFile(
+                context,
+                decryptedCachePath,
+                isCancelled = { asin in cancelledConversions }
+            ) { pct, eta -> progressCallback?.invoke(asin, "validating", pct.toDouble(), 0, 0, eta.toLong()) }
 
             if (!validationResult.isValid) {
                 Log.e(TAG, "Audio validation FAILED for $asin:")
@@ -969,10 +1015,22 @@ class DownloadOrchestrator(
             resolvedTaskId?.let { updateTaskStatusInDb(it, "completed", finalPath) }
 
         } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException || asin in cancelledConversions) {
+                // User cancelled mid-conversion: clean up partial output, no error UI.
+                // Rethrow as cancellation so the monitor coroutine ignores it (no error
+                // notification); the finally clears the per-book cancel state.
+                Log.d(TAG, "Conversion cancelled for $asin")
+                runCatching { File(decryptedCachePath).delete() }
+                resolvedTaskId?.let { updateTaskStatusInDb(it, "cancelled") }
+                throw kotlinx.coroutines.CancellationException("Conversion cancelled")
+            }
             Log.e(TAG, "Conversion failed for $asin", e)
             // Mark as failed in DB with error
             resolvedTaskId?.let { updateTaskStatusWithError(it, "failed", e.message ?: "Conversion failed") }
             errorCallback?.invoke(asin, title, e.message ?: "Conversion failed")
+        } finally {
+            cancelledConversions.remove(asin)
+            activeFfmpegSessions.remove(asin)
         }
     }
 
@@ -1019,15 +1077,18 @@ class DownloadOrchestrator(
                 else -> "audio/*"
             }
 
-            // Navigate/create subdirectories
+            // Navigate/create subdirectories, remembering which ones we created so a
+            // cancelled copy can remove them (but never a pre-existing folder).
+            val createdDirs = mutableListOf<DocumentFile>()
             var currentDir = docDir
             for (dirName in directories) {
                 val existing = currentDir.findFile(dirName)
                 currentDir = if (existing != null && existing.isDirectory) {
                     existing
                 } else {
-                    currentDir.createDirectory(dirName)
-                        ?: throw Exception("Failed to create directory: $dirName")
+                    (currentDir.createDirectory(dirName)
+                        ?: throw Exception("Failed to create directory: $dirName"))
+                        .also { createdDirs.add(it) }
                 }
             }
 
@@ -1043,13 +1104,23 @@ class DownloadOrchestrator(
 
             // Copy (with progress + ETA — large M4B over SAF is slow)
             val totalBytes = cachedFile.length()
-            context.contentResolver.openOutputStream(outputFile.uri)?.use { outputStream ->
-                cachedFile.inputStream().use { inputStream ->
-                    copyStreamWithProgress(inputStream, outputStream, totalBytes) { pct, eta ->
-                        progressCallback?.invoke(asin, "copying", pct.toDouble(), 0, 0, eta.toLong())
+            try {
+                context.contentResolver.openOutputStream(outputFile.uri)?.use { outputStream ->
+                    cachedFile.inputStream().use { inputStream ->
+                        copyStreamWithProgress(inputStream, outputStream, totalBytes, { asin in cancelledConversions }) { pct, eta ->
+                            progressCallback?.invoke(asin, "copying", pct.toDouble(), 0, 0, eta.toLong())
+                        }
                     }
+                } ?: throw Exception("Failed to open output stream")
+            } catch (e: Exception) {
+                // Cancel or failure mid-copy: remove the partial file and any folders we
+                // created for it, so it isn't found + relinked by a later library scan.
+                runCatching { outputFile.delete() }
+                createdDirs.asReversed().forEach { dir ->
+                    runCatching { if (dir.listFiles().isEmpty()) dir.delete() }
                 }
-            } ?: throw Exception("Failed to open output stream")
+                throw e
+            }
 
             finalPath = outputFile.uri.toString()
 
@@ -1408,6 +1479,33 @@ class DownloadOrchestrator(
     }
 
     /**
+     * Abort an in-flight conversion (decrypt / validate / copy) for a book. Marks it
+     * cancelled (checked by the copy loop and between validation samples) and cancels
+     * its running FFmpeg session so a long decrypt stops promptly. Safe to call when no
+     * conversion is running.
+     */
+    fun abortConversion(asin: String) {
+        cancelledConversions.add(asin)
+        activeFfmpegSessions[asin]?.let {
+            com.arthenica.ffmpegkit.FFmpegKit.cancel(it)
+            Log.d(TAG, "Cancelled FFmpeg session $it for $asin")
+        }
+    }
+
+    /**
+     * Abort every in-flight conversion and stop every monitoring loop. Used by the master
+     * "stop all" control. The Rust download tasks are cancelled separately (by the caller) so
+     * this only tears down the Kotlin-side work.
+     */
+    fun cancelAll() {
+        val asins = monitoringJobs.keys.toList()
+        Log.d(TAG, "cancelAll: aborting ${asins.size} monitored downloads/conversions")
+        asins.forEach { abortConversion(it) }
+        monitoringJobs.values.forEach { runCatching { it.cancel() } }
+        monitoringJobs.clear()
+    }
+
+    /**
      * Shutdown orchestrator
      */
     fun shutdown() {
@@ -1538,183 +1636,6 @@ class DownloadOrchestrator(
         }
     }
 
-    /**
-     * Validate audio file for corruption
-     *
-     * Checks multiple sample points throughout the file for AAC decode errors.
-     * Returns validation result with error count and details.
-     */
-    private suspend fun validateAudioFile(filePath: String, asin: String): AudioValidationResult = withContext(Dispatchers.IO) {
-        try {
-            Log.d(TAG, "Validating audio file: $filePath")
-
-            // Step 1: Get file duration using FFprobe
-            val probeSession = com.arthenica.ffmpegkit.FFprobeKit.getMediaInformation(filePath)
-            val duration = probeSession.mediaInformation?.duration?.toDoubleOrNull() ?: 0.0
-
-            if (duration <= 0) {
-                Log.e(TAG, "Invalid duration: $duration")
-                return@withContext AudioValidationResult(
-                    isValid = false,
-                    errorCount = -1,
-                    errorMessage = "Could not determine file duration",
-                    duration = 0.0
-                )
-            }
-
-            Log.d(TAG, "File duration: ${duration}s (${duration / 3600}h)")
-
-            // Step 2: Sample multiple points in the file
-            // Check: 30s, 25%, 50%, 75%, end-30s
-            val samplePoints = listOf(
-                30.0,                    // Start (30 seconds in)
-                duration * 0.25,         // 25%
-                duration * 0.50,         // 50%
-                duration * 0.75,         // 75%
-                maxOf(duration - 30, 60.0) // Near end (or 60s if file is short)
-            ).distinct().sorted()
-
-            // Validation depth is user-configurable: "full" (all points), "quick" (ends
-            // only) or "off" (skip). Trades corruption-detection thoroughness for speed.
-            val validationLevel = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
-                .getString("validation_level", "full") ?: "full"
-            if (validationLevel == "off") {
-                Log.d(TAG, "Validation skipped (setting=off) for $asin")
-                progressCallback?.invoke(asin, "validating", 100.0, 0, 0, 0L)
-                return@withContext AudioValidationResult(
-                    isValid = true, errorCount = 0,
-                    errorMessage = "Validation skipped by setting", duration = duration
-                )
-            }
-            val effectiveSamplePoints = if (validationLevel == "quick")
-                listOf(samplePoints.first(), samplePoints.last()).distinct()
-            else samplePoints
-
-            Log.d(TAG, "Sampling ${effectiveSamplePoints.size} points ($validationLevel): ${effectiveSamplePoints.map { "%.1fmin".format(it / 60) }}")
-
-            var totalErrors = 0
-            val sampleResults = mutableListOf<String>()
-            val totalSamples = effectiveSamplePoints.size
-            val testDuration = 10 // seconds decoded per sample
-
-            // Validation cost is dominated by seeking into a huge file, which emits no
-            // FFmpeg statistics — so drive smooth progress + ETA from a timer, seeded
-            // BEFORE the first sample finishes (a novice must see it isn't hung), then
-            // refined by each real sample's measured duration.
-            val completedSamples = java.util.concurrent.atomic.AtomicInteger(0)
-            val sampleStartMs = java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis())
-            val avgSampleMs = java.util.concurrent.atomic.AtomicLong(4000L) // seed ~4s/sample
-
-            val progressTicker = launch {
-                var lastPct = -1
-                while (isActive) {
-                    val done = completedSamples.get()
-                    val avg = avgSampleMs.get().toDouble()
-                    val sampleElapsed = (System.currentTimeMillis() - sampleStartMs.get()).toDouble()
-                    val subFrac = (sampleElapsed / avg).coerceIn(0.0, 0.99)
-                    val overall = ((done + subFrac) / totalSamples).coerceIn(0.0, 0.999)
-                    val pct = (overall * 100.0).toInt()
-                    if (pct != lastPct) {
-                        lastPct = pct
-                        val remaining = (totalSamples - (done + subFrac)).coerceAtLeast(0.0)
-                        val etaSec = (remaining * avg / 1000.0).toLong().coerceAtLeast(0L)
-                        progressCallback?.invoke(asin, "validating", pct.toDouble(), 0, 0, etaSec)
-                    }
-                    delay(400)
-                }
-            }
-
-            try {
-                // Step 3: Check each sample point for errors
-                for ((index, timestamp) in effectiveSamplePoints.withIndex()) {
-                    sampleStartMs.set(System.currentTimeMillis())
-                    val command = "-v error -ss $timestamp -i \"$filePath\" -t $testDuration -f null -"
-
-                    val session = com.arthenica.ffmpegkit.FFmpegKit.execute(command)
-                    val output = session.allLogsAsString
-
-                    // Count error lines
-                    val errors = output.lines().count {
-                        it.contains("Error", ignoreCase = true) ||
-                        it.contains("Invalid data", ignoreCase = true)
-                    }
-
-                    totalErrors += errors
-                    val statusMark = if (errors == 0) "✓" else "✗ $errors errors"
-                    val timestampStr = formatTimestamp(timestamp.toLong())
-                    sampleResults.add("  [$timestampStr] $statusMark")
-
-                    // Refine the per-sample estimate from the measured time.
-                    val took = System.currentTimeMillis() - sampleStartMs.get()
-                    avgSampleMs.set(
-                        if (index == 0) took.coerceAtLeast(250L)
-                        else (0.6 * avgSampleMs.get() + 0.4 * took).toLong().coerceAtLeast(250L)
-                    )
-                    completedSamples.set(index + 1)
-
-                    Log.d(TAG, "Sample ${index + 1}/$totalSamples at $timestampStr: $errors errors (${took}ms)")
-
-                    // Early exit if we find significant corruption
-                    if (errors > 50) {
-                        Log.w(TAG, "High error count detected at $timestampStr, stopping validation")
-                        break
-                    }
-                }
-            } finally {
-                progressTicker.cancel()
-                // Ensure the bar reaches 100% even if the loop exited early.
-                progressCallback?.invoke(asin, "validating", 100.0, 0, 0, 0L)
-            }
-
-            // Step 4: Determine if file is valid
-            val isValid = totalErrors == 0
-            val errorMessage = if (isValid) {
-                "Audio file validated successfully"
-            } else {
-                "Audio corruption detected: $totalErrors total errors\n${sampleResults.joinToString("\n")}"
-            }
-
-            Log.d(TAG, "Validation result for $asin: ${if (isValid) "VALID" else "CORRUPT"} ($totalErrors errors)")
-
-            AudioValidationResult(
-                isValid = isValid,
-                errorCount = totalErrors,
-                errorMessage = errorMessage,
-                duration = duration,
-                samplePoints = sampleResults
-            )
-
-        } catch (e: Exception) {
-            Log.e(TAG, "Error validating audio file", e)
-            AudioValidationResult(
-                isValid = false,
-                errorCount = -1,
-                errorMessage = "Validation failed: ${e.message}",
-                duration = 0.0
-            )
-        }
-    }
-
-    /**
-     * Format seconds to HH:MM:SS timestamp
-     */
-    private fun formatTimestamp(seconds: Long): String {
-        val hours = seconds / 3600
-        val minutes = (seconds % 3600) / 60
-        val secs = seconds % 60
-        return "%02d:%02d:%02d".format(hours, minutes, secs)
-    }
-
-    /**
-     * Audio validation result
-     */
-    data class AudioValidationResult(
-        val isValid: Boolean,
-        val errorCount: Int,
-        val errorMessage: String,
-        val duration: Double,
-        val samplePoints: List<String> = emptyList()
-    )
 
     /**
      * Retry conversion for a failed download that has cached .aax file and stored keys
@@ -1762,17 +1683,26 @@ class DownloadOrchestrator(
                 return@withContext false
             }
 
-            // Check if encrypted file still exists
+            // Check if the encrypted file still exists. The extension varies — AAXC
+            // downloads are ".aaxc", legacy AAX is ".aax" — so accept whichever is present
+            // (the previous hard-coded ".aax" meant AAXC retries always failed).
             val cacheDir = context.cacheDir
             val audiobooksDir = File(cacheDir, "audiobooks")
-            val encryptedPath = File(audiobooksDir, "$asin.aax").absolutePath
             val decryptedCachePath = File(audiobooksDir, "$asin.m4b").absolutePath
+            val encryptedFile = listOf("aaxc", "aax", "aa")
+                .map { File(audiobooksDir, "$asin.$it") }
+                .firstOrNull { it.exists() }
 
-            if (!File(encryptedPath).exists()) {
-                Log.e(TAG, "Encrypted file not found for retry: $encryptedPath")
-                updateTaskStatusWithError(taskId, "failed", "Cached file not found - re-download required")
+            if (encryptedFile == null) {
+                // No cached source left (validation failure deletes it): a retry can never
+                // succeed. Mark cancelled instead of failed so the library shows the
+                // download button again — failed + stored keys would keep showing a retry
+                // button that loops forever.
+                Log.e(TAG, "Encrypted file not found for retry: $asin (aaxc/aax) - resetting for re-download")
+                updateTaskStatusInDb(taskId, "cancelled")
                 return@withContext false
             }
+            val encryptedPath = encryptedFile.absolutePath
 
             // Delete any corrupt decrypted file from previous attempt
             File(decryptedCachePath).delete()

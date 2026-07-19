@@ -142,6 +142,10 @@ export default function LibraryScreen() {
     const [showControls, setShowControls] = useState(false);
     const [showExportControls, setShowExportControls] = useState(false);
 
+    // Batch download: multi-select mode + the set of selected ASINs.
+    const [batchMode, setBatchMode] = useState(false);
+    const [selectedForBatch, setSelectedForBatch] = useState<Set<string>>(new Set());
+
     // Export state
     const [exportFormats, setExportFormats] = useState<LibraryExportFormat[]>(['csv', 'txt', 'json', 'xlsx', 'png']);
     const [exportSortField, setExportSortField] = useState<LibraryExportSortField>('title');
@@ -942,34 +946,40 @@ export default function LibraryScreen() {
         return true;
     };
 
-    const handleDownload = async (book: Book) => {
+    // Returns true when a download was actually started/enqueued, false on any refusal or
+    // failure — the batch mode uses this for an honest "Started X of N" summary.
+    const handleDownload = async (book: Book, silent = false): Promise<boolean> => {
         // Guard against re-selecting a book that is already downloading or queued.
         const existingStage = stageProgress[book.audible_product_id];
         const existingTask = downloadTasks.get(book.audible_product_id);
-        if (existingStage || (existingTask && existingTask.status !== 'completed' && existingTask.status !== 'failed')) {
-            Alert.alert('Already in Progress', `"${book.title}" is already downloading or queued.`);
-            return;
+        // Block only when it is genuinely running: a live stage in the store, or an active
+        // download-task status. Cancelled / failed / interrupted (stale decrypt/copy) tasks
+        // stay retriable.
+        const activeStatuses = ['downloading', 'paused', 'queued'];
+        if (existingStage || (existingTask && activeStatuses.includes(existingTask.status))) {
+            if (!silent) Alert.alert('Already in Progress', `"${book.title}" is already downloading or queued.`);
+            return false;
         }
         try {
             // Demo mode: real LibriVox MP3 download to the app sandbox (no SAF dir,
             // no DRM, no native pipeline). Progress shows through the same UI.
             if (isDemoBook(book)) {
                 demoDownloads.enqueue(book);
-                Alert.alert(
+                if (!silent) Alert.alert(
                     'Download Started',
                     `"${book.title}" is downloading. Watch the progress here in the library.`
                 );
-                return;
+                return true;
             }
 
             const downloadDir = await SecureStore.getItemAsync(DOWNLOAD_PATH_KEY);
             if (!downloadDir) {
-                Alert.alert(
+                if (!silent) Alert.alert(
                     'Download Directory Not Set',
                     'Please go to Settings and choose a download directory first.',
                     [{ text: 'OK' }]
                 );
-                return;
+                return false;
             }
 
             // LibriVox books: background download, no auth needed
@@ -988,37 +998,38 @@ export default function LibraryScreen() {
                             librivoxBook.url_zip_file,
                             downloadDir
                         );
-                        Alert.alert(
+                        if (!silent) Alert.alert(
                             'Download Started',
                             `"${book.title}" is downloading. Check the notification for progress.`
                         );
-                    } else {
-                        Alert.alert('Error', 'Could not find download URL for this book.');
+                        return true;
                     }
+                    console.warn('[LibraryScreen] No download URL for LibriVox book:', book.audible_product_id);
+                    if (!silent) Alert.alert('Error', 'Could not find download URL for this book.');
                 } catch (dlError: any) {
                     console.error('[LibraryScreen] LibriVox download error:', dlError);
-                    Alert.alert('Download Failed', dlError.message || 'Unknown error');
+                    if (!silent) Alert.alert('Download Failed', dlError.message || 'Unknown error');
                 }
-                return;
+                return false;
             }
 
             // Audible books: existing DRM download flow
             if (book.is_downloadable === false) {
-                Alert.alert(
+                if (!silent) Alert.alert(
                     'Not Downloadable',
                     'This item is a podcast or periodical parent. Enable podcasts to sync episodes, then download an episode instead.'
                 );
-                return;
+                return false;
             }
 
             const hasPermission = await requestNotificationPermission();
             if (!hasPermission) {
-                Alert.alert(
+                if (!silent) Alert.alert(
                     'Permission Required',
                     'Please grant notification permission to see download progress',
                     [{ text: 'OK' }]
                 );
-                return;
+                return false;
             }
 
             const dbPath = getDatabasePath();
@@ -1034,8 +1045,8 @@ export default function LibraryScreen() {
             }
 
             if (!account) {
-                Alert.alert('Error', 'Please log in first');
-                return;
+                if (!silent) Alert.alert('Error', 'Please log in first');
+                return false;
             }
 
             if (account.identity?.access_token) {
@@ -1058,13 +1069,23 @@ export default function LibraryScreen() {
                         console.log('[LibraryScreen] Token refreshed successfully');
                     } catch (refreshError) {
                         console.error('[LibraryScreen] Token refresh failed:', refreshError);
-                        Alert.alert('Error', 'Please log in again - token refresh failed');
-                        return;
+                        if (!silent) Alert.alert('Error', 'Please log in again - token refresh failed');
+                        return false;
                     }
                 }
             }
 
             console.log('[LibraryScreen] Enqueueing download:', book.title, book.audible_product_id);
+
+            // Retry of a cancelled/failed/interrupted book: clear the stale task first so a
+            // fresh download starts cleanly (keep any partial file off the record).
+            if (existingTask) {
+                try {
+                    await clearBookDownloadState(dbPath, book.audible_product_id, false);
+                } catch (clearError) {
+                    console.warn('[LibraryScreen] Failed to clear stale download state:', clearError);
+                }
+            }
 
             const author = (book.authors?.length || 0) > 0 ? book.authors.join(', ') : undefined;
 
@@ -1079,14 +1100,16 @@ export default function LibraryScreen() {
 
             console.log('[LibraryScreen] Download enqueued successfully');
 
-            Alert.alert(
+            if (!silent) Alert.alert(
                 'Download Started',
                 `"${book.title}" is downloading. Monitor progress here or in the notification — you can leave the app.`
             );
+            return true;
 
         } catch (error: any) {
             console.error('[LibraryScreen] Download error:', error);
-            Alert.alert('Download Failed', error.message || 'Unknown error');
+            if (!silent) Alert.alert('Download Failed', error.message || 'Unknown error');
+            return false;
         }
     };
 
@@ -1379,6 +1402,46 @@ export default function LibraryScreen() {
         setShowContextMenu(true);
     };
 
+    const exitBatchMode = () => {
+        setBatchMode(false);
+        setSelectedForBatch(new Set());
+    };
+
+    const toggleBatchSelect = (asin: string) => {
+        setSelectedForBatch(prev => {
+            const next = new Set(prev);
+            if (next.has(asin)) next.delete(asin);
+            else next.add(asin);
+            return next;
+        });
+    };
+
+    const handleBatchDownload = async () => {
+        const books = audiobooks.filter(b => selectedForBatch.has(b.audible_product_id));
+        if (books.length === 0) return;
+        // Precheck the download directory once so a batch of many books doesn't fail per-book.
+        if (books.some(b => !isDemoBook(b))) {
+            const dir = await SecureStore.getItemAsync(DOWNLOAD_PATH_KEY);
+            if (!dir) {
+                Alert.alert('Download Directory Not Set', 'Please choose a download directory in Settings first.');
+                return;
+            }
+        }
+        let started = 0;
+        for (const b of books) {
+            // silent: the batch shows one summary instead of per-book alerts
+            if (await handleDownload(b, true)) started++;
+        }
+        const n = books.length;
+        exitBatchMode();
+        Alert.alert(
+            'Batch Download',
+            started === n
+                ? `Started downloading ${n} book${n === 1 ? '' : 's'}.`
+                : `Started ${started} of ${n} books. The rest were skipped or failed — check the library list.`
+        );
+    };
+
     const renderItem = ({item}: { item: Book }) => {
         const status = getStatus(item);
         const parentPodcast = isPodcastParent(item);
@@ -1389,18 +1452,28 @@ export default function LibraryScreen() {
         const task = downloadTasks.get(item.audible_product_id);
         // Sequential-mode queued books have no DB task; they are queued only in the store.
         const isSpQueued = stageProgress[item.audible_product_id]?.stage === 'queued';
-        const isDownloaded = !!item.file_path || task?.status === 'completed';
+        // Only a saved final file means "downloaded". The download-task "completed"
+        // status is also set once the download alone finishes (before decrypt/copy), so a
+        // cancelled or interrupted book could otherwise look downloaded and block retry.
+        const isDownloaded = !!item.file_path;
         const isProcessing = task?.status === 'decrypting' || task?.status === 'validating' || task?.status === 'copying';
         const canRetryConversion = task?.status === 'failed' && !!task.aaxc_key;
-        const canDownload = item.is_downloadable !== false && (!task || (task.status === 'failed' && !canRetryConversion)) && !isSpQueued;
         const isDownloading = task?.status === 'downloading';
         const isPaused = task?.status === 'paused';
         const isQueued = task?.status === 'queued' || isSpQueued;
+        const isActive = isDownloading || isPaused || isQueued || isProcessing;
+        // Retriable whenever it is not actually downloaded and nothing is actively running:
+        // covers cancelled, failed, interrupted, and a stale "completed" with no saved file.
+        const canDownload = item.is_downloadable !== false && !isDownloaded && !isActive && !canRetryConversion;
 
         return (
             <TouchableOpacity
-                style={styles.item}
+                style={[styles.item, batchMode && selectedForBatch.has(item.audible_product_id) && styles.itemSelected]}
                 onPress={() => {
+                    if (batchMode) {
+                        if (canDownload) toggleBatchSelect(item.audible_product_id);
+                        return;
+                    }
                     setSelectedBook(item);
                     setDetailDescriptionExpanded(false);
                     setDetailDescriptionLines(0);
@@ -1410,6 +1483,17 @@ export default function LibraryScreen() {
                 accessibilityLabel={parentPodcast ? `Open ${item.title} episodes` : item.title}
             >
                 <View style={styles.itemRow}>
+                    {batchMode && (
+                        <View style={[
+                            styles.batchCheck,
+                            selectedForBatch.has(item.audible_product_id) && styles.batchCheckOn,
+                            !canDownload && styles.batchCheckDisabled,
+                        ]}>
+                            {selectedForBatch.has(item.audible_product_id) && (
+                                <Text style={styles.batchCheckMark}>✓</Text>
+                            )}
+                        </View>
+                    )}
                     {coverUrl ? (
                         <Image
                             source={{uri: coverUrl}}
@@ -1458,7 +1542,7 @@ export default function LibraryScreen() {
                         </View>
                     </View>
 
-                    {!isDownloaded && !isProcessing && canDownload && (
+                    {!batchMode && !isDownloaded && !isProcessing && canDownload && (
                         <TouchableOpacity
                             style={styles.downloadButton}
                             onPress={() => handleDownload(item)}
@@ -1500,7 +1584,7 @@ export default function LibraryScreen() {
                         </TouchableOpacity>
                     )}
 
-                    {(isDownloading || isPaused || isQueued) && (
+                    {(isDownloading || isPaused || isQueued || isProcessing) && (
                         <TouchableOpacity
                             style={styles.cancelButton}
                             onPress={() => handleCancelDownload(item)}
@@ -1658,8 +1742,45 @@ export default function LibraryScreen() {
                                 color={colors.textPrimary}
                             />
                         </TouchableOpacity>
+
+                        <TouchableOpacity
+                            style={[
+                                styles.toggleControlsButton,
+                                batchMode && styles.toggleControlsButtonActive
+                            ]}
+                            onPress={() => (batchMode ? exitBatchMode() : setBatchMode(true))}
+                            accessibilityLabel="Batch download"
+                        >
+                            <Ionicons
+                                name={batchMode ? 'close' : 'checkbox-outline'}
+                                size={24}
+                                color={colors.textPrimary}
+                            />
+                        </TouchableOpacity>
                     </View>
                 </View>
+
+                {batchMode && (
+                    <View style={styles.batchBar}>
+                        <Text style={styles.batchBarText}>{selectedForBatch.size} selected</Text>
+                        <View style={styles.batchBarButtons}>
+                            <TouchableOpacity
+                                style={styles.batchBarButtonSecondary}
+                                onPress={() => setSelectedForBatch(new Set())}
+                                disabled={selectedForBatch.size === 0}
+                            >
+                                <Text style={styles.batchBarButtonSecondaryText}>Clear</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity
+                                style={[styles.batchBarButton, selectedForBatch.size === 0 && styles.batchBarButtonDisabled]}
+                                onPress={handleBatchDownload}
+                                disabled={selectedForBatch.size === 0}
+                            >
+                                <Text style={styles.batchBarButtonText}>Download ({selectedForBatch.size})</Text>
+                            </TouchableOpacity>
+                        </View>
+                    </View>
+                )}
 
                 {showControls && (
                     <>
@@ -2569,6 +2690,76 @@ const createStyles = (theme: Theme) => ({
         padding: theme.spacing.md,
         borderWidth: 1,
         borderColor: theme.colors.border,
+    },
+    itemSelected: {
+        borderColor: theme.colors.accent,
+        backgroundColor: theme.colors.accentDim,
+    },
+    batchCheck: {
+        width: 24,
+        height: 24,
+        borderRadius: 12,
+        borderWidth: 2,
+        borderColor: theme.colors.border,
+        alignSelf: 'center' as const,
+        justifyContent: 'center' as const,
+        alignItems: 'center' as const,
+    },
+    batchCheckOn: {
+        backgroundColor: theme.colors.accent,
+        borderColor: theme.colors.accent,
+    },
+    batchCheckDisabled: {
+        opacity: 0.3,
+    },
+    batchCheckMark: {
+        color: theme.colors.background,
+        fontWeight: '700' as const,
+        fontSize: 14,
+    },
+    batchBar: {
+        flexDirection: 'row' as const,
+        justifyContent: 'space-between' as const,
+        alignItems: 'center' as const,
+        paddingHorizontal: theme.spacing.md,
+        paddingVertical: theme.spacing.sm,
+        backgroundColor: theme.colors.backgroundSecondary,
+        borderBottomWidth: 1,
+        borderBottomColor: theme.colors.border,
+    },
+    batchBarText: {
+        ...theme.typography.body,
+        fontWeight: '600' as const,
+    },
+    batchBarButtons: {
+        flexDirection: 'row' as const,
+        gap: theme.spacing.sm,
+    },
+    batchBarButtonSecondary: {
+        paddingHorizontal: theme.spacing.md,
+        paddingVertical: theme.spacing.sm,
+        borderRadius: 6,
+        borderWidth: 1,
+        borderColor: theme.colors.border,
+    },
+    batchBarButtonSecondaryText: {
+        ...theme.typography.body,
+        fontSize: 14,
+    },
+    batchBarButton: {
+        paddingHorizontal: theme.spacing.md,
+        paddingVertical: theme.spacing.sm,
+        borderRadius: 6,
+        backgroundColor: theme.colors.accent,
+    },
+    batchBarButtonDisabled: {
+        opacity: 0.4,
+    },
+    batchBarButtonText: {
+        ...theme.typography.body,
+        fontSize: 14,
+        color: theme.colors.background,
+        fontWeight: '700' as const,
     },
     itemRow: {
         flexDirection: 'row' as const,

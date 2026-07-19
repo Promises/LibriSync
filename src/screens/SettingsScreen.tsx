@@ -15,6 +15,11 @@ import {
   cancelTokenRefresh,
   cancelLibrarySync,
   exportDatabase,
+  enableAutoDownload,
+  disableAutoDownload,
+  isAutoDownloadEnabled,
+  cancelAllDownloads,
+  cancelAllProcesses,
   ExpoRustBridge,
 } from '../../modules/expo-rust-bridge';
 import { getDatabaseFiles, getDatabasePath } from '../utils/appPaths';
@@ -54,6 +59,7 @@ export default function SettingsScreen() {
   const [syncWifiOnly, setSyncWifiOnly] = useState(true);
   const [autoTokenRefresh, setAutoTokenRefresh] = useState(true);
   const [includePodcasts, setIncludePodcasts] = useState(true);
+  const [autoDownload, setAutoDownload] = useState(false); // default off — opt-in feature
 
   // Secret debug mode activation
   const tapTimestamps = useRef<number[]>([]);
@@ -126,6 +132,9 @@ export default function SettingsScreen() {
           if (downloadModeResult.success && downloadModeResult.data) {
             setDownloadMode((downloadModeResult.data as any).mode as DownloadMode);
           }
+
+          // Reflect the native auto-download pref (default off).
+          setAutoDownload(isAutoDownloadEnabled());
         } catch (error) {
           console.error('[Settings] Failed to load native preferences:', error);
         }
@@ -311,6 +320,51 @@ export default function SettingsScreen() {
   const handleIncludePodcastsChange = async (value: boolean) => {
     setIncludePodcasts(value);
     await saveSettings(INCLUDE_PODCASTS_KEY, value.toString());
+  };
+
+  const handleAutoDownloadChange = (value: boolean) => {
+    setAutoDownload(value);
+    try {
+      if (value) {
+        enableAutoDownload();
+        console.log('[Settings] Auto-download enabled');
+      } else {
+        disableAutoDownload();
+        console.log('[Settings] Auto-download disabled');
+      }
+    } catch (error: any) {
+      console.error('[Settings] Failed to toggle auto-download:', error);
+      setAutoDownload(!value); // revert the switch on failure
+      Alert.alert('Error', error.message || 'Failed to update auto-download');
+    }
+  };
+
+  const handleStopAll = () => {
+    Alert.alert(
+      'Stop All',
+      'Choose what to stop. Partial files and task state are cleaned up either way.',
+      [
+        { text: 'Cancel all downloads', onPress: () => runStopAll('downloads') },
+        { text: 'Cancel all running processes', style: 'destructive', onPress: () => runStopAll('processes') },
+        { text: 'Back', style: 'cancel' },
+      ]
+    );
+  };
+
+  const runStopAll = (mode: 'downloads' | 'processes') => {
+    try {
+      const n = mode === 'downloads' ? cancelAllDownloads() : cancelAllProcesses();
+      const tasks = `${n} download task${n === 1 ? '' : 's'}`;
+      Alert.alert(
+        'Stopped',
+        mode === 'downloads'
+          ? `Cancelled all downloads (${tasks}).`
+          : `Cancelled all downloads and background processes (${tasks}).`
+      );
+    } catch (error: any) {
+      console.error('[Settings] Stop all failed:', error);
+      Alert.alert('Error', error.message || 'Failed to stop');
+    }
   };
 
   const handleSmartPlayerCoverChange = async (value: boolean) => {
@@ -793,6 +847,21 @@ export default function SettingsScreen() {
 
           <View style={styles.settingItem}>
             <View style={styles.settingInfo}>
+              <Text style={styles.settingLabel}>Auto-Download New Books</Text>
+              <Text style={styles.settingDescription}>
+                After a library sync, automatically download books that aren't downloaded yet (Wi-Fi only)
+              </Text>
+            </View>
+            <Switch
+              value={autoDownload}
+              onValueChange={handleAutoDownloadChange}
+              trackColor={{ false: colors.border, true: colors.accentDim }}
+              thumbColor={autoDownload ? colors.accent : colors.textSecondary}
+            />
+          </View>
+
+          <View style={styles.settingItem}>
+            <View style={styles.settingInfo}>
               <Text style={styles.settingLabel}>Include Podcasts</Text>
               <Text style={styles.settingDescription}>
                 Show podcasts, periodicals, and episodes in the library
@@ -805,6 +874,16 @@ export default function SettingsScreen() {
               thumbColor={includePodcasts ? colors.accent : colors.textSecondary}
             />
           </View>
+
+          <TouchableOpacity
+            style={[styles.button, styles.dangerButton]}
+            onPress={handleStopAll}
+          >
+            <Text style={[styles.buttonText, styles.dangerButtonText]}>Stop All Downloads</Text>
+          </TouchableOpacity>
+          <Text style={styles.dangerDescription}>
+            Cancel all downloads, or all running processes. Cleans up partial files and tasks.
+          </Text>
         </View>
 
         <View style={styles.section}>

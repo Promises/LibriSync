@@ -35,6 +35,7 @@ pub mod download;
 pub mod audio;
 pub mod storage;
 pub mod file;
+pub mod providers;
 
 // Re-export commonly used types for convenience
 pub use error::{LibationError, Result};

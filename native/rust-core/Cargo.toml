@@ -37,6 +37,9 @@ sqlx = { version = "0.7", features = ["runtime-tokio", "sqlite", "chrono"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
+# Async methods in the Provider trait (multi-provider abstraction)
+async-trait = "0.1"
+
 # Date/time handling
 chrono = { version = "0.4", features = ["serde"] }
 

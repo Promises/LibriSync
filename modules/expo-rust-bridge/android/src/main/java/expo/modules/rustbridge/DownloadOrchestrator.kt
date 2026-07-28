@@ -91,6 +91,97 @@ class DownloadOrchestrator(
     }
 
     /**
+     * Execute a typed [DownloadPlan] — the single, provider-agnostic download entry point.
+     *
+     * Enqueues the Rust download task for the plan's part and starts the shared monitoring
+     * loop; the part's kind decides the finalize step (AAXC decrypt vs plain/zip copy), which
+     * [startMonitoringDownload] already dispatches via its `plainAudio` flag. Audible and
+     * LibriVox both build a single-part plan and route here; Libro.fm (Phase 4) supplies its
+     * plan from the Rust provider. Multi-part plans (Libro.fm parts-folder) are added in Phase 4.
+     */
+    suspend fun enqueuePlan(
+        asin: String,
+        title: String,
+        plan: DownloadPlan,
+        outputDirectory: String,
+    ): String = withContext(Dispatchers.IO) {
+        if (plan.parts.isEmpty()) throw Exception("Empty download plan for $asin")
+        if (plan.parts.size > 1) {
+            // Multi-part (e.g. Libro.fm parts-folder) is added in Phase 4.
+            throw Exception("Multi-part download plans are not supported yet ($asin)")
+        }
+        val part = plan.parts.first()
+
+        val audiobooksDir = File(context.cacheDir, "audiobooks").apply { mkdirs() }
+
+        // Resolve cache paths + finalize mode from the part kind.
+        val encryptedPath: String
+        val decryptedCachePath: String
+        val plainAudio: Boolean
+        val aaxcKey: String
+        val aaxcIv: String
+        when (part) {
+            is DownloadPart.AaxcPart -> {
+                encryptedPath = File(audiobooksDir, part.filename).absolutePath
+                decryptedCachePath = File(audiobooksDir, "$asin.m4b").absolutePath
+                plainAudio = false
+                aaxcKey = part.key
+                aaxcIv = part.iv
+            }
+            is DownloadPart.PlainPart -> {
+                encryptedPath = File(audiobooksDir, part.filename).absolutePath
+                decryptedCachePath = encryptedPath
+                plainAudio = true
+                aaxcKey = ""
+                aaxcIv = ""
+            }
+            is DownloadPart.ZipPart -> {
+                // Cache with a .zip name so copyLibrivoxToFinalDestination extracts it.
+                encryptedPath = File(audiobooksDir, "$asin.zip").absolutePath
+                decryptedCachePath = encryptedPath
+                plainAudio = true
+                aaxcKey = ""
+                aaxcIv = ""
+            }
+        }
+
+        // Enqueue the download in the Rust manager.
+        val enqueueParams = JSONObject().apply {
+            put("db_path", dbPath)
+            put("asin", asin)
+            put("title", title)
+            put("download_url", part.url)
+            put("total_bytes", 0)
+            put("download_path", encryptedPath)
+            put("output_path", decryptedCachePath)
+            put("request_headers", JSONObject(part.headers))
+        }
+        val parsedEnqueue = parseJsonResponse(ExpoRustBridgeModule.nativeEnqueueDownload(enqueueParams.toString()))
+        if (parsedEnqueue["success"] != true) {
+            throw Exception("Failed to enqueue: ${parsedEnqueue["error"]}")
+        }
+        val taskId = (parsedEnqueue["data"] as? Map<*, *>)?.get("task_id") as? String
+            ?: throw Exception("No task ID")
+
+        // Persist keys (AAXC) + output dir for the finalize/retry steps.
+        storeConversionKeysInDb(taskId, aaxcKey, aaxcIv, outputDirectory)
+
+        startMonitoringDownload(
+            taskId = taskId,
+            asin = asin,
+            title = title,
+            encryptedPath = encryptedPath,
+            decryptedCachePath = decryptedCachePath,
+            outputDirectory = outputDirectory,
+            aaxcKey = aaxcKey,
+            aaxcIv = aaxcIv,
+            totalBytes = 0,
+            plainAudio = plainAudio,
+        )
+        taskId
+    }
+
+    /**
      * Enqueue a book for download and conversion
      */
     suspend fun enqueueBook(
@@ -135,60 +226,15 @@ class DownloadOrchestrator(
 
             Log.d(TAG, "License obtained. Type: $fileType, size: ${totalBytes / 1024 / 1024} MB")
 
-            // Step 2: Prepare paths
-            val cacheDir = context.cacheDir
-            val audiobooksDir = File(cacheDir, "audiobooks")
-            audiobooksDir.mkdirs()
-
-            val encryptedPath = File(audiobooksDir, "$asin.$fileExtension").absolutePath
-            val decryptedCachePath = if (isPlainAudio) {
-                encryptedPath
+            // Step 2: Build a single-part plan from the license and route through the
+            // unified plan engine (AAXC -> decrypt; plain MP3 -> copy).
+            val filename = "$asin.$fileExtension"
+            val part = if (isPlainAudio) {
+                DownloadPart.PlainPart(downloadUrl, requestHeaders, filename)
             } else {
-                File(audiobooksDir, "$asin.m4b").absolutePath
+                DownloadPart.AaxcPart(downloadUrl, requestHeaders, aaxcKey.orEmpty(), aaxcIv.orEmpty(), filename)
             }
-
-            // Step 3: Enqueue download in Rust manager
-            val enqueueParams = JSONObject().apply {
-                put("db_path", dbPath)
-                put("asin", asin)
-                put("title", title)
-                put("download_url", downloadUrl)
-                put("total_bytes", totalBytes)
-                put("download_path", encryptedPath)
-                put("output_path", decryptedCachePath)
-                put("request_headers", JSONObject(requestHeaders))
-            }
-
-            val enqueueResult = ExpoRustBridgeModule.nativeEnqueueDownload(enqueueParams.toString())
-            val parsedEnqueue = parseJsonResponse(enqueueResult)
-
-            if (parsedEnqueue["success"] != true) {
-                throw Exception("Failed to enqueue: ${parsedEnqueue["error"]}")
-            }
-
-            val enqueueData = parsedEnqueue["data"] as? Map<*, *>
-            val taskId = enqueueData?.get("task_id") as? String ?: throw Exception("No task ID")
-
-            Log.d(TAG, "Download enqueued: $taskId")
-
-            // Step 4: Store conversion keys in DB for retry capability
-            storeConversionKeysInDb(taskId, aaxcKey.orEmpty(), aaxcIv.orEmpty(), outputDirectory)
-
-            // Step 5: Start monitoring this download
-            startMonitoringDownload(
-                taskId = taskId,
-                asin = asin,
-                title = title,
-                encryptedPath = encryptedPath,
-                decryptedCachePath = decryptedCachePath,
-                outputDirectory = outputDirectory,
-                aaxcKey = aaxcKey.orEmpty(),
-                aaxcIv = aaxcIv.orEmpty(),
-                totalBytes = totalBytes,
-                plainAudio = isPlainAudio
-            )
-
-            taskId
+            enqueuePlan(asin, title, DownloadPlan(listOf(part), embedMetadata = true), outputDirectory)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to enqueue book", e)
             errorCallback?.invoke(asin, title, e.message ?: "Unknown error")
@@ -214,169 +260,20 @@ class DownloadOrchestrator(
         Log.d(TAG, "Enqueueing LibriVox book: $asin - $title")
 
         try {
-            // Prepare paths - preserve original file extension from URL
-            val cacheDir = context.cacheDir
-            val audiobooksDir = File(cacheDir, "audiobooks")
-            audiobooksDir.mkdirs()
-
-            // Detect extension from URL - check query params (archive.org uses &file=) and path
+            // Detect extension from URL - check query params (archive.org uses &file=) and path.
+            // The cache filename's extension drives finalize: a .zip is extracted, else copied.
             val parsedUrl = Uri.parse(downloadUrl)
             val fileParam = parsedUrl.getQueryParameter("file")
             val urlForExt = fileParam ?: parsedUrl.lastPathSegment ?: downloadUrl
             val extension = urlForExt.substringAfterLast('.', "mp3").substringBefore('?').lowercase()
-            val downloadPath = File(audiobooksDir, "$asin.$extension").absolutePath
 
-            // Enqueue download in Rust manager (no license needed, no special headers)
-            val enqueueParams = JSONObject().apply {
-                put("db_path", dbPath)
-                put("asin", asin)
-                put("title", title)
-                put("download_url", downloadUrl)
-                put("total_bytes", 0) // Unknown until download starts
-                put("download_path", downloadPath)
-                put("output_path", downloadPath) // Same file, no conversion needed
-                put("request_headers", JSONObject())
-            }
-
-            val enqueueResult = ExpoRustBridgeModule.nativeEnqueueDownload(enqueueParams.toString())
-            val parsedEnqueue = parseJsonResponse(enqueueResult)
-
-            if (parsedEnqueue["success"] != true) {
-                throw Exception("Failed to enqueue: ${parsedEnqueue["error"]}")
-            }
-
-            val enqueueData = parsedEnqueue["data"] as? Map<*, *>
-            val taskId = enqueueData?.get("task_id") as? String ?: throw Exception("No task ID")
-
-            Log.d(TAG, "LibriVox download enqueued: $taskId")
-
-            // Store output directory for the copy step (reuse conversion keys storage)
-            storeConversionKeysInDb(taskId, "", "", outputDirectory)
-
-            // Start monitoring (uses a simplified path that skips decryption)
-            startMonitoringLibrivoxDownload(
-                taskId = taskId,
-                asin = asin,
-                title = title,
-                author = author,
-                downloadPath = downloadPath,
-                outputDirectory = outputDirectory
-            )
-
-            taskId
+            // DRM-free single-part plan (no license, no special headers) → unified engine.
+            val part = DownloadPart.PlainPart(downloadUrl, emptyMap(), "$asin.$extension")
+            enqueuePlan(asin, title, DownloadPlan(listOf(part)), outputDirectory)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to enqueue LibriVox book", e)
             errorCallback?.invoke(asin, title, e.message ?: "Unknown error")
             throw e
-        }
-    }
-
-    /**
-     * Monitor a LibriVox download and copy to final destination on completion.
-     * Skips decryption and validation — MP3 files are ready to copy directly.
-     */
-    private fun startMonitoringLibrivoxDownload(
-        taskId: String,
-        asin: String,
-        title: String,
-        author: String,
-        downloadPath: String,
-        outputDirectory: String
-    ) {
-        monitoringJobs[asin]?.cancel()
-
-        progressCallback?.invoke(asin, "downloading", 0.0, 0, 0, 0L)
-
-        val job = scope.launch {
-            try {
-                val speedEta = SpeedEta()
-                while (isActive) {
-                    delay(2000)
-
-                    val statusParams = JSONObject().apply {
-                        put("db_path", dbPath)
-                        put("task_id", taskId)
-                    }
-
-                    val statusResult = ExpoRustBridgeModule.nativeGetDownloadTask(statusParams.toString())
-                    val parsedStatus = parseJsonResponse(statusResult)
-
-                    if (parsedStatus["success"] == true) {
-                        val taskData = parsedStatus["data"] as? Map<*, *>
-                        val status = taskData?.get("status") as? String
-                        val bytesDownloaded = (taskData?.get("bytes_downloaded") as? Number)?.toLong() ?: 0L
-                        val taskTotalBytes = (taskData?.get("total_bytes") as? Number)?.toLong() ?: 0L
-                        val percentage = if (taskTotalBytes > 0) {
-                            (bytesDownloaded.toDouble() / taskTotalBytes) * 100.0
-                        } else 0.0
-
-                        when (status) {
-                            "downloading" -> {
-                                speedEta.update(bytesDownloaded, taskTotalBytes)
-                                progressCallback?.invoke(asin, "downloading", percentage, bytesDownloaded, taskTotalBytes, speedEta.etaSeconds)
-                            }
-                            "paused" -> {
-                                // Continue monitoring, skip progress updates
-                            }
-                            "completed" -> {
-                                Log.d(TAG, "LibriVox download completed for $asin, copying to destination")
-                                try {
-                                    triggerLibrivoxCopy(asin, title, downloadPath, outputDirectory, taskId)
-                                } catch (e: CancellationException) {
-                                    throw e
-                                }
-                                break
-                            }
-                            "failed" -> {
-                                val error = taskData?.get("error") as? String ?: "Unknown error"
-                                errorCallback?.invoke(asin, title, error)
-                                break
-                            }
-                            "cancelled" -> break
-                        }
-                    } else {
-                        Log.e(TAG, "Failed to check LibriVox status: ${parsedStatus["error"]}")
-                        break
-                    }
-                }
-            } catch (e: Exception) {
-                if (e !is CancellationException) {
-                    Log.e(TAG, "Error monitoring LibriVox download $asin", e)
-                }
-            } finally {
-                monitoringJobs.remove(asin)
-            }
-        }
-
-        monitoringJobs[asin] = job
-    }
-
-    /**
-     * Copy a completed LibriVox download to the final SAF destination.
-     * No decryption or validation needed.
-     */
-    private suspend fun triggerLibrivoxCopy(
-        asin: String,
-        title: String,
-        downloadPath: String,
-        outputDirectory: String,
-        taskId: String
-    ) = withContext(Dispatchers.IO) {
-        try {
-            updateTaskStatusInDb(taskId, "copying")
-            progressCallback?.invoke(asin, "copying", 0.0, 0, 0, 0L)
-
-            val finalPath = copyLibrivoxToFinalDestination(asin, title, downloadPath, outputDirectory)
-
-            File(downloadPath).delete()
-
-            updateTaskStatusInDb(taskId, "completed", finalPath)
-            clearManuallyPaused(asin)
-            completionCallback?.invoke(asin, title, finalPath)
-        } catch (e: Exception) {
-            Log.e(TAG, "LibriVox copy failed for $asin", e)
-            updateTaskStatusWithError(taskId, "failed", e.message ?: "Copy failed")
-            errorCallback?.invoke(asin, title, e.message ?: "Copy failed")
         }
     }
 
@@ -713,6 +610,9 @@ class DownloadOrchestrator(
             progressCallback?.invoke(asin, "copying", 0.0, 0, 0, 0L)
 
             val finalPath = copyLibrivoxToFinalDestination(asin, title, downloadPath, outputDirectory)
+
+            // Remove the cache file once copied (matches the old LibriVox copy path).
+            File(downloadPath).delete()
 
             updateTaskStatusInDb(taskId, "completed", finalPath)
             clearManuallyPaused(asin)

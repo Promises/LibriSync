@@ -30,14 +30,16 @@ pub async fn save_account(pool: &SqlitePool, account_id: &str, account_json: &st
 
     let account_name = account["account_name"].as_str().unwrap_or(account_id);
 
-    let locale = account
+    // Provider tag (multi-provider). Defaults to 'audible' for legacy accounts.
+    let provider = account["provider"].as_str().unwrap_or("audible");
+
+    // Locale is optional: Audible accounts carry one; DRM-free providers (Libro.fm)
+    // don't. Fall back to "us" so a locale-less account doesn't fail to save.
+    let locale_code = account
         .get("locale")
         .or_else(|| account.get("identity").and_then(|identity| identity.get("locale")))
-        .ok_or_else(|| LibationError::InvalidInput("Missing locale".to_string()))?;
-
-    let locale_code = locale["country_code"]
-        .as_str()
-        .ok_or_else(|| LibationError::InvalidInput("Missing locale country_code".to_string()))?;
+        .and_then(|locale| locale["country_code"].as_str())
+        .unwrap_or("us");
 
     // Extract identity JSON
     let identity_json = account["identity"].to_string();
@@ -56,14 +58,16 @@ pub async fn save_account(pool: &SqlitePool, account_id: &str, account_json: &st
             locale_code,
             identity_json,
             token_expires_at,
-            decrypt_key
-        ) VALUES (?, ?, ?, ?, ?, ?)
+            decrypt_key,
+            provider
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(account_id) DO UPDATE SET
             account_name = excluded.account_name,
             locale_code = excluded.locale_code,
             identity_json = excluded.identity_json,
             token_expires_at = excluded.token_expires_at,
             decrypt_key = excluded.decrypt_key,
+            provider = excluded.provider,
             updated_at = CURRENT_TIMESTAMP
         "#,
     )
@@ -73,6 +77,7 @@ pub async fn save_account(pool: &SqlitePool, account_id: &str, account_json: &st
     .bind(&identity_json)
     .bind(token_expires_at)
     .bind(decrypt_key)
+    .bind(provider)
     .execute(pool)
     .await?;
 

@@ -41,6 +41,7 @@ type NamingPattern = 'flat_file' | 'author_book_folder' | 'author_series_book';
 type PodcastNamingPattern = 'podcast_episode_folder' | 'podcast_flat_file';
 type ValidationLevel = 'full' | 'quick' | 'off';
 type DownloadMode = 'parallel' | 'sequential';
+type LibroFmFormat = 'm4b' | 'parts';
 
 export default function SettingsScreen() {
   const styles = useStyles(createStyles);
@@ -52,6 +53,7 @@ export default function SettingsScreen() {
   const [smartPlayerCover, setSmartPlayerCover] = useState(false);
   const [validationLevel, setValidationLevel] = useState<ValidationLevel>('full');
   const [downloadMode, setDownloadMode] = useState<DownloadMode>('parallel');
+  const [libroFmFormat, setLibroFmFormat] = useState<LibroFmFormat>('m4b');
   const [isLoading, setIsLoading] = useState(true);
 
   // Sync settings
@@ -105,12 +107,13 @@ export default function SettingsScreen() {
       // Load naming pattern and Smart Player cover from native SharedPreferences
       if (Platform.OS === 'android') {
         try {
-          const [namingResult, podcastNamingResult, coverResult, validationResult, downloadModeResult] = await Promise.all([
+          const [namingResult, podcastNamingResult, coverResult, validationResult, downloadModeResult, libroFmFormatResult] = await Promise.all([
             ExpoRustBridge.getNamingPattern(),
             ExpoRustBridge.getPodcastNamingPattern(),
             ExpoRustBridge.getSmartPlayerCover(),
             ExpoRustBridge.getValidationLevel(),
             ExpoRustBridge.getDownloadMode(),
+            ExpoRustBridge.getLibroFmFormat(),
           ]);
 
           if (namingResult.success && namingResult.data) {
@@ -131,6 +134,10 @@ export default function SettingsScreen() {
 
           if (downloadModeResult.success && downloadModeResult.data) {
             setDownloadMode((downloadModeResult.data as any).mode as DownloadMode);
+          }
+
+          if (libroFmFormatResult.success && libroFmFormatResult.data) {
+            setLibroFmFormat((libroFmFormatResult.data as any).format as LibroFmFormat);
           }
 
           // Reflect the native auto-download pref (default off).
@@ -491,6 +498,35 @@ export default function SettingsScreen() {
     }
   };
 
+  const getLibroFmFormatLabel = (format: LibroFmFormat): string => {
+    switch (format) {
+      case 'm4b': return 'Single M4B';
+      case 'parts': return 'Parts folder';
+    }
+  };
+
+  const handleLibroFmFormatPress = () => {
+    Alert.alert(
+      'Libro.fm Format',
+      'How Libro.fm books are saved.',
+      [
+        { text: 'Single M4B', onPress: () => handleLibroFmFormatChange('m4b') },
+        { text: 'Parts folder (MP3)', onPress: () => handleLibroFmFormatChange('parts') },
+        { text: 'Cancel', style: 'cancel' },
+      ]
+    );
+  };
+
+  const handleLibroFmFormatChange = async (value: LibroFmFormat) => {
+    setLibroFmFormat(value);
+    try {
+      await ExpoRustBridge.setLibroFmFormat(value);
+    } catch (error: any) {
+      console.error('[Settings] Failed to save Libro.fm format:', error);
+      Alert.alert('Error', error.message || 'Failed to update Libro.fm format');
+    }
+  };
+
   const getPodcastNamingPatternLabel = (pattern: PodcastNamingPattern): string => {
     switch (pattern) {
       case 'podcast_episode_folder': return 'Episode Folder';
@@ -776,6 +812,22 @@ export default function SettingsScreen() {
               disabled={isLoading}
             >
               <Text style={styles.buttonText}>{getDownloadModeLabel(downloadMode)}</Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.settingItem}>
+            <View style={styles.settingInfo}>
+              <Text style={styles.settingLabel}>Libro.fm Format</Text>
+              <Text style={styles.settingDescription}>
+                Libro.fm offers each book as one packaged M4B or as a folder of MP3 parts.
+              </Text>
+            </View>
+            <TouchableOpacity
+              style={styles.button}
+              onPress={handleLibroFmFormatPress}
+              disabled={isLoading}
+            >
+              <Text style={styles.buttonText}>{getLibroFmFormatLabel(libroFmFormat)}</Text>
             </TouchableOpacity>
           </View>
 

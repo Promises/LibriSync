@@ -250,13 +250,16 @@ class ExpoRustBridgeModule : Module() {
       }
     }
 
-    AsyncFunction("providerGetDownloadPlan") { provider: String, dbPath: String, accountJson: String, itemRef: String ->
+    // `optionsJson` carries provider-specific download settings, e.g. Libro.fm's
+    // {"format":"parts"|"m4b"}. Pass "{}" when the provider has none.
+    AsyncFunction("providerGetDownloadPlan") { provider: String, dbPath: String, accountJson: String, itemRef: String, optionsJson: String? ->
       try {
         val params = JSONObject().apply {
           put("provider", provider)
           put("db_path", dbPath)
           put("account_json", accountJson)
           put("item_ref", itemRef)
+          put("options", JSONObject(optionsJson ?: "{}"))
         }
         parseJsonResponse(nativeProviderGetDownloadPlan(params.toString()))
       } catch (e: Exception) {
@@ -1397,6 +1400,32 @@ class ExpoRustBridgeModule : Module() {
       }
     }
 
+    // Generic download entry point: the Rust provider produces the plan, so any provider
+    // in the registry downloads through this one function.
+    AsyncFunction("enqueueProviderDownload") { provider: String, accountJson: String, itemRef: String, title: String, author: String?, outputDirectory: String, optionsJson: String? ->
+      try {
+        val context = appContext.reactContext ?: throw Exception("Context not available")
+
+        DownloadService.enqueueProviderBook(
+          context = context,
+          provider = provider,
+          accountJson = accountJson,
+          itemRef = itemRef,
+          title = title,
+          author = author ?: "",
+          outputDirectory = outputDirectory,
+          optionsJson = optionsJson ?: "{}"
+        )
+
+        mapOf(
+          "success" to true,
+          "data" to mapOf("message" to "$provider download enqueued")
+        )
+      } catch (e: Exception) {
+        mapOf("success" to false, "error" to e.message)
+      }
+    }
+
     /**
      * Test bridge connection and verify Rust library is loaded.
      *
@@ -1641,6 +1670,30 @@ class ExpoRustBridgeModule : Module() {
         val prefs = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
         val mode = prefs.getString("download_mode", "parallel") ?: "parallel"
         mapOf("success" to true, "data" to mapOf("mode" to mode))
+      } catch (e: Exception) {
+        mapOf("success" to false, "error" to e.message)
+      }
+    }
+
+    // Libro.fm serves each book two ways: a single packaged M4B, or a set of zipped
+    // MP3 parts. "m4b" | "parts"; reaches the provider as its download plan options.
+    Function("setLibroFmFormat") { format: String ->
+      try {
+        val context = appContext.reactContext ?: throw Exception("Context not available")
+        val prefs = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
+        prefs.edit().putString("librofm_format", format).apply()
+        mapOf("success" to true)
+      } catch (e: Exception) {
+        mapOf("success" to false, "error" to e.message)
+      }
+    }
+
+    Function("getLibroFmFormat") {
+      try {
+        val context = appContext.reactContext ?: throw Exception("Context not available")
+        val prefs = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
+        val format = prefs.getString("librofm_format", "m4b") ?: "m4b"
+        mapOf("success" to true, "data" to mapOf("format" to format))
       } catch (e: Exception) {
         mapOf("success" to false, "error" to e.message)
       }

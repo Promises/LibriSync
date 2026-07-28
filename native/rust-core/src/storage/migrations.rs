@@ -54,6 +54,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
     .await?;
     run_migration(pool, 5, "add_source_column", add_source_column(pool)).await?;
     run_migration(pool, 6, "book_accounts", create_book_accounts_table(pool)).await?;
+    run_migration(pool, 7, "add_provider_column", add_provider_column(pool)).await?;
 
     Ok(())
 }
@@ -563,6 +564,23 @@ async fn add_source_column(pool: &SqlitePool) -> Result<()> {
         pool.execute("ALTER TABLE Books ADD COLUMN source TEXT NOT NULL DEFAULT 'audible'")
             .await?;
         pool.execute("CREATE INDEX IF NOT EXISTS idx_books_source ON Books(source)")
+            .await?;
+    }
+
+    Ok(())
+}
+
+/// Tag each account with its provider (multi-provider support). Existing rows
+/// default to 'audible', which is correct for all pre-Libro.fm accounts.
+async fn add_provider_column(pool: &SqlitePool) -> Result<()> {
+    let columns: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('Accounts')")
+        .fetch_all(pool)
+        .await?;
+
+    if !columns.contains(&"provider".to_string()) {
+        pool.execute("ALTER TABLE Accounts ADD COLUMN provider TEXT NOT NULL DEFAULT 'audible'")
+            .await?;
+        pool.execute("CREATE INDEX IF NOT EXISTS idx_accounts_provider ON Accounts(provider)")
             .await?;
     }
 

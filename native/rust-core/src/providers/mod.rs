@@ -20,6 +20,8 @@ use crate::storage::Database;
 use crate::{LibationError, Result};
 
 pub mod audible;
+pub mod http;
+pub mod librofm;
 
 /// Stable identifier for a provider. Serializes to a lowercase string that also
 /// doubles as the `Books.source` / `Accounts.provider` column value.
@@ -66,6 +68,11 @@ pub type CredentialBlob = serde_json::Value;
 /// Raw login fields collected by the UI (e.g. `{username, password}`), passed
 /// opaquely to a provider's [`Provider::login`].
 pub type LoginInput = serde_json::Value;
+
+/// Per-download options from the caller, e.g. the Libro.fm "download format"
+/// setting (`{"format":"parts"|"m4b"}`). Opaque JSON like [`LoginInput`] so a new
+/// provider can take its own settings without touching the bridge.
+pub type PlanOptions = serde_json::Value;
 
 /// One chapter marker for a downloaded book (used when the source supplies them,
 /// e.g. Libro.fm `tracks[]`). Times are milliseconds from the start.
@@ -147,12 +154,14 @@ pub trait Provider: Send + Sync {
     ) -> Result<SyncStats>;
 
     /// Produce the typed [`DownloadPlan`] for one owned book (`item_ref` = the
-    /// provider's item id: asin / isbn / librivox id).
+    /// provider's item id: asin / isbn / librivox id). `options` carries any
+    /// provider-specific download settings; providers without any ignore it.
     async fn download_plan(
         &self,
         db: &Database,
         creds: &CredentialBlob,
         item_ref: &str,
+        options: &PlanOptions,
     ) -> Result<DownloadPlan>;
 }
 
@@ -160,7 +169,8 @@ pub trait Provider: Send + Sync {
 /// single place that maps a [`ProviderId`] to a concrete implementation.
 pub enum AnyProvider {
     Audible(audible::AudibleProvider),
-    // Librivox / Librofm are added in later phases.
+    Librofm(librofm::LibrofmProvider),
+    // Librivox is folded in during Phase 5 cleanup.
 }
 
 impl AnyProvider {
@@ -169,6 +179,7 @@ impl AnyProvider {
     pub fn get(id: ProviderId) -> Result<Self> {
         match id {
             ProviderId::Audible => Ok(AnyProvider::Audible(audible::AudibleProvider)),
+            ProviderId::Librofm => Ok(AnyProvider::Librofm(librofm::LibrofmProvider)),
             other => Err(LibationError::InvalidInput(format!(
                 "Provider not yet implemented: {}",
                 other.as_str()
@@ -181,6 +192,7 @@ impl AnyProvider {
     pub fn as_provider(&self) -> &dyn Provider {
         match self {
             AnyProvider::Audible(p) => p,
+            AnyProvider::Librofm(p) => p,
         }
     }
 }
@@ -221,15 +233,17 @@ mod tests {
     }
 
     #[test]
-    fn registry_resolves_audible_and_rejects_unimplemented() {
+    fn registry_resolves_implemented_and_rejects_unimplemented() {
         assert!(AnyProvider::get(ProviderId::Audible).is_ok());
-        assert!(AnyProvider::get(ProviderId::Librofm).is_err());
+        assert!(AnyProvider::get(ProviderId::Librofm).is_ok());
+        // Librivox is folded in during Phase 5 cleanup.
+        assert!(AnyProvider::get(ProviderId::Librivox).is_err());
         assert_eq!(
-            AnyProvider::get(ProviderId::Audible)
+            AnyProvider::get(ProviderId::Librofm)
                 .unwrap()
                 .as_provider()
                 .id(),
-            ProviderId::Audible
+            ProviderId::Librofm
         );
     }
 }

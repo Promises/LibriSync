@@ -921,7 +921,9 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeProvid
 }
 
 /// Produce the typed download plan for one book.
-/// Params: `{ "provider": .., "db_path": .., "account_json": .., "item_ref": <asin/isbn> }`
+/// Params: `{ "provider": .., "db_path": .., "account_json": .., "item_ref": <asin/isbn>,
+///            "options": { .. } }` — `options` carries provider-specific download
+/// settings (e.g. Libro.fm `{"format":"parts"|"m4b"}`) and may be omitted.
 /// Returns a `DownloadPlan` (parts: plain/aaxc/zip) for the download engine.
 #[no_mangle]
 pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeProviderGetDownloadPlan(
@@ -938,6 +940,8 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeProvid
             db_path: String,
             account_json: String,
             item_ref: String,
+            #[serde(default)]
+            options: crate::providers::PlanOptions,
         }
 
         match (move || -> crate::Result<String> {
@@ -956,7 +960,7 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeProvid
                 let db = crate::storage::Database::new(&params.db_path).await?;
                 provider
                     .as_provider()
-                    .download_plan(&db, &creds, &params.item_ref)
+                    .download_plan(&db, &creds, &params.item_ref, &params.options)
                     .await
             })?;
 

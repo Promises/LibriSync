@@ -12,19 +12,15 @@ use crate::api::library::SyncStats;
 use crate::storage::Database;
 use crate::{LibationError, Result};
 
-use super::{CredentialBlob, DownloadPart, DownloadPlan, LoginInput, Provider, ProviderId};
+use super::{
+    CredentialBlob, DownloadPart, DownloadPlan, LoginInput, PlanOptions, Provider, ProviderId,
+};
 
 /// Audible provider. Stateless — it rebuilds an [`AudibleClient`] from the stored
 /// credential blob per call, exactly as the current JNI entry points do.
 pub struct AudibleProvider;
 
 impl AudibleProvider {
-    /// Deserialize the stored credential blob back into an `Account`.
-    fn account_from(creds: &CredentialBlob) -> Result<Account> {
-        serde_json::from_value(creds.clone())
-            .map_err(|e| LibationError::InvalidInput(format!("Invalid Audible account: {e}")))
-    }
-
     /// Refresh the access token if it's expired/expiring, then return the account.
     /// Threshold 30 min — same as the previous inline JNI behaviour.
     async fn valid_account(db: &Database, creds: &CredentialBlob) -> Result<Account> {
@@ -75,6 +71,7 @@ impl Provider for AudibleProvider {
         db: &Database,
         creds: &CredentialBlob,
         item_ref: &str,
+        _options: &PlanOptions,
     ) -> Result<DownloadPlan> {
         let account = Self::valid_account(db, creds).await?;
         let client = AudibleClient::new(account)?;

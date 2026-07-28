@@ -34,6 +34,7 @@ class DownloadService : Service() {
         private const val ACTION_SET_WIFI_ONLY = "expo.modules.rustbridge.SET_WIFI_ONLY"
         private const val ACTION_RETRY_CONVERSION = "expo.modules.rustbridge.RETRY_CONVERSION"
         private const val ACTION_ENQUEUE_LIBRIVOX = "expo.modules.rustbridge.ENQUEUE_LIBRIVOX"
+        private const val ACTION_ENQUEUE_PROVIDER = "expo.modules.rustbridge.ENQUEUE_PROVIDER"
         private const val ACTION_CANCEL_ALL = "expo.modules.rustbridge.CANCEL_ALL"
 
         private const val EXTRA_DB_PATH = "db_path"
@@ -46,6 +47,8 @@ class DownloadService : Service() {
         private const val EXTRA_QUALITY = "quality"
         private const val EXTRA_TASK_ID = "task_id"
         private const val EXTRA_WIFI_ONLY = "wifi_only"
+        private const val EXTRA_PROVIDER = "provider"
+        private const val EXTRA_OPTIONS_JSON = "options_json"
 
         private fun startUserInitiatedService(context: Context, intent: Intent) {
             try {
@@ -183,6 +186,34 @@ class DownloadService : Service() {
 
             startUserInitiatedService(context, intent)
         }
+
+        /**
+         * Enqueue a book from any registry provider (Libro.fm and beyond). The plan is
+         * fetched from the Rust provider, so this one action covers every future provider.
+         */
+        fun enqueueProviderBook(
+            context: Context,
+            provider: String,
+            accountJson: String,
+            itemRef: String,
+            title: String,
+            author: String,
+            outputDirectory: String,
+            optionsJson: String
+        ) {
+            val intent = Intent(context, DownloadService::class.java).apply {
+                action = ACTION_ENQUEUE_PROVIDER
+                putExtra(EXTRA_PROVIDER, provider)
+                putExtra(EXTRA_ACCOUNT_JSON, accountJson)
+                putExtra(EXTRA_ASIN, itemRef)
+                putExtra(EXTRA_TITLE, title)
+                putExtra(EXTRA_AUTHOR, author)
+                putExtra(EXTRA_OUTPUT_DIR, outputDirectory)
+                putExtra(EXTRA_OPTIONS_JSON, optionsJson)
+            }
+
+            startUserInitiatedService(context, intent)
+        }
     }
 
     private lateinit var orchestrator: DownloadOrchestrator
@@ -279,6 +310,7 @@ class DownloadService : Service() {
             ACTION_SET_WIFI_ONLY -> handleSetWifiOnly(intent)
             ACTION_RETRY_CONVERSION -> handleRetryConversion(intent)
             ACTION_ENQUEUE_LIBRIVOX -> handleEnqueueLibrivox(intent)
+            ACTION_ENQUEUE_PROVIDER -> handleEnqueueProvider(intent)
         }
 
         return START_NOT_STICKY
@@ -307,7 +339,8 @@ class DownloadService : Service() {
     }
 
     private fun requiresForeground(action: String?): Boolean {
-        return action == ACTION_ENQUEUE_DOWNLOAD || action == ACTION_RETRY_CONVERSION || action == ACTION_ENQUEUE_LIBRIVOX
+        return action == ACTION_ENQUEUE_DOWNLOAD || action == ACTION_RETRY_CONVERSION ||
+            action == ACTION_ENQUEUE_LIBRIVOX || action == ACTION_ENQUEUE_PROVIDER
     }
 
     private fun computeDownloadSpeed(asin: String, bytesDownloaded: Long): String? {
@@ -533,6 +566,42 @@ class DownloadService : Service() {
                 onActiveDownloadsChanged()
             }
         }
+        }
+    }
+
+    private fun handleEnqueueProvider(intent: Intent) {
+        val provider = intent.getStringExtra(EXTRA_PROVIDER) ?: return
+        val accountJson = intent.getStringExtra(EXTRA_ACCOUNT_JSON) ?: return
+        val itemRef = intent.getStringExtra(EXTRA_ASIN) ?: return
+        val title = intent.getStringExtra(EXTRA_TITLE) ?: return
+        val author = intent.getStringExtra(EXTRA_AUTHOR) ?: ""
+        val outputDir = intent.getStringExtra(EXTRA_OUTPUT_DIR) ?: return
+        val optionsJson = intent.getStringExtra(EXTRA_OPTIONS_JSON) ?: "{}"
+
+        // Same idempotence guard as the Audible path: a duplicate enqueue would create
+        // two Rust rows racing over the same cache file.
+        if (activeDownloads.containsKey(itemRef) || pendingDownloads.any { it.asin == itemRef }) {
+            Log.d(TAG, "Download already active or pending for $itemRef; ignoring duplicate enqueue")
+            return
+        }
+
+        Log.d(TAG, "Enqueueing $provider download: $itemRef - $title")
+
+        dispatchDownload(itemRef, title) {
+            activeDownloads[itemRef] = DownloadInfo(asin = itemRef, title = title, author = author, totalBytes = 0)
+            refreshSummary()
+
+            serviceScope.launch {
+                try {
+                    orchestrator.enqueueProviderBook(provider, accountJson, itemRef, title, outputDir, optionsJson)
+                    Log.d(TAG, "$provider book enqueued successfully: $itemRef")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to enqueue $provider book", e)
+                    val download = activeDownloads.remove(itemRef)
+                    notificationManager.showError(itemRef, download?.title ?: title, download?.author, e.message ?: "Unknown error")
+                    onActiveDownloadsChanged()
+                }
+            }
         }
     }
 

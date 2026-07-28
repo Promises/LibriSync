@@ -104,13 +104,28 @@ class DownloadOrchestrator(
         title: String,
         plan: DownloadPlan,
         outputDirectory: String,
-    ): String = withContext(Dispatchers.IO) {
+    ): String {
         if (plan.parts.isEmpty()) throw Exception("Empty download plan for $asin")
-        if (plan.parts.size > 1) {
-            // Multi-part (e.g. Libro.fm parts-folder) is added in Phase 4.
-            throw Exception("Multi-part download plans are not supported yet ($asin)")
-        }
-        val part = plan.parts.first()
+        return enqueuePlanPart(asin, title, plan, 0, outputDirectory)
+    }
+
+    /**
+     * Enqueue part [index] of a plan. Multi-part plans (Libro.fm parts-folder) run
+     * **sequentially**: each part chains the next once it has been extracted into the
+     * book folder, so one book stays one in-flight download from the queue's, the
+     * notification's and the user's point of view.
+     */
+    private suspend fun enqueuePlanPart(
+        asin: String,
+        title: String,
+        plan: DownloadPlan,
+        index: Int,
+        outputDirectory: String,
+    ): String = withContext(Dispatchers.IO) {
+        val part = plan.parts[index]
+        val isLastPart = index == plan.parts.lastIndex
+        // Distinct cache names so a paused/failed part can't collide with its siblings.
+        val partPrefix = if (plan.parts.size > 1) "part${index + 1}-" else ""
 
         val audiobooksDir = File(context.cacheDir, "audiobooks").apply { mkdirs() }
 
@@ -129,15 +144,15 @@ class DownloadOrchestrator(
                 aaxcIv = part.iv
             }
             is DownloadPart.PlainPart -> {
-                encryptedPath = File(audiobooksDir, part.filename).absolutePath
+                encryptedPath = File(audiobooksDir, "$partPrefix${part.filename}").absolutePath
                 decryptedCachePath = encryptedPath
                 plainAudio = true
                 aaxcKey = ""
                 aaxcIv = ""
             }
             is DownloadPart.ZipPart -> {
-                // Cache with a .zip name so copyLibrivoxToFinalDestination extracts it.
-                encryptedPath = File(audiobooksDir, "$asin.zip").absolutePath
+                // Cache with a .zip name so copyPlainAudioToFinalDestination extracts it.
+                encryptedPath = File(audiobooksDir, "$partPrefix$asin.zip").absolutePath
                 decryptedCachePath = encryptedPath
                 plainAudio = true
                 aaxcKey = ""
@@ -177,8 +192,59 @@ class DownloadOrchestrator(
             aaxcIv = aaxcIv,
             totalBytes = 0,
             plainAudio = plainAudio,
+            isFinalPart = isLastPart,
         )
+
+        // Multi-part: wait for this part to land in the book folder, then start the next.
+        // Chaining here (rather than from inside the monitoring job) keeps a part from
+        // cancelling the very job it is running on.
+        if (!isLastPart) {
+            monitoringJobs[asin]?.join()
+            enqueuePlanPart(asin, title, plan, index + 1, outputDirectory)
+        }
         taskId
+    }
+
+    /**
+     * Enqueue a book from any provider in the Rust registry: ask the provider for its
+     * typed plan, then execute it. This is the generic path — a new DRM-free provider
+     * needs no Kotlin changes at all, only a `providers/` module on the Rust side.
+     *
+     * `optionsJson` carries provider-specific download settings (Libro.fm's
+     * `{"format":"parts"|"m4b"}`); pass `"{}"` when the provider has none.
+     */
+    suspend fun enqueueProviderBook(
+        provider: String,
+        accountJson: String,
+        itemRef: String,
+        title: String,
+        outputDirectory: String,
+        optionsJson: String = "{}",
+    ): String = withContext(Dispatchers.IO) {
+        Log.d(TAG, "Enqueueing $provider book: $itemRef - $title")
+
+        try {
+            val params = JSONObject().apply {
+                put("provider", provider)
+                put("db_path", dbPath)
+                put("account_json", accountJson)
+                put("item_ref", itemRef)
+                put("options", JSONObject(optionsJson))
+            }
+            // Parse the envelope directly rather than via parseJsonResponse: the plan model
+            // consumes JSON, and round-tripping through nested Maps would lose the shape.
+            val envelope = JSONObject(ExpoRustBridgeModule.nativeProviderGetDownloadPlan(params.toString()))
+            if (!envelope.optBoolean("success")) {
+                throw Exception("Download plan failed: ${envelope.optString("error")}")
+            }
+            val planJson = envelope.optJSONObject("data")
+                ?: throw Exception("No download plan returned for $itemRef")
+            enqueuePlan(itemRef, title, DownloadPlan.fromJson(planJson), outputDirectory)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to enqueue $provider book", e)
+            errorCallback?.invoke(itemRef, title, e.message ?: "Unknown error")
+            throw e
+        }
     }
 
     /**
@@ -278,11 +344,11 @@ class DownloadOrchestrator(
     }
 
     /**
-     * Copy or extract a LibriVox download to the user's SAF directory.
-     * If the file is a zip, extracts audio files into Author/Title/.
-     * Otherwise copies the single file directly.
+     * Copy or extract a DRM-free download to the user's SAF directory — the finalize step
+     * for [DownloadPart.PlainPart] and [DownloadPart.ZipPart], whatever provider produced it.
+     * A zip is extracted into Author/Title/; anything else is copied as a single file.
      */
-    private suspend fun copyLibrivoxToFinalDestination(
+    private suspend fun copyPlainAudioToFinalDestination(
         asin: String,
         title: String,
         downloadPath: String,
@@ -338,7 +404,7 @@ class DownloadOrchestrator(
         }
 
         cachedFile.delete()
-        Log.d(TAG, "LibriVox files saved to: $finalPath")
+        Log.d(TAG, "Saved to: $finalPath")
         finalPath
     }
 
@@ -475,7 +541,8 @@ class DownloadOrchestrator(
         aaxcKey: String,
         aaxcIv: String,
         totalBytes: Long,
-        plainAudio: Boolean = false
+        plainAudio: Boolean = false,
+        isFinalPart: Boolean = true
     ) {
         // Cancel any existing monitoring for this ASIN
         monitoringJobs[asin]?.cancel()
@@ -532,7 +599,7 @@ class DownloadOrchestrator(
                                 // Trigger conversion or plain MP3 copy (cancellable via coroutine scope)
                                 try {
                                     if (plainAudio) {
-                                        triggerPlainAudioCopy(asin, title, encryptedPath, outputDirectory, taskId)
+                                        triggerPlainAudioCopy(asin, title, encryptedPath, outputDirectory, taskId, isFinalPart)
                                     } else {
                                         triggerConversion(
                                             asin, title, encryptedPath, decryptedCachePath,
@@ -596,23 +663,34 @@ class DownloadOrchestrator(
     }
 
     /**
-     * Copy a completed plain Audible MP3 download to the final destination.
+     * Copy (or extract) a completed DRM-free download to the final destination.
+     *
+     * A non-final part of a multi-part plan ([isFinalPart] = false) has already put its
+     * files in the book folder, but the book isn't done: its task row is left without an
+     * output path and no completion is reported, so the library keeps showing the book as
+     * in progress until the last part lands.
      */
     private suspend fun triggerPlainAudioCopy(
         asin: String,
         title: String,
         downloadPath: String,
         outputDirectory: String,
-        taskId: String
+        taskId: String,
+        isFinalPart: Boolean = true
     ) = withContext(Dispatchers.IO) {
         try {
             updateTaskStatusInDb(taskId, "copying")
             progressCallback?.invoke(asin, "copying", 0.0, 0, 0, 0L)
 
-            val finalPath = copyLibrivoxToFinalDestination(asin, title, downloadPath, outputDirectory)
+            val finalPath = copyPlainAudioToFinalDestination(asin, title, downloadPath, outputDirectory)
 
             // Remove the cache file once copied (matches the old LibriVox copy path).
             File(downloadPath).delete()
+
+            if (!isFinalPart) {
+                updateTaskStatusInDb(taskId, "completed")
+                return@withContext
+            }
 
             updateTaskStatusInDb(taskId, "completed", finalPath)
             clearManuallyPaused(asin)

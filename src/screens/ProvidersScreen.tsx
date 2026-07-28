@@ -11,6 +11,7 @@ type ProvidersStackParamList = {
   ProvidersList: undefined;
   Audible: undefined;
   LibriVox: undefined;
+  LibroFm: undefined;
 };
 
 type Props = {
@@ -56,6 +57,22 @@ export default function ProvidersScreen({ navigation }: Props) {
             <Text style={styles.providerName}>Audible</Text>
             <Text style={styles.providerDescription}>
               Sign in to sync and download your Audible library.
+            </Text>
+          </View>
+          <Ionicons name="chevron-forward" size={20} color={colors.textSecondary} />
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={styles.providerCard}
+          onPress={() => navigation.navigate('LibroFm')}
+        >
+          <View style={styles.providerIcon}>
+            <Ionicons name="storefront-outline" size={28} color={colors.accent} />
+          </View>
+          <View style={styles.providerInfo}>
+            <Text style={styles.providerName}>Libro.fm</Text>
+            <Text style={styles.providerDescription}>
+              Sign in to sync and download your Libro.fm library. DRM-free.
             </Text>
           </View>
           <Ionicons name="chevron-forward" size={20} color={colors.textSecondary} />

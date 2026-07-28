@@ -202,7 +202,7 @@ export interface Book {
   file_path?: string;
   created_at: string;
   updated_at: string;
-  source?: 'audible' | 'librivox';
+  source?: 'audible' | 'librivox' | 'librofm';
   account?: string;
 
   // Additional metadata from API
@@ -541,7 +541,7 @@ export interface ExpoRustBridgeModule {
   // Multi-provider generic bridge (routes by provider id to the Rust registry).
   providerLogin(provider: string, fieldsJson: string): Promise<RustResponse<Record<string, unknown>>>;
   providerSyncLibraryPage(provider: string, dbPath: string, accountJson: string, page: number): Promise<RustResponse<SyncStats>>;
-  providerGetDownloadPlan(provider: string, dbPath: string, accountJson: string, itemRef: string): Promise<RustResponse<DownloadPlan>>;
+  providerGetDownloadPlan(provider: string, dbPath: string, accountJson: string, itemRef: string, optionsJson: string): Promise<RustResponse<DownloadPlan>>;
 
   /**
    * Synchronize one page of podcast or periodical episodes from Audible.
@@ -1028,6 +1028,18 @@ export interface ExpoRustBridgeModule {
   getDownloadMode(): RustResponse<{ mode: string }>;
 
   /**
+   * Set the Libro.fm download format.
+   *
+   * @param format - "m4b" (one packaged file) or "parts" (folder of MP3s)
+   */
+  setLibroFmFormat(format: string): RustResponse<{}>;
+
+  /**
+   * Get the Libro.fm download format preference.
+   */
+  getLibroFmFormat(): RustResponse<{ format: string }>;
+
+  /**
    * Set audio validation depth after download.
    *
    * @param level - "full" (all sample points), "quick" (ends only), or "off"
@@ -1059,6 +1071,20 @@ export interface ExpoRustBridgeModule {
     author: string | null,
     downloadUrl: string,
     outputDirectory: string
+  ): Promise<RustResponse<{ message: string }>>;
+
+  /**
+   * Enqueue a background download for any registry provider. The Rust provider
+   * supplies the typed plan, so this covers every provider (Libro.fm and beyond).
+   */
+  enqueueProviderDownload(
+    provider: string,
+    accountJson: string,
+    itemRef: string,
+    title: string,
+    author: string | null,
+    outputDirectory: string,
+    optionsJson: string
   ): Promise<RustResponse<{ message: string }>>;
 }
 
@@ -1593,9 +1619,20 @@ async function providerSyncLibraryPage(provider: string, dbPath: string, account
   return unwrapResult(response);
 }
 
-/** Get the typed download plan for one book from its provider. */
-async function providerGetDownloadPlan(provider: string, dbPath: string, account: Account, itemRef: string): Promise<DownloadPlan> {
-  const response = await NativeModule!.providerGetDownloadPlan(provider, dbPath, JSON.stringify(account), itemRef);
+/**
+ * Get the typed download plan for one book from its provider.
+ * `options` carries provider-specific settings, e.g. Libro.fm `{ format: 'parts' | 'm4b' }`.
+ */
+async function providerGetDownloadPlan(
+  provider: string,
+  dbPath: string,
+  account: Account,
+  itemRef: string,
+  options: Record<string, unknown> = {},
+): Promise<DownloadPlan> {
+  const response = await NativeModule!.providerGetDownloadPlan(
+    provider, dbPath, JSON.stringify(account), itemRef, JSON.stringify(options),
+  );
   return unwrapResult(response);
 }
 
@@ -2265,6 +2302,38 @@ async function downloadLibrivoxFile(
   unwrapResult(response);
 }
 
+/**
+ * Enqueue a background download for any provider in the Rust registry.
+ *
+ * The provider produces the typed download plan (plain / aaxc / zip parts), so the
+ * download engine — and this call — stay provider-agnostic.
+ *
+ * @param provider - Provider id, e.g. 'librofm'
+ * @param account - The provider account (its credential blob lives in `identity`)
+ * @param itemRef - The provider's item id (ASIN, ISBN, …)
+ * @param options - Provider-specific settings, e.g. Libro.fm `{ format: 'parts' | 'm4b' }`
+ */
+async function enqueueProviderDownload(
+  provider: string,
+  account: Account,
+  itemRef: string,
+  title: string,
+  author: string | null,
+  outputDirectory: string,
+  options: Record<string, unknown> = {},
+): Promise<void> {
+  const response = await NativeModule!.enqueueProviderDownload(
+    provider,
+    JSON.stringify(account),
+    itemRef,
+    title,
+    author,
+    outputDirectory,
+    JSON.stringify(options),
+  );
+  unwrapResult(response);
+}
+
 // ============================================================================
 // Periodic Worker Scheduling
 // ============================================================================
@@ -2507,6 +2576,7 @@ export {
   // LibriVox
   insertLibrivoxBook,
   downloadLibrivoxFile,
+  enqueueProviderDownload,
   // Testing
   clearDownloadState,
   getBookFilePath,

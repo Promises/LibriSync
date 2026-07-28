@@ -18,6 +18,11 @@ ANDROID_LIBS_DIR="$PROJECT_ROOT/android/app/src/main/jniLibs"
 # Android architectures (parallel arrays for bash 3.2 compatibility)
 RUST_TARGETS=("aarch64-linux-android" "armv7-linux-androideabi" "i686-linux-android" "x86_64-linux-android")
 ANDROID_ARCHS=("arm64-v8a" "armeabi-v7a" "x86" "x86_64")
+# Google Play requires 16 KB page alignment on the 64-bit ABIs (Nov 2025). Newer
+# NDKs default to this, older ones link at 4 KB — so ask for it explicitly rather
+# than depending on which NDK happens to be installed.
+NEEDS_16KB=("yes" "no" "no" "yes")
+LINK_16KB="-C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,-z,common-page-size=16384"
 
 # Check if NDK is available
 if [ -z "$ANDROID_NDK_HOME" ] && [ -z "$ANDROID_NDK_ROOT" ]; then
@@ -89,7 +94,11 @@ for i in "${!RUST_TARGETS[@]}"; do
 
     echo -e "${GREEN}Building for $target ($arch)...${NC}"
 
-    cargo build --release --target "$target"
+    if [ "${NEEDS_16KB[$i]}" = "yes" ]; then
+        RUSTFLAGS="$LINK_16KB" cargo build --release --target "$target"
+    else
+        cargo build --release --target "$target"
+    fi
 
     # Create jniLibs directory for this architecture
     mkdir -p "$ANDROID_LIBS_DIR/$arch"
@@ -102,3 +111,16 @@ done
 
 echo -e "${GREEN}All Android architectures built successfully!${NC}"
 echo -e "${YELLOW}Libraries copied to: $ANDROID_LIBS_DIR${NC}"
+
+# Fail loudly rather than shipping a Play-noncompliant library. Only the 64-bit
+# ABIs are subject to the 16 KB requirement.
+echo -e "${YELLOW}Verifying 16 KB page alignment...${NC}"
+for i in "${!ANDROID_ARCHS[@]}"; do
+    [ "${NEEDS_16KB[$i]}" = "yes" ] || continue
+    lib="$ANDROID_LIBS_DIR/${ANDROID_ARCHS[$i]}/librust_core.so"
+    if ! "$TOOLCHAIN_BIN/llvm-objdump" -p "$lib" | awk '/LOAD/ { if ($NF == "2**14" || $NF == "2**16") ok = 1 } END { exit !ok }'; then
+        echo -e "${RED}$lib is not 16 KB aligned — Google Play will reject this build.${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}✓ ${ANDROID_ARCHS[$i]} is 16 KB aligned${NC}"
+done

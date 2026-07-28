@@ -821,6 +821,157 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeSyncLi
         .into_raw()
 }
 
+// ============================================================================
+// MULTI-PROVIDER FUNCTIONS (generic, provider-parameterized)
+// ============================================================================
+// These dispatch to the provider registry (crate::providers) by `provider` id,
+// so a new provider needs no new native functions. See providers/mod.rs.
+
+/// Log in to a provider with credential fields (password providers).
+/// Params: `{ "provider": "librofm", "fields": { "username": .., "password": .. } }`
+/// Returns the opaque credential blob to persist. (Audible uses its OAuth flow.)
+#[no_mangle]
+pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeProviderLogin(
+    mut env: JNIEnv,
+    _class: JClass,
+    params_json: JString,
+) -> jstring {
+    let params_str_result = jstring_to_string(&mut env, params_json);
+
+    let response = catch_panic(move || {
+        #[derive(Deserialize)]
+        struct Params {
+            provider: String,
+            fields: serde_json::Value,
+        }
+
+        match (move || -> crate::Result<String> {
+            let params_str = params_str_result?;
+            let params: Params = serde_json::from_str(&params_str)
+                .map_err(|e| crate::LibationError::InvalidInput(format!("Invalid JSON: {}", e)))?;
+
+            let id = crate::providers::ProviderId::from_str(&params.provider)?;
+            let provider = crate::providers::AnyProvider::get(id)?;
+
+            let creds = RUNTIME
+                .block_on(async { provider.as_provider().login(params.fields).await })?;
+
+            Ok(success_response(creds))
+        })() {
+            Ok(result) => result,
+            Err(e) => error_response(&e.to_string()),
+        }
+    });
+
+    env.new_string(response)
+        .expect("Failed to create Java string")
+        .into_raw()
+}
+
+/// Sync one page of a provider's owned library into the DB.
+/// Params: `{ "provider": .., "db_path": .., "account_json": .., "page": 1 }`
+/// Returns `SyncStats` (carries `has_more`). Generalizes nativeSyncLibraryPage.
+#[no_mangle]
+pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeProviderSyncLibraryPage(
+    mut env: JNIEnv,
+    _class: JClass,
+    params_json: JString,
+) -> jstring {
+    let params_str_result = jstring_to_string(&mut env, params_json);
+
+    let response = catch_panic(move || {
+        #[derive(Deserialize)]
+        struct Params {
+            provider: String,
+            db_path: String,
+            account_json: String,
+            page: i32,
+        }
+
+        match (move || -> crate::Result<String> {
+            let params_str = params_str_result?;
+            let params: Params = serde_json::from_str(&params_str)
+                .map_err(|e| crate::LibationError::InvalidInput(format!("Invalid JSON: {}", e)))?;
+
+            let id = crate::providers::ProviderId::from_str(&params.provider)?;
+            let provider = crate::providers::AnyProvider::get(id)?;
+            let creds: crate::providers::CredentialBlob =
+                serde_json::from_str(&params.account_json).map_err(|e| {
+                    crate::LibationError::InvalidInput(format!("Invalid account JSON: {}", e))
+                })?;
+
+            let result = RUNTIME.block_on(async {
+                let db = crate::storage::Database::new(&params.db_path).await?;
+                provider
+                    .as_provider()
+                    .sync_library_page(&db, &creds, params.page)
+                    .await
+            })?;
+
+            Ok(success_response(result))
+        })() {
+            Ok(result) => result,
+            Err(e) => error_response(&e.to_string()),
+        }
+    });
+
+    env.new_string(response)
+        .expect("Failed to create Java string")
+        .into_raw()
+}
+
+/// Produce the typed download plan for one book.
+/// Params: `{ "provider": .., "db_path": .., "account_json": .., "item_ref": <asin/isbn> }`
+/// Returns a `DownloadPlan` (parts: plain/aaxc/zip) for the download engine.
+#[no_mangle]
+pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeProviderGetDownloadPlan(
+    mut env: JNIEnv,
+    _class: JClass,
+    params_json: JString,
+) -> jstring {
+    let params_str_result = jstring_to_string(&mut env, params_json);
+
+    let response = catch_panic(move || {
+        #[derive(Deserialize)]
+        struct Params {
+            provider: String,
+            db_path: String,
+            account_json: String,
+            item_ref: String,
+        }
+
+        match (move || -> crate::Result<String> {
+            let params_str = params_str_result?;
+            let params: Params = serde_json::from_str(&params_str)
+                .map_err(|e| crate::LibationError::InvalidInput(format!("Invalid JSON: {}", e)))?;
+
+            let id = crate::providers::ProviderId::from_str(&params.provider)?;
+            let provider = crate::providers::AnyProvider::get(id)?;
+            let creds: crate::providers::CredentialBlob =
+                serde_json::from_str(&params.account_json).map_err(|e| {
+                    crate::LibationError::InvalidInput(format!("Invalid account JSON: {}", e))
+                })?;
+
+            let result = RUNTIME.block_on(async {
+                let db = crate::storage::Database::new(&params.db_path).await?;
+                provider
+                    .as_provider()
+                    .download_plan(&db, &creds, &params.item_ref)
+                    .await
+            })?;
+
+            Ok(success_response(result))
+        })() {
+            Ok(result) => result,
+            Err(e) => error_response(&e.to_string()),
+        }
+    });
+
+    env.new_string(response)
+        .expect("Failed to create Java string")
+        .into_raw()
+}
+
 /// Synchronize one page of episodes for a podcast or periodical parent.
 #[no_mangle]
 pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeSyncPodcastEpisodes(

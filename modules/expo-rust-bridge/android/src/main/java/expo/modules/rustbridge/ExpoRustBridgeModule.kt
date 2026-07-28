@@ -189,12 +189,14 @@ class ExpoRustBridgeModule : Module() {
      */
     AsyncFunction("syncLibraryPage") { dbPath: String, accountJson: String, page: Int ->
       try {
+        // Routed through the generic provider dispatcher (Audible provider).
         val params = JSONObject().apply {
+          put("provider", "audible")
           put("db_path", dbPath)
           put("account_json", accountJson)
           put("page", page)
         }
-        val result = nativeSyncLibraryPage(params.toString())
+        val result = nativeProviderSyncLibraryPage(params.toString())
         val parsed = parseJsonResponse(result)
         // On the final page of a full sync, tell the background manager the library sync
         // finished so auto-download (if enabled) checks for newly added books. Nothing
@@ -216,6 +218,49 @@ class ExpoRustBridgeModule : Module() {
           "success" to false,
           "error" to "Sync library page error: ${e.message}"
         )
+      }
+    }
+
+    // Multi-provider generic bridge. `providerSyncLibraryPage` is used internally by
+    // `syncLibraryPage` (Audible); `providerLogin` / `providerGetDownloadPlan` back the
+    // Libro.fm (and future) providers.
+    AsyncFunction("providerLogin") { provider: String, fieldsJson: String ->
+      try {
+        val params = JSONObject().apply {
+          put("provider", provider)
+          put("fields", JSONObject(fieldsJson))
+        }
+        parseJsonResponse(nativeProviderLogin(params.toString()))
+      } catch (e: Exception) {
+        mapOf("success" to false, "error" to "Provider login error: ${e.message}")
+      }
+    }
+
+    AsyncFunction("providerSyncLibraryPage") { provider: String, dbPath: String, accountJson: String, page: Int ->
+      try {
+        val params = JSONObject().apply {
+          put("provider", provider)
+          put("db_path", dbPath)
+          put("account_json", accountJson)
+          put("page", page)
+        }
+        parseJsonResponse(nativeProviderSyncLibraryPage(params.toString()))
+      } catch (e: Exception) {
+        mapOf("success" to false, "error" to "Provider sync error: ${e.message}")
+      }
+    }
+
+    AsyncFunction("providerGetDownloadPlan") { provider: String, dbPath: String, accountJson: String, itemRef: String ->
+      try {
+        val params = JSONObject().apply {
+          put("provider", provider)
+          put("db_path", dbPath)
+          put("account_json", accountJson)
+          put("item_ref", itemRef)
+        }
+        parseJsonResponse(nativeProviderGetDownloadPlan(params.toString()))
+      } catch (e: Exception) {
+        mapOf("success" to false, "error" to "Provider download-plan error: ${e.message}")
       }
     }
 
@@ -2517,6 +2562,10 @@ class ExpoRustBridgeModule : Module() {
     @JvmStatic external fun nativeInitDatabase(paramsJson: String): String
     @JvmStatic external fun nativeSyncLibrary(paramsJson: String): String
     @JvmStatic external fun nativeSyncLibraryPage(paramsJson: String): String
+    // Multi-provider generic dispatchers (crate::providers)
+    @JvmStatic external fun nativeProviderLogin(paramsJson: String): String
+    @JvmStatic external fun nativeProviderSyncLibraryPage(paramsJson: String): String
+    @JvmStatic external fun nativeProviderGetDownloadPlan(paramsJson: String): String
     @JvmStatic external fun nativeSyncPodcastEpisodes(paramsJson: String): String
     @JvmStatic external fun nativeGetBooks(paramsJson: String): String
     @JvmStatic external fun nativeGetBookByAsin(paramsJson: String): String

@@ -24,6 +24,16 @@ impl AudibleProvider {
         serde_json::from_value(creds.clone())
             .map_err(|e| LibationError::InvalidInput(format!("Invalid Audible account: {e}")))
     }
+
+    /// Refresh the access token if it's expired/expiring, then return the account.
+    /// Threshold 30 min — same as the previous inline JNI behaviour.
+    async fn valid_account(db: &Database, creds: &CredentialBlob) -> Result<Account> {
+        let account_json = serde_json::to_string(creds)
+            .map_err(|e| LibationError::InvalidInput(format!("Invalid Audible account: {e}")))?;
+        let refreshed = crate::api::auth::ensure_valid_token(db.pool(), &account_json, 30).await?;
+        serde_json::from_str(&refreshed)
+            .map_err(|e| LibationError::InvalidInput(format!("Invalid Audible account: {e}")))
+    }
 }
 
 #[async_trait]
@@ -53,18 +63,20 @@ impl Provider for AudibleProvider {
         creds: &CredentialBlob,
         page: i32,
     ) -> Result<SyncStats> {
-        let account = Self::account_from(creds)?;
+        // Just-in-time token refresh before the API call (matches the behaviour
+        // the JNI sync path had inline).
+        let account = Self::valid_account(db, creds).await?;
         let mut client = AudibleClient::new(account.clone())?;
         client.sync_library_page(db, &account, page).await
     }
 
     async fn download_plan(
         &self,
-        _db: &Database,
+        db: &Database,
         creds: &CredentialBlob,
         item_ref: &str,
     ) -> Result<DownloadPlan> {
-        let account = Self::account_from(creds)?;
+        let account = Self::valid_account(db, creds).await?;
         let client = AudibleClient::new(account)?;
         let license = client
             .build_download_license(item_ref, DownloadQuality::High, false)

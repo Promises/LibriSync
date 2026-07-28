@@ -231,6 +231,24 @@ export interface SyncStats {
 }
 
 /**
+ * A typed download part produced by the provider abstraction. The Kotlin engine
+ * dispatches on `kind` (plain copy / AAXC decrypt / zip extract).
+ */
+export type DownloadPart =
+  | { kind: 'plain'; url: string; headers?: Record<string, string>; filename: string }
+  | { kind: 'aaxc'; url: string; headers?: Record<string, string>; key: string; iv: string; filename: string }
+  | { kind: 'zip'; url: string; headers?: Record<string, string> };
+
+/**
+ * Provider-agnostic download plan for one book (see native providers module).
+ */
+export interface DownloadPlan {
+  parts: DownloadPart[];
+  embed_metadata: boolean;
+  chapters: { title: string; start_ms: number; end_ms: number }[];
+}
+
+/**
  * Existing download directory scan statistics.
  */
 export interface DownloadDirectoryScanStats {
@@ -519,6 +537,11 @@ export interface ExpoRustBridgeModule {
    * ```
    */
   syncLibraryPage(dbPath: string, accountJson: string, page: number): Promise<RustResponse<SyncStats>>;
+
+  // Multi-provider generic bridge (routes by provider id to the Rust registry).
+  providerLogin(provider: string, fieldsJson: string): Promise<RustResponse<Record<string, unknown>>>;
+  providerSyncLibraryPage(provider: string, dbPath: string, accountJson: string, page: number): Promise<RustResponse<SyncStats>>;
+  providerGetDownloadPlan(provider: string, dbPath: string, accountJson: string, itemRef: string): Promise<RustResponse<DownloadPlan>>;
 
   /**
    * Synchronize one page of podcast or periodical episodes from Audible.
@@ -1556,6 +1579,26 @@ async function syncLibraryPage(dbPath: string, account: Account, page: number): 
   return unwrapResult(response);
 }
 
+// ── Multi-provider generic bridge ──────────────────────────────────────────
+
+/** Log in to a password-based provider (e.g. Libro.fm). Returns the opaque credential blob. */
+async function providerLogin(provider: string, fields: Record<string, string>): Promise<Record<string, unknown>> {
+  const response = await NativeModule!.providerLogin(provider, JSON.stringify(fields));
+  return unwrapResult(response);
+}
+
+/** Sync one page of a provider's owned library. Generic over provider id. */
+async function providerSyncLibraryPage(provider: string, dbPath: string, account: Account, page: number): Promise<SyncStats> {
+  const response = await NativeModule!.providerSyncLibraryPage(provider, dbPath, JSON.stringify(account), page);
+  return unwrapResult(response);
+}
+
+/** Get the typed download plan for one book from its provider. */
+async function providerGetDownloadPlan(provider: string, dbPath: string, account: Account, itemRef: string): Promise<DownloadPlan> {
+  const response = await NativeModule!.providerGetDownloadPlan(provider, dbPath, JSON.stringify(account), itemRef);
+  return unwrapResult(response);
+}
+
 /**
  * Save the selected download directory for native background workers.
  */
@@ -2410,6 +2453,9 @@ export {
   initializeDatabase,
   syncLibrary,
   syncLibraryPage,
+  providerLogin,
+  providerSyncLibraryPage,
+  providerGetDownloadPlan,
   syncPodcastEpisodes,
   setDownloadDirectory,
   getDownloadDirectory,

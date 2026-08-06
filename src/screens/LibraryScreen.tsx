@@ -1584,11 +1584,6 @@ export default function LibraryScreen() {
                                     <Text style={styles.sourceBadgeText}>LibriVox</Text>
                                 </View>
                             )}
-                            {allAccounts.length > 1 && getBookAccountLabels(item).map((label) => (
-                                <View key={label} style={styles.sourceBadge}>
-                                    <Text style={styles.sourceBadgeText}>{label}</Text>
-                                </View>
-                            ))}
                             <Text style={[styles.status, {color: status.color}]}>
                                 {status.text}
                             </Text>

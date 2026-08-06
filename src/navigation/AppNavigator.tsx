@@ -13,7 +13,7 @@ import { useProviders } from '../contexts/ProvidersContext';
 import LibraryScreen from '../screens/LibraryScreen';
 import ProvidersScreen from '../screens/ProvidersScreen';
 import LibriVoxBrowseScreen from '../screens/LibriVoxBrowseScreen';
-import LibroFmLoginScreen from '../screens/LibroFmLoginScreen';
+import LibroFmAccountScreen from '../screens/LibroFmAccountScreen';
 import SimpleAccountScreen from '../screens/SimpleAccountScreen';
 import SettingsScreen from '../screens/SettingsScreen';
 import TaskDebugScreen from '../screens/TaskDebugScreen';
@@ -54,8 +54,8 @@ function ProvidersStackScreen() {
       />
       <ProvidersStack.Screen
         name="LibroFm"
-        component={LibroFmLoginScreen}
-        options={{ headerShown: true, title: 'Libro.fm' }}
+        component={LibroFmAccountScreen}
+        options={{ headerShown: false }}
       />
     </ProvidersStack.Navigator>
   );

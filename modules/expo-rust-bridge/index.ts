@@ -130,15 +130,32 @@ export interface Locale {
 // ----------------------------------------------------------------------------
 
 /**
+ * Which audiobook source an account belongs to. Matches the Rust `ProviderId`
+ * and the `Accounts.provider` / `Books.source` column values.
+ */
+export type ProviderId = 'audible' | 'librivox' | 'librofm';
+
+/**
  * User account with credentials and identity information.
+ *
+ * `locale` is Audible-specific; DRM-free providers (Libro.fm) have none, so it is
+ * optional. `identity` is the provider's opaque credential blob — an Audible
+ * `Identity`, or e.g. `{access_token, username}` for Libro.fm.
  */
 export interface Account {
   account_id: string;
   account_name: string;
+  /** Omitted on accounts saved before multi-provider support; treat as 'audible'. */
+  provider?: ProviderId;
   library_scan?: boolean;
   decrypt_key?: string;
-  locale: Locale;
+  locale?: Locale;
   identity?: Identity;
+}
+
+/** The provider an account belongs to, defaulting legacy rows to Audible. */
+export function accountProvider(account: Pick<Account, 'provider'>): ProviderId {
+  return account.provider ?? 'audible';
 }
 
 /**
@@ -827,7 +844,7 @@ export interface ExpoRustBridgeModule {
   /**
    * Get primary account from SQLite database.
    */
-  getPrimaryAccount(dbPath: string): Promise<RustResponse<{ account: string | null }>>;
+  getPrimaryAccount(dbPath: string, provider: string | null): Promise<RustResponse<{ account: string | null }>>;
 
   /**
    * Get one account from SQLite database.
@@ -837,7 +854,7 @@ export interface ExpoRustBridgeModule {
   /**
    * Get all accounts from SQLite database.
    */
-  getAllAccounts(dbPath: string): Promise<RustResponse<{ accounts: string }>>;
+  getAllAccounts(dbPath: string, provider: string | null): Promise<RustResponse<{ accounts: string }>>;
 
   /**
    * Delete account from SQLite database.
@@ -1284,6 +1301,11 @@ async function refreshToken(account: Account): Promise<TokenResponse> {
   if (!account.identity?.refresh_token) {
     throw new RustBridgeError('No refresh token available');
   }
+  // Audible-only: a locale-less account here means a provider's account reached
+  // the Audible token path, which would silently send an undefined region.
+  if (!account.locale?.country_code) {
+    throw new RustBridgeError('Account has no Audible locale; cannot refresh token');
+  }
 
   const response = await NativeModule!.refreshAccessToken(
     account.locale.country_code,
@@ -1310,6 +1332,9 @@ async function refreshToken(account: Account): Promise<TokenResponse> {
 async function getActivationBytes(account: Account): Promise<string> {
   if (!account.identity?.access_token) {
     throw new RustBridgeError('No access token available');
+  }
+  if (!account.locale?.country_code) {
+    throw new RustBridgeError('Account has no Audible locale; cannot get activation bytes');
   }
 
   const response = await NativeModule!.getActivationBytes(
@@ -1387,7 +1412,11 @@ async function syncLibrary(
 
     // Aggregate results
     aggregatedStats.total_items += pageStats.total_items;
-    aggregatedStats.total_library_count = pageStats.total_library_count; // Use latest count
+    // Keep the last non-zero total: a final page that reports 0 would otherwise wipe
+    // the library count and make the summary read "275 / 0".
+    if (pageStats.total_library_count > 0) {
+      aggregatedStats.total_library_count = pageStats.total_library_count;
+    }
     aggregatedStats.books_added += pageStats.books_added;
     aggregatedStats.books_updated += pageStats.books_updated;
     aggregatedStats.books_absent += pageStats.books_absent;
@@ -1409,10 +1438,70 @@ async function syncLibrary(
     page++;
   }
 
+  if (aggregatedStats.total_library_count === 0) {
+    aggregatedStats.total_library_count = aggregatedStats.total_items;
+  }
+
   console.log(
     `[syncLibrary] All pages synced. Total: ${aggregatedStats.total_items} items, ` +
     `${aggregatedStats.books_added} added, ${aggregatedStats.books_updated} updated`
   );
+
+  return aggregatedStats;
+}
+
+/**
+ * Sync a provider's owned library page by page, the generic counterpart to
+ * {@link syncLibrary}. Routes through the Rust provider registry, so any provider
+ * (Libro.fm and beyond) syncs without a dedicated bridge function.
+ *
+ * @param provider - Provider id, e.g. 'librofm'
+ * @param onPageComplete - Called after each page with that page's stats, the page
+ *   number, and the running totals
+ */
+async function providerSyncLibrary(
+  provider: ProviderId,
+  dbPath: string,
+  account: Account,
+  onPageComplete?: (stats: SyncStats, page: number, aggregatedStats: SyncStats) => void
+): Promise<SyncStats> {
+  const aggregatedStats: SyncStats = {
+    total_items: 0,
+    total_library_count: 0,
+    books_added: 0,
+    books_updated: 0,
+    books_absent: 0,
+    errors: [],
+    has_more: false,
+  };
+
+  let page = 1;
+  let hasMore = true;
+
+  // Bounded so a provider that never clears has_more can't spin forever.
+  const MAX_PAGES = 500;
+  while (hasMore && page <= MAX_PAGES) {
+    const pageStats = await providerSyncLibraryPage(provider, dbPath, account, page);
+
+    aggregatedStats.total_items += pageStats.total_items;
+    if (pageStats.total_library_count > 0) {
+      aggregatedStats.total_library_count = pageStats.total_library_count;
+    }
+    aggregatedStats.books_added += pageStats.books_added;
+    aggregatedStats.books_updated += pageStats.books_updated;
+    aggregatedStats.books_absent += pageStats.books_absent;
+    aggregatedStats.errors.push(...pageStats.errors);
+
+    hasMore = pageStats.has_more;
+    onPageComplete?.(pageStats, page, aggregatedStats);
+    page++;
+  }
+
+  // Providers that don't report a library total (Libro.fm is per-page) still need
+  // one for "synced X of Y" to read sensibly.
+  if (aggregatedStats.total_library_count === 0) {
+    aggregatedStats.total_library_count = aggregatedStats.total_items;
+  }
 
   return aggregatedStats;
 }
@@ -2049,10 +2138,12 @@ async function saveAccount(dbPath: string, account: Account): Promise<void> {
  * Get primary account from SQLite database.
  *
  * @param dbPath - Database path
+ * @param provider - Scope to one provider ('audible', 'librofm', …). Omit for the
+ *   first account of any provider.
  * @returns Account object or null if no account exists
  */
-async function getPrimaryAccount(dbPath: string): Promise<Account | null> {
-  const response = await NativeModule!.getPrimaryAccount(dbPath);
+async function getPrimaryAccount(dbPath: string, provider?: ProviderId): Promise<Account | null> {
+  const response = await NativeModule!.getPrimaryAccount(dbPath, provider ?? null);
   const data = unwrapResult(response);
 
   if (!data.account || data.account === 'null') {
@@ -2103,10 +2194,13 @@ function parseAccount(value: unknown): Account | null {
  * Get all accounts from SQLite database.
  *
  * @param dbPath - Database path
+ * @param provider - Scope to one provider ('audible', 'librofm', …). Omit for every
+ *   account. Provider-specific screens must scope: handing one provider's accounts to
+ *   another's sync/refresh path will fail.
  * @returns Array of account objects
  */
-async function getAllAccounts(dbPath: string): Promise<Account[]> {
-  const response = await NativeModule!.getAllAccounts(dbPath);
+async function getAllAccounts(dbPath: string, provider?: ProviderId): Promise<Account[]> {
+  const response = await NativeModule!.getAllAccounts(dbPath, provider ?? null);
   const data = unwrapResult(response);
 
   if (!data.accounts) {
@@ -2525,6 +2619,7 @@ export {
   providerLogin,
   providerSyncLibraryPage,
   providerGetDownloadPlan,
+  providerSyncLibrary,
   syncPodcastEpisodes,
   setDownloadDirectory,
   getDownloadDirectory,

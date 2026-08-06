@@ -307,6 +307,7 @@ export default function LibraryScreen() {
                 initializeDatabase(dbPath);
                 const series = getAllSeries(dbPath);
                 const categories = getAllCategories(dbPath);
+                // Unscoped on purpose: the account filter chips span every provider.
                 const accounts = await getAllAccounts(dbPath);
 
                 setAllSeries(series);
@@ -451,7 +452,7 @@ export default function LibraryScreen() {
                 const accountId = podcast.account?.split(',').find(Boolean) || singleAccountFilter;
                 const account = accountId
                     ? await getAccount(dbPath, accountId)
-                    : await getPrimaryAccount(dbPath);
+                    : await getPrimaryAccount(dbPath, 'audible');
 
                 if (account) {
                     const syncStats = await syncPodcastEpisodes(
@@ -583,10 +584,10 @@ export default function LibraryScreen() {
             const owningAccountId = singleAccountFilter || getBookAccountIds(selectedPodcast)[0] || null;
             let account = owningAccountId
                 ? await getAccount(dbPath, owningAccountId)
-                : await getPrimaryAccount(dbPath);
+                : await getPrimaryAccount(dbPath, 'audible');
 
             if (!account) {
-                account = await getPrimaryAccount(dbPath);
+                account = await getPrimaryAccount(dbPath, 'audible');
             }
 
             if (!account) {
@@ -1090,10 +1091,10 @@ export default function LibraryScreen() {
             const owningAccountId = singleAccountFilter || getBookAccountIds(book)[0] || null;
             let account = owningAccountId
                 ? await getAccount(dbPath, owningAccountId)
-                : await getPrimaryAccount(dbPath);
+                : await getPrimaryAccount(dbPath, 'audible');
 
             if (!account) {
-                account = await getPrimaryAccount(dbPath);
+                account = await getPrimaryAccount(dbPath, 'audible');
             }
 
             if (!account) {

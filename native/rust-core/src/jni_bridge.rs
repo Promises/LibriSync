@@ -3311,7 +3311,8 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeSaveAc
 /// # Arguments (JSON string)
 /// ```json
 /// {
-///   "db_path": "/data/data/.../audible.db"
+///   "db_path": "/data/data/.../audible.db",
+///   "provider": "audible"  // optional; omit for the first account of any provider
 /// }
 /// ```
 ///
@@ -3336,6 +3337,9 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetPri
         #[derive(Deserialize)]
         struct Params {
             db_path: String,
+            /// Scope to one provider ("audible", "librofm", ...). Omit for any.
+            #[serde(default)]
+            provider: Option<String>,
         }
 
         match (move || -> crate::Result<String> {
@@ -3345,7 +3349,8 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetPri
 
             let account_json = RUNTIME.block_on(async {
                 let db = crate::storage::Database::new(&params.db_path).await?;
-                crate::storage::accounts::get_primary_account(db.pool()).await
+                crate::storage::accounts::get_primary_account(db.pool(), params.provider.as_deref())
+                    .await
             })?;
 
             let response = serde_json::json!({
@@ -3417,6 +3422,9 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetAll
         #[derive(Deserialize)]
         struct Params {
             db_path: String,
+            /// Scope to one provider ("audible", "librofm", …). Omit for all.
+            #[serde(default)]
+            provider: Option<String>,
         }
 
         match (move || -> crate::Result<String> {
@@ -3426,7 +3434,8 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetAll
 
             let accounts = RUNTIME.block_on(async {
                 let db = crate::storage::Database::new(&params.db_path).await?;
-                crate::storage::accounts::get_all_accounts(db.pool()).await
+                crate::storage::accounts::get_all_accounts(db.pool(), params.provider.as_deref())
+                    .await
             })?;
 
             Ok(success_response(serde_json::json!({

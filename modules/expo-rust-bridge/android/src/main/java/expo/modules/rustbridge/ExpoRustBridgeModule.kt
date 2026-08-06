@@ -869,10 +869,11 @@ class ExpoRustBridgeModule : Module() {
      * @param dbPath Database path
      * @return Account JSON or null if no account exists
      */
-    AsyncFunction("getPrimaryAccount") { dbPath: String ->
+    AsyncFunction("getPrimaryAccount") { dbPath: String, provider: String? ->
       try {
         val params = JSONObject().apply {
           put("db_path", dbPath)
+          if (provider != null) put("provider", provider)
         }
         val result = nativeGetPrimaryAccount(params.toString())
         parseJsonResponse(result)
@@ -898,12 +899,14 @@ class ExpoRustBridgeModule : Module() {
     }
 
     /**
-     * Get all accounts from SQLite database.
+     * Get all accounts from SQLite database, optionally scoped to one provider
+     * ("audible", "librofm", …). Pass null for every account.
      */
-    AsyncFunction("getAllAccounts") { dbPath: String ->
+    AsyncFunction("getAllAccounts") { dbPath: String, provider: String? ->
       try {
         val params = JSONObject().apply {
           put("db_path", dbPath)
+          if (provider != null) put("provider", provider)
         }
         val result = nativeGetAllAccounts(params.toString())
         parseJsonResponse(result)

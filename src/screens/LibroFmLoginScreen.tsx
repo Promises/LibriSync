@@ -1,71 +1,61 @@
 import React, { useState } from 'react';
-import { View, Text, TextInput, TouchableOpacity, ActivityIndicator, Alert, ScrollView } from 'react-native';
+import { Text, TextInput, TouchableOpacity, ActivityIndicator, Alert, ScrollView } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useStyles } from '../hooks/useStyles';
 import { useTheme } from '../styles/theme';
 import type { Theme } from '../hooks/useStyles';
-import {
-  providerLogin,
-  providerSyncLibraryPage,
-  saveAccount,
-} from '../../modules/expo-rust-bridge';
+import Button from '../components/Button';
+import { providerLogin, saveAccount } from '../../modules/expo-rust-bridge';
 import type { Account } from '../../modules/expo-rust-bridge';
 import { getDatabasePath } from '../utils/appPaths';
 
+interface Props {
+  /** Called with the saved account once sign-in succeeds. */
+  onLoginSuccess: (account: Account) => void;
+  /** Provided when adding a further account, so the form can be dismissed. */
+  onCancel?: () => void;
+  title?: string;
+}
+
 /**
- * Libro.fm sign-in: email/password → bearer token → save account → sync library.
- * DRM-free store; auth is a plain password grant (see native providers/librofm.rs).
+ * Libro.fm credential sign-in — this provider's equivalent of `LoginScreen`.
+ *
+ * Saves the account and hands it back; syncing is the account screen's job, the
+ * same split Audible uses. Auth is a plain password grant (see providers/librofm.rs).
  */
-export default function LibroFmLoginScreen() {
+export default function LibroFmLoginScreen({ onLoginSuccess, onCancel, title }: Props) {
   const styles = useStyles(createStyles);
   const { colors } = useTheme();
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
-  const [status, setStatus] = useState<string | null>(null);
 
-  const signInAndSync = async () => {
+  const signIn = async () => {
     if (!email.trim() || !password) {
       Alert.alert('Missing info', 'Enter your Libro.fm email and password.');
       return;
     }
     setBusy(true);
-    setStatus('Signing in…');
     try {
       const dbPath = getDatabasePath();
+      const identifier = email.trim();
 
-      // 1) Password grant → credential blob { access_token, username }
-      const creds = await providerLogin('librofm', { username: email.trim(), password });
+      // Password grant → credential blob { access_token, username }
+      const creds = await providerLogin('librofm', { username: identifier, password });
 
-      // 2) Persist the account (provider-tagged, opaque credential in identity)
-      const account = {
-        account_id: email.trim(),
-        account_name: email.trim(),
+      const account: Account = {
+        account_id: identifier,
+        account_name: identifier,
         provider: 'librofm',
-        identity: creds,
-      } as unknown as Account;
+        identity: creds as unknown as Account['identity'],
+      };
       await saveAccount(dbPath, account);
 
-      // 3) Sync the owned library page by page
-      setStatus('Syncing your library…');
-      let page = 1;
-      let added = 0;
-      let updated = 0;
-      // Guard against a runaway loop.
-      for (let i = 0; i < 500; i++) {
-        const stats = await providerSyncLibraryPage('librofm', dbPath, account, page);
-        added += stats.books_added;
-        updated += stats.books_updated;
-        setStatus(`Syncing… ${added + updated} books so far`);
-        if (!stats.has_more) break;
-        page += 1;
-      }
-
-      setStatus(null);
-      Alert.alert('Libro.fm connected', `Synced your library.\nAdded ${added}, updated ${updated}.`);
+      // Don't hold the password in component state any longer than needed.
+      setPassword('');
+      onLoginSuccess(account);
     } catch (e: any) {
-      setStatus(null);
       Alert.alert('Libro.fm sign-in failed', e?.message || 'Unknown error');
     } finally {
       setBusy(false);
@@ -75,7 +65,7 @@ export default function LibroFmLoginScreen() {
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
       <ScrollView contentContainerStyle={styles.content}>
-        <Text style={styles.title}>Libro.fm</Text>
+        <Text style={styles.title}>{title || 'Libro.fm'}</Text>
         <Text style={styles.subtitle}>
           Sign in to sync and download your Libro.fm audiobooks. DRM-free.
         </Text>
@@ -108,17 +98,19 @@ export default function LibroFmLoginScreen() {
 
         <TouchableOpacity
           style={[styles.button, busy && styles.buttonDisabled]}
-          onPress={signInAndSync}
+          onPress={signIn}
           disabled={busy}
         >
           {busy ? (
             <ActivityIndicator color={colors.background} />
           ) : (
-            <Text style={styles.buttonText}>Sign in & sync</Text>
+            <Text style={styles.buttonText}>Sign in</Text>
           )}
         </TouchableOpacity>
 
-        {status && <Text style={styles.status}>{status}</Text>}
+        {!!onCancel && (
+          <Button title="Cancel" onPress={onCancel} variant="outlined" state="primary" disabled={busy} />
+        )}
 
         <Text style={styles.note}>
           Note: accounts that use Google/social sign-in (no password) aren't supported.
@@ -157,6 +149,5 @@ const createStyles = (theme: Theme) => ({
     color: theme.colors.background,
     fontWeight: '700' as const,
   },
-  status: { ...theme.typography.caption, textAlign: 'center' as const, marginTop: theme.spacing.sm },
   note: { ...theme.typography.caption, color: theme.colors.textSecondary, marginTop: theme.spacing.lg },
 });

@@ -189,12 +189,14 @@ class ExpoRustBridgeModule : Module() {
      */
     AsyncFunction("syncLibraryPage") { dbPath: String, accountJson: String, page: Int ->
       try {
+        // Routed through the generic provider dispatcher (Audible provider).
         val params = JSONObject().apply {
+          put("provider", "audible")
           put("db_path", dbPath)
           put("account_json", accountJson)
           put("page", page)
         }
-        val result = nativeSyncLibraryPage(params.toString())
+        val result = nativeProviderSyncLibraryPage(params.toString())
         val parsed = parseJsonResponse(result)
         // On the final page of a full sync, tell the background manager the library sync
         // finished so auto-download (if enabled) checks for newly added books. Nothing
@@ -216,6 +218,52 @@ class ExpoRustBridgeModule : Module() {
           "success" to false,
           "error" to "Sync library page error: ${e.message}"
         )
+      }
+    }
+
+    // Multi-provider generic bridge. `providerSyncLibraryPage` is used internally by
+    // `syncLibraryPage` (Audible); `providerLogin` / `providerGetDownloadPlan` back the
+    // Libro.fm (and future) providers.
+    AsyncFunction("providerLogin") { provider: String, fieldsJson: String ->
+      try {
+        val params = JSONObject().apply {
+          put("provider", provider)
+          put("fields", JSONObject(fieldsJson))
+        }
+        parseJsonResponse(nativeProviderLogin(params.toString()))
+      } catch (e: Exception) {
+        mapOf("success" to false, "error" to "Provider login error: ${e.message}")
+      }
+    }
+
+    AsyncFunction("providerSyncLibraryPage") { provider: String, dbPath: String, accountJson: String, page: Int ->
+      try {
+        val params = JSONObject().apply {
+          put("provider", provider)
+          put("db_path", dbPath)
+          put("account_json", accountJson)
+          put("page", page)
+        }
+        parseJsonResponse(nativeProviderSyncLibraryPage(params.toString()))
+      } catch (e: Exception) {
+        mapOf("success" to false, "error" to "Provider sync error: ${e.message}")
+      }
+    }
+
+    // `optionsJson` carries provider-specific download settings, e.g. Libro.fm's
+    // {"format":"parts"|"m4b"}. Pass "{}" when the provider has none.
+    AsyncFunction("providerGetDownloadPlan") { provider: String, dbPath: String, accountJson: String, itemRef: String, optionsJson: String? ->
+      try {
+        val params = JSONObject().apply {
+          put("provider", provider)
+          put("db_path", dbPath)
+          put("account_json", accountJson)
+          put("item_ref", itemRef)
+          put("options", JSONObject(optionsJson ?: "{}"))
+        }
+        parseJsonResponse(nativeProviderGetDownloadPlan(params.toString()))
+      } catch (e: Exception) {
+        mapOf("success" to false, "error" to "Provider download-plan error: ${e.message}")
       }
     }
 
@@ -821,10 +869,11 @@ class ExpoRustBridgeModule : Module() {
      * @param dbPath Database path
      * @return Account JSON or null if no account exists
      */
-    AsyncFunction("getPrimaryAccount") { dbPath: String ->
+    AsyncFunction("getPrimaryAccount") { dbPath: String, provider: String? ->
       try {
         val params = JSONObject().apply {
           put("db_path", dbPath)
+          if (provider != null) put("provider", provider)
         }
         val result = nativeGetPrimaryAccount(params.toString())
         parseJsonResponse(result)
@@ -850,12 +899,14 @@ class ExpoRustBridgeModule : Module() {
     }
 
     /**
-     * Get all accounts from SQLite database.
+     * Get all accounts from SQLite database, optionally scoped to one provider
+     * ("audible", "librofm", …). Pass null for every account.
      */
-    AsyncFunction("getAllAccounts") { dbPath: String ->
+    AsyncFunction("getAllAccounts") { dbPath: String, provider: String? ->
       try {
         val params = JSONObject().apply {
           put("db_path", dbPath)
+          if (provider != null) put("provider", provider)
         }
         val result = nativeGetAllAccounts(params.toString())
         parseJsonResponse(result)
@@ -1352,6 +1403,32 @@ class ExpoRustBridgeModule : Module() {
       }
     }
 
+    // Generic download entry point: the Rust provider produces the plan, so any provider
+    // in the registry downloads through this one function.
+    AsyncFunction("enqueueProviderDownload") { provider: String, accountJson: String, itemRef: String, title: String, author: String?, outputDirectory: String, optionsJson: String? ->
+      try {
+        val context = appContext.reactContext ?: throw Exception("Context not available")
+
+        DownloadService.enqueueProviderBook(
+          context = context,
+          provider = provider,
+          accountJson = accountJson,
+          itemRef = itemRef,
+          title = title,
+          author = author ?: "",
+          outputDirectory = outputDirectory,
+          optionsJson = optionsJson ?: "{}"
+        )
+
+        mapOf(
+          "success" to true,
+          "data" to mapOf("message" to "$provider download enqueued")
+        )
+      } catch (e: Exception) {
+        mapOf("success" to false, "error" to e.message)
+      }
+    }
+
     /**
      * Test bridge connection and verify Rust library is loaded.
      *
@@ -1596,6 +1673,30 @@ class ExpoRustBridgeModule : Module() {
         val prefs = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
         val mode = prefs.getString("download_mode", "parallel") ?: "parallel"
         mapOf("success" to true, "data" to mapOf("mode" to mode))
+      } catch (e: Exception) {
+        mapOf("success" to false, "error" to e.message)
+      }
+    }
+
+    // Libro.fm serves each book two ways: a single packaged M4B, or a set of zipped
+    // MP3 parts. "m4b" | "parts"; reaches the provider as its download plan options.
+    Function("setLibroFmFormat") { format: String ->
+      try {
+        val context = appContext.reactContext ?: throw Exception("Context not available")
+        val prefs = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
+        prefs.edit().putString("librofm_format", format).apply()
+        mapOf("success" to true)
+      } catch (e: Exception) {
+        mapOf("success" to false, "error" to e.message)
+      }
+    }
+
+    Function("getLibroFmFormat") {
+      try {
+        val context = appContext.reactContext ?: throw Exception("Context not available")
+        val prefs = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
+        val format = prefs.getString("librofm_format", "m4b") ?: "m4b"
+        mapOf("success" to true, "data" to mapOf("format" to format))
       } catch (e: Exception) {
         mapOf("success" to false, "error" to e.message)
       }
@@ -2517,6 +2618,10 @@ class ExpoRustBridgeModule : Module() {
     @JvmStatic external fun nativeInitDatabase(paramsJson: String): String
     @JvmStatic external fun nativeSyncLibrary(paramsJson: String): String
     @JvmStatic external fun nativeSyncLibraryPage(paramsJson: String): String
+    // Multi-provider generic dispatchers (crate::providers)
+    @JvmStatic external fun nativeProviderLogin(paramsJson: String): String
+    @JvmStatic external fun nativeProviderSyncLibraryPage(paramsJson: String): String
+    @JvmStatic external fun nativeProviderGetDownloadPlan(paramsJson: String): String
     @JvmStatic external fun nativeSyncPodcastEpisodes(paramsJson: String): String
     @JvmStatic external fun nativeGetBooks(paramsJson: String): String
     @JvmStatic external fun nativeGetBookByAsin(paramsJson: String): String

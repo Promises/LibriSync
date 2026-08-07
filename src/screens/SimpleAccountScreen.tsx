@@ -1,15 +1,15 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, Alert, ScrollView, Platform, TouchableOpacity } from 'react-native';
+import { View, Text, Alert, ScrollView, Platform } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import * as SecureStore from 'expo-secure-store';
 import { Directory, Paths } from 'expo-file-system';
 import LoginScreen from './LoginScreen';
 import Button from '../components/Button';
+import AccountsCard from '../components/AccountsCard';
+import AccountActions from '../components/AccountActions';
 import {
-  syncLibrary,
   initializeDatabase,
-  refreshToken,
   getBooksWithFilters,
   getCustomerInformation,
   saveAccount,
@@ -29,6 +29,7 @@ import { useStyles } from '../hooks/useStyles';
 import { useTheme } from '../styles/theme';
 import type { Theme } from '../hooks/useStyles';
 import { getDatabasePath } from '../utils/appPaths';
+import { syncProviderAccount } from '../services/providerAccounts';
 import { DEMO_ACCOUNT, DEMO_BOOKS } from '../services/demo/demoData';
 import { isDemoAccount, isDemoAccountId } from '../services/demo/demoMode';
 
@@ -79,7 +80,9 @@ export default function SimpleAccountScreen() {
       console.log('[SimpleAccountScreen] Loading account from SQLite database');
       initializeDatabase(dbPath);
 
-      const accounts = await getAllAccounts(dbPath);
+      // Scoped to Audible: this screen's sync, token-refresh and detail cards are all
+      // Audible-specific, and another provider's account reaching them would break.
+      const accounts = await getAllAccounts(dbPath, 'audible');
       const selectedAccountId = await SecureStore.getItemAsync(SELECTED_ACCOUNT_KEY);
 
       // Demo mode: the demo account never lives in SQLite — inject it so the
@@ -90,7 +93,7 @@ export default function SimpleAccountScreen() {
         : realAccounts;
       setAllAccounts(mergedAccounts);
 
-      const primaryAccount = await getPrimaryAccount(dbPath);
+      const primaryAccount = await getPrimaryAccount(dbPath, 'audible');
       const loadedAccount = mergedAccounts.find(acc => acc.account_id === selectedAccountId)
         || primaryAccount
         || mergedAccounts[0]
@@ -385,7 +388,7 @@ export default function SimpleAccountScreen() {
       try {
         await SecureStore.setItemAsync(SELECTED_ACCOUNT_KEY, newAccount.account_id);
         const dbPath = getDatabasePath();
-        const realAccounts = (await getAllAccounts(dbPath)).filter(
+        const realAccounts = (await getAllAccounts(dbPath, 'audible')).filter(
           acc => !isDemoAccountId(acc.account_id)
         );
         setAllAccounts([DEMO_ACCOUNT, ...realAccounts]);
@@ -422,7 +425,7 @@ export default function SimpleAccountScreen() {
       }
 
       // Update state
-      const accounts = await getAllAccounts(dbPath);
+      const accounts = await getAllAccounts(dbPath, 'audible');
       setAllAccounts(accounts);
       setAccount(newAccount);
       setShowAddAccount(false);
@@ -510,7 +513,7 @@ export default function SimpleAccountScreen() {
                 SecureStore.deleteItemAsync('audible_locale_code'),
               ]);
 
-              const remainingAccounts = await getAllAccounts(dbPath);
+              const remainingAccounts = await getAllAccounts(dbPath, 'audible');
               setAllAccounts(remainingAccounts);
 
               if (remainingAccounts.length > 0) {
@@ -671,53 +674,32 @@ export default function SimpleAccountScreen() {
     }
   };
 
-  // Refresh the token if needed, then sync one account's library.
+  // Sync one account through the shared provider path (token refresh included).
   // UI account state is only touched when it is the selected account.
   const syncOneAccount = async (dbPath: string, acc: Account): Promise<SyncStats> => {
-    let syncAccount = acc;
-    if (syncAccount.identity?.access_token) {
-      const expiresAt = new Date(syncAccount.identity.access_token.expires_at);
-      const minutesUntilExpiry = (expiresAt.getTime() - Date.now()) / 1000 / 60;
+    const { stats, account: syncedAccount } = await syncProviderAccount(
+      dbPath,
+      acc,
+      (pageStats, _page, aggregatedStats) => {
+        setSyncStats({
+          ...pageStats,
+          total_items: aggregatedStats.total_items,
+          books_added: aggregatedStats.books_added,
+          books_updated: aggregatedStats.books_updated,
+        });
+      },
+    );
 
-      if (minutesUntilExpiry < 5) {
-        console.log(`[SimpleAccountScreen] Token for ${acc.account_id} expiring soon, refreshing before sync...`);
-        const newTokens = await refreshToken(syncAccount);
-        const newExpiry = new Date(Date.now() + parseInt(newTokens.expires_in.toString(), 10) * 1000);
-
-        syncAccount = {
-          ...syncAccount,
-          identity: {
-            ...syncAccount.identity!,
-            access_token: {
-              token: newTokens.access_token,
-              expires_at: newExpiry.toISOString(),
-            },
-            refresh_token: newTokens.refresh_token || syncAccount.identity!.refresh_token,
-          },
-        };
-
-        // Persist refreshed account
-        await saveAccount(dbPath, syncAccount);
-        if (account && syncAccount.account_id === account.account_id) {
-          await SecureStore.setItemAsync('token_expires_at', newExpiry.toISOString());
-          setAccount(syncAccount);
-          setTokenExpiry(newExpiry);
-        }
-      }
+    // A refresh mints a new expiry; mirror it into the token card when this is the
+    // account on screen.
+    const newExpiry = syncedAccount.identity?.access_token?.expires_at;
+    if (newExpiry && account?.account_id === syncedAccount.account_id && syncedAccount !== acc) {
+      await SecureStore.setItemAsync('token_expires_at', newExpiry);
+      setAccount(syncedAccount);
+      setTokenExpiry(new Date(newExpiry));
     }
 
-    // Sync library page-by-page with progress updates
-    console.log(`[SimpleAccountScreen] Starting page-by-page sync for ${syncAccount.account_id}...`);
-    return syncLibrary(dbPath, syncAccount, (_pageStats, page, aggregatedStats) => {
-      console.log(`[SimpleAccountScreen] Page ${page} synced: ${_pageStats.total_items} items`);
-      // Update UI incrementally after each page
-      setSyncStats({
-        ..._pageStats,
-        total_items: aggregatedStats.total_items, // This is cumulative in the aggregated stats
-        books_added: aggregatedStats.books_added,
-        books_updated: aggregatedStats.books_updated,
-      });
-    });
+    return stats;
   };
 
   const handleSyncAllAccounts = async () => {
@@ -869,38 +851,15 @@ export default function SimpleAccountScreen() {
       <ScrollView contentContainerStyle={styles.content}>
         <Text style={styles.title}>Account</Text>
 
-        <View style={styles.card}>
-          <Text style={styles.label}>Audible Accounts</Text>
-          {allAccounts.map((savedAccount) => {
-            const isSelected = savedAccount.account_id === account.account_id;
-            return (
-              <TouchableOpacity
-                key={savedAccount.account_id}
-                style={[
-                  styles.accountRow,
-                  isSelected && styles.accountRowSelected,
-                ]}
-                onPress={() => handleSelectAccount(savedAccount)}
-                disabled={isSelected}
-              >
-                <View style={styles.accountText}>
-                  <Text style={styles.value}>{formatAccountName(savedAccount)}</Text>
-                  <Text style={styles.caption}>
-                    {formatAccountRegion(savedAccount)}
-                  </Text>
-                </View>
-                {isSelected && <Text style={styles.selectedMark}>✓</Text>}
-              </TouchableOpacity>
-            );
-          })}
-          <Button
-            title="Add Account"
-            onPress={() => setShowAddAccount(true)}
-            variant="outlined"
-            state="primary"
-            style={{ marginTop: spacing.sm }}
-          />
-        </View>
+        <AccountsCard
+          label="Audible Accounts"
+          accounts={allAccounts}
+          selectedAccountId={account.account_id}
+          onSelect={handleSelectAccount}
+          onAddAccount={() => setShowAddAccount(true)}
+          formatName={formatAccountName}
+          formatSubtitle={formatAccountRegion}
+        />
 
         {accountName && (
           <View style={styles.card}>
@@ -981,32 +940,13 @@ export default function SimpleAccountScreen() {
           </View>
         )}
 
-        <Button
-          title={isSyncing ? 'Syncing...' : syncStats ? 'Sync Again' : 'Sync Library'}
-          onPress={handleSyncLibrary}
-          variant="filled"
-          state="warning"
-          disabled={isSyncing}
-          style={{ marginTop: spacing.sm }}
-        />
-
-        {allAccounts.filter((acc) => !isDemoAccount(acc)).length > 1 && (
-          <Button
-            title={isSyncing ? 'Syncing...' : 'Sync All Accounts'}
-            onPress={handleSyncAllAccounts}
-            variant="outlined"
-            state="warning"
-            disabled={isSyncing}
-            style={{ marginTop: spacing.sm }}
-          />
-        )}
-
-        <Button
-          title="Log Out"
-          onPress={handleLogout}
-          variant="outlined"
-          state="error"
-          style={{ marginTop: spacing.sm }}
+        <AccountActions
+          accountCount={allAccounts.filter((acc) => !isDemoAccount(acc)).length}
+          isSyncing={isSyncing}
+          hasSynced={!!syncStats}
+          onSync={handleSyncLibrary}
+          onSyncAll={handleSyncAllAccounts}
+          onSignOut={handleLogout}
         />
       </ScrollView>
     </SafeAreaView>
@@ -1046,30 +986,6 @@ const createStyles = (theme: Theme) => ({
   caption: {
     ...theme.typography.caption,
     marginTop: theme.spacing.xs,
-  },
-  accountRow: {
-    flexDirection: 'row' as const,
-    alignItems: 'center' as const,
-    justifyContent: 'space-between' as const,
-    paddingVertical: theme.spacing.sm,
-    paddingHorizontal: theme.spacing.sm,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: theme.colors.border,
-    marginTop: theme.spacing.sm,
-  },
-  accountRowSelected: {
-    borderColor: theme.colors.accent,
-    backgroundColor: theme.colors.accentDim,
-  },
-  accountText: {
-    flex: 1,
-    paddingRight: theme.spacing.sm,
-  },
-  selectedMark: {
-    ...theme.typography.body,
-    color: theme.colors.accent,
-    fontWeight: '700' as const,
   },
   statusRow: {
     flexDirection: 'row' as const,

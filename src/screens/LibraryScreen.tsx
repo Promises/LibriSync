@@ -31,7 +31,9 @@ import {
     getAccount,
     saveAccount,
     downloadLibrivoxFile,
+    enqueueProviderDownload,
     copyTextToClipboard,
+    ExpoRustBridge,
 } from '../../modules/expo-rust-bridge';
 import type {Book, Account, DownloadTask, StageProgress} from '../../modules/expo-rust-bridge';
 import * as SecureStore from 'expo-secure-store';
@@ -59,7 +61,7 @@ const PAGE_SIZE = 100;
 type SortField = 'title' | 'release_date' | 'date_added' | 'series' | 'length' | 'downloaded';
 type BookSortField = Exclude<SortField, 'downloaded'>;
 type SortDirection = 'asc' | 'desc';
-type SourceFilter = 'all' | 'audible' | 'librivox';
+type SourceFilter = 'all' | 'audible' | 'librivox' | 'librofm';
 type IoniconName = React.ComponentProps<typeof Ionicons>['name'];
 
 const EXPORT_FORMAT_OPTIONS: Array<{ format: LibraryExportFormat; label: string; icon: IoniconName }> = [
@@ -305,6 +307,7 @@ export default function LibraryScreen() {
                 initializeDatabase(dbPath);
                 const series = getAllSeries(dbPath);
                 const categories = getAllCategories(dbPath);
+                // Unscoped on purpose: the account filter chips span every provider.
                 const accounts = await getAllAccounts(dbPath);
 
                 setAllSeries(series);
@@ -449,7 +452,7 @@ export default function LibraryScreen() {
                 const accountId = podcast.account?.split(',').find(Boolean) || singleAccountFilter;
                 const account = accountId
                     ? await getAccount(dbPath, accountId)
-                    : await getPrimaryAccount(dbPath);
+                    : await getPrimaryAccount(dbPath, 'audible');
 
                 if (account) {
                     const syncStats = await syncPodcastEpisodes(
@@ -581,10 +584,10 @@ export default function LibraryScreen() {
             const owningAccountId = singleAccountFilter || getBookAccountIds(selectedPodcast)[0] || null;
             let account = owningAccountId
                 ? await getAccount(dbPath, owningAccountId)
-                : await getPrimaryAccount(dbPath);
+                : await getPrimaryAccount(dbPath, 'audible');
 
             if (!account) {
-                account = await getPrimaryAccount(dbPath);
+                account = await getPrimaryAccount(dbPath, 'audible');
             }
 
             if (!account) {
@@ -1013,6 +1016,56 @@ export default function LibraryScreen() {
                 return false;
             }
 
+            // Provider-registry books (Libro.fm, …): the Rust provider builds the
+            // download plan, so nothing here is provider-specific but the account lookup.
+            if (book.source === 'librofm') {
+                const dbPath = getDatabasePath();
+                initializeDatabase(dbPath);
+                const accountId = getBookAccountIds(book)[0];
+                const account = accountId ? await getAccount(dbPath, accountId) : null;
+                if (!account) {
+                    if (!silent) Alert.alert('Not Signed In', 'Sign in to Libro.fm again from the Providers tab.');
+                    return false;
+                }
+
+                const hasPermission = await requestNotificationPermission();
+                if (!hasPermission) {
+                    if (!silent) Alert.alert(
+                        'Permission Required',
+                        'Please grant notification permission to see download progress',
+                        [{ text: 'OK' }]
+                    );
+                    return false;
+                }
+
+                if (existingTask) {
+                    try {
+                        await clearBookDownloadState(dbPath, book.audible_product_id, false);
+                    } catch (clearError) {
+                        console.warn('[LibraryScreen] Failed to clear stale download state:', clearError);
+                    }
+                }
+
+                const formatResult = ExpoRustBridge.getLibroFmFormat();
+                const format = (formatResult?.success && (formatResult.data as any)?.format) || 'm4b';
+                const authorText = (book.authors?.length || 0) > 0 ? book.authors.join(', ') : null;
+
+                await enqueueProviderDownload(
+                    'librofm',
+                    account,
+                    book.audible_product_id,
+                    book.title,
+                    authorText,
+                    downloadDir,
+                    { format }
+                );
+                if (!silent) Alert.alert(
+                    'Download Started',
+                    `"${book.title}" is downloading. Monitor progress here or in the notification — you can leave the app.`
+                );
+                return true;
+            }
+
             // Audible books: existing DRM download flow
             if (book.is_downloadable === false) {
                 if (!silent) Alert.alert(
@@ -1038,10 +1091,10 @@ export default function LibraryScreen() {
             const owningAccountId = singleAccountFilter || getBookAccountIds(book)[0] || null;
             let account = owningAccountId
                 ? await getAccount(dbPath, owningAccountId)
-                : await getPrimaryAccount(dbPath);
+                : await getPrimaryAccount(dbPath, 'audible');
 
             if (!account) {
-                account = await getPrimaryAccount(dbPath);
+                account = await getPrimaryAccount(dbPath, 'audible');
             }
 
             if (!account) {
@@ -1531,11 +1584,6 @@ export default function LibraryScreen() {
                                     <Text style={styles.sourceBadgeText}>LibriVox</Text>
                                 </View>
                             )}
-                            {allAccounts.length > 1 && getBookAccountLabels(item).map((label) => (
-                                <View key={label} style={styles.sourceBadge}>
-                                    <Text style={styles.sourceBadgeText}>{label}</Text>
-                                </View>
-                            ))}
                             <Text style={[styles.status, {color: status.color}]}>
                                 {status.text}
                             </Text>
@@ -2198,7 +2246,7 @@ export default function LibraryScreen() {
                         <ScrollView style={styles.filterScroll}>
                             {/* Source Filter */}
                             <Text style={styles.filterSectionTitle}>Source</Text>
-                            {(['all', 'audible', 'librivox'] as SourceFilter[]).map((src) => (
+                            {(['all', 'audible', 'librivox', 'librofm'] as SourceFilter[]).map((src) => (
                                 <TouchableOpacity
                                     key={src}
                                     style={[
@@ -2208,7 +2256,7 @@ export default function LibraryScreen() {
                                     onPress={() => setSourceFilter(src)}
                                 >
                                     <Text style={styles.filterOptionText}>
-                                        {src === 'all' ? 'All Sources' : src === 'audible' ? 'Audible' : 'LibriVox'}
+                                        {src === 'all' ? 'All Sources' : src === 'audible' ? 'Audible' : src === 'librivox' ? 'LibriVox' : 'Libro.fm'}
                                     </Text>
                                     {sourceFilter === src && <Text style={styles.modalCheck}>✓</Text>}
                                 </TouchableOpacity>

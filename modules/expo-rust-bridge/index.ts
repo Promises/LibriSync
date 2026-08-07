@@ -130,15 +130,32 @@ export interface Locale {
 // ----------------------------------------------------------------------------
 
 /**
+ * Which audiobook source an account belongs to. Matches the Rust `ProviderId`
+ * and the `Accounts.provider` / `Books.source` column values.
+ */
+export type ProviderId = 'audible' | 'librivox' | 'librofm';
+
+/**
  * User account with credentials and identity information.
+ *
+ * `locale` is Audible-specific; DRM-free providers (Libro.fm) have none, so it is
+ * optional. `identity` is the provider's opaque credential blob — an Audible
+ * `Identity`, or e.g. `{access_token, username}` for Libro.fm.
  */
 export interface Account {
   account_id: string;
   account_name: string;
+  /** Omitted on accounts saved before multi-provider support; treat as 'audible'. */
+  provider?: ProviderId;
   library_scan?: boolean;
   decrypt_key?: string;
-  locale: Locale;
+  locale?: Locale;
   identity?: Identity;
+}
+
+/** The provider an account belongs to, defaulting legacy rows to Audible. */
+export function accountProvider(account: Pick<Account, 'provider'>): ProviderId {
+  return account.provider ?? 'audible';
 }
 
 /**
@@ -202,7 +219,7 @@ export interface Book {
   file_path?: string;
   created_at: string;
   updated_at: string;
-  source?: 'audible' | 'librivox';
+  source?: 'audible' | 'librivox' | 'librofm';
   account?: string;
 
   // Additional metadata from API
@@ -228,6 +245,24 @@ export interface SyncStats {
   books_absent: number;
   errors: string[];
   has_more: boolean;
+}
+
+/**
+ * A typed download part produced by the provider abstraction. The Kotlin engine
+ * dispatches on `kind` (plain copy / AAXC decrypt / zip extract).
+ */
+export type DownloadPart =
+  | { kind: 'plain'; url: string; headers?: Record<string, string>; filename: string }
+  | { kind: 'aaxc'; url: string; headers?: Record<string, string>; key: string; iv: string; filename: string }
+  | { kind: 'zip'; url: string; headers?: Record<string, string> };
+
+/**
+ * Provider-agnostic download plan for one book (see native providers module).
+ */
+export interface DownloadPlan {
+  parts: DownloadPart[];
+  embed_metadata: boolean;
+  chapters: { title: string; start_ms: number; end_ms: number }[];
 }
 
 /**
@@ -520,6 +555,11 @@ export interface ExpoRustBridgeModule {
    */
   syncLibraryPage(dbPath: string, accountJson: string, page: number): Promise<RustResponse<SyncStats>>;
 
+  // Multi-provider generic bridge (routes by provider id to the Rust registry).
+  providerLogin(provider: string, fieldsJson: string): Promise<RustResponse<Record<string, unknown>>>;
+  providerSyncLibraryPage(provider: string, dbPath: string, accountJson: string, page: number): Promise<RustResponse<SyncStats>>;
+  providerGetDownloadPlan(provider: string, dbPath: string, accountJson: string, itemRef: string, optionsJson: string): Promise<RustResponse<DownloadPlan>>;
+
   /**
    * Synchronize one page of podcast or periodical episodes from Audible.
    */
@@ -804,7 +844,7 @@ export interface ExpoRustBridgeModule {
   /**
    * Get primary account from SQLite database.
    */
-  getPrimaryAccount(dbPath: string): Promise<RustResponse<{ account: string | null }>>;
+  getPrimaryAccount(dbPath: string, provider: string | null): Promise<RustResponse<{ account: string | null }>>;
 
   /**
    * Get one account from SQLite database.
@@ -814,7 +854,7 @@ export interface ExpoRustBridgeModule {
   /**
    * Get all accounts from SQLite database.
    */
-  getAllAccounts(dbPath: string): Promise<RustResponse<{ accounts: string }>>;
+  getAllAccounts(dbPath: string, provider: string | null): Promise<RustResponse<{ accounts: string }>>;
 
   /**
    * Delete account from SQLite database.
@@ -1005,6 +1045,18 @@ export interface ExpoRustBridgeModule {
   getDownloadMode(): RustResponse<{ mode: string }>;
 
   /**
+   * Set the Libro.fm download format.
+   *
+   * @param format - "m4b" (one packaged file) or "parts" (folder of MP3s)
+   */
+  setLibroFmFormat(format: string): RustResponse<{}>;
+
+  /**
+   * Get the Libro.fm download format preference.
+   */
+  getLibroFmFormat(): RustResponse<{ format: string }>;
+
+  /**
    * Set audio validation depth after download.
    *
    * @param level - "full" (all sample points), "quick" (ends only), or "off"
@@ -1036,6 +1088,20 @@ export interface ExpoRustBridgeModule {
     author: string | null,
     downloadUrl: string,
     outputDirectory: string
+  ): Promise<RustResponse<{ message: string }>>;
+
+  /**
+   * Enqueue a background download for any registry provider. The Rust provider
+   * supplies the typed plan, so this covers every provider (Libro.fm and beyond).
+   */
+  enqueueProviderDownload(
+    provider: string,
+    accountJson: string,
+    itemRef: string,
+    title: string,
+    author: string | null,
+    outputDirectory: string,
+    optionsJson: string
   ): Promise<RustResponse<{ message: string }>>;
 }
 
@@ -1235,6 +1301,11 @@ async function refreshToken(account: Account): Promise<TokenResponse> {
   if (!account.identity?.refresh_token) {
     throw new RustBridgeError('No refresh token available');
   }
+  // Audible-only: a locale-less account here means a provider's account reached
+  // the Audible token path, which would silently send an undefined region.
+  if (!account.locale?.country_code) {
+    throw new RustBridgeError('Account has no Audible locale; cannot refresh token');
+  }
 
   const response = await NativeModule!.refreshAccessToken(
     account.locale.country_code,
@@ -1261,6 +1332,9 @@ async function refreshToken(account: Account): Promise<TokenResponse> {
 async function getActivationBytes(account: Account): Promise<string> {
   if (!account.identity?.access_token) {
     throw new RustBridgeError('No access token available');
+  }
+  if (!account.locale?.country_code) {
+    throw new RustBridgeError('Account has no Audible locale; cannot get activation bytes');
   }
 
   const response = await NativeModule!.getActivationBytes(
@@ -1338,7 +1412,11 @@ async function syncLibrary(
 
     // Aggregate results
     aggregatedStats.total_items += pageStats.total_items;
-    aggregatedStats.total_library_count = pageStats.total_library_count; // Use latest count
+    // Keep the last non-zero total: a final page that reports 0 would otherwise wipe
+    // the library count and make the summary read "275 / 0".
+    if (pageStats.total_library_count > 0) {
+      aggregatedStats.total_library_count = pageStats.total_library_count;
+    }
     aggregatedStats.books_added += pageStats.books_added;
     aggregatedStats.books_updated += pageStats.books_updated;
     aggregatedStats.books_absent += pageStats.books_absent;
@@ -1360,10 +1438,70 @@ async function syncLibrary(
     page++;
   }
 
+  if (aggregatedStats.total_library_count === 0) {
+    aggregatedStats.total_library_count = aggregatedStats.total_items;
+  }
+
   console.log(
     `[syncLibrary] All pages synced. Total: ${aggregatedStats.total_items} items, ` +
     `${aggregatedStats.books_added} added, ${aggregatedStats.books_updated} updated`
   );
+
+  return aggregatedStats;
+}
+
+/**
+ * Sync a provider's owned library page by page, the generic counterpart to
+ * {@link syncLibrary}. Routes through the Rust provider registry, so any provider
+ * (Libro.fm and beyond) syncs without a dedicated bridge function.
+ *
+ * @param provider - Provider id, e.g. 'librofm'
+ * @param onPageComplete - Called after each page with that page's stats, the page
+ *   number, and the running totals
+ */
+async function providerSyncLibrary(
+  provider: ProviderId,
+  dbPath: string,
+  account: Account,
+  onPageComplete?: (stats: SyncStats, page: number, aggregatedStats: SyncStats) => void
+): Promise<SyncStats> {
+  const aggregatedStats: SyncStats = {
+    total_items: 0,
+    total_library_count: 0,
+    books_added: 0,
+    books_updated: 0,
+    books_absent: 0,
+    errors: [],
+    has_more: false,
+  };
+
+  let page = 1;
+  let hasMore = true;
+
+  // Bounded so a provider that never clears has_more can't spin forever.
+  const MAX_PAGES = 500;
+  while (hasMore && page <= MAX_PAGES) {
+    const pageStats = await providerSyncLibraryPage(provider, dbPath, account, page);
+
+    aggregatedStats.total_items += pageStats.total_items;
+    if (pageStats.total_library_count > 0) {
+      aggregatedStats.total_library_count = pageStats.total_library_count;
+    }
+    aggregatedStats.books_added += pageStats.books_added;
+    aggregatedStats.books_updated += pageStats.books_updated;
+    aggregatedStats.books_absent += pageStats.books_absent;
+    aggregatedStats.errors.push(...pageStats.errors);
+
+    hasMore = pageStats.has_more;
+    onPageComplete?.(pageStats, page, aggregatedStats);
+    page++;
+  }
+
+  // Providers that don't report a library total (Libro.fm is per-page) still need
+  // one for "synced X of Y" to read sensibly.
+  if (aggregatedStats.total_library_count === 0) {
+    aggregatedStats.total_library_count = aggregatedStats.total_items;
+  }
 
   return aggregatedStats;
 }
@@ -1553,6 +1691,37 @@ async function getCustomerInformation(
 async function syncLibraryPage(dbPath: string, account: Account, page: number): Promise<SyncStats> {
   const accountJson = JSON.stringify(account);
   const response = await NativeModule!.syncLibraryPage(dbPath, accountJson, page);
+  return unwrapResult(response);
+}
+
+// ── Multi-provider generic bridge ──────────────────────────────────────────
+
+/** Log in to a password-based provider (e.g. Libro.fm). Returns the opaque credential blob. */
+async function providerLogin(provider: string, fields: Record<string, string>): Promise<Record<string, unknown>> {
+  const response = await NativeModule!.providerLogin(provider, JSON.stringify(fields));
+  return unwrapResult(response);
+}
+
+/** Sync one page of a provider's owned library. Generic over provider id. */
+async function providerSyncLibraryPage(provider: string, dbPath: string, account: Account, page: number): Promise<SyncStats> {
+  const response = await NativeModule!.providerSyncLibraryPage(provider, dbPath, JSON.stringify(account), page);
+  return unwrapResult(response);
+}
+
+/**
+ * Get the typed download plan for one book from its provider.
+ * `options` carries provider-specific settings, e.g. Libro.fm `{ format: 'parts' | 'm4b' }`.
+ */
+async function providerGetDownloadPlan(
+  provider: string,
+  dbPath: string,
+  account: Account,
+  itemRef: string,
+  options: Record<string, unknown> = {},
+): Promise<DownloadPlan> {
+  const response = await NativeModule!.providerGetDownloadPlan(
+    provider, dbPath, JSON.stringify(account), itemRef, JSON.stringify(options),
+  );
   return unwrapResult(response);
 }
 
@@ -1969,10 +2138,12 @@ async function saveAccount(dbPath: string, account: Account): Promise<void> {
  * Get primary account from SQLite database.
  *
  * @param dbPath - Database path
+ * @param provider - Scope to one provider ('audible', 'librofm', …). Omit for the
+ *   first account of any provider.
  * @returns Account object or null if no account exists
  */
-async function getPrimaryAccount(dbPath: string): Promise<Account | null> {
-  const response = await NativeModule!.getPrimaryAccount(dbPath);
+async function getPrimaryAccount(dbPath: string, provider?: ProviderId): Promise<Account | null> {
+  const response = await NativeModule!.getPrimaryAccount(dbPath, provider ?? null);
   const data = unwrapResult(response);
 
   if (!data.account || data.account === 'null') {
@@ -2023,10 +2194,13 @@ function parseAccount(value: unknown): Account | null {
  * Get all accounts from SQLite database.
  *
  * @param dbPath - Database path
+ * @param provider - Scope to one provider ('audible', 'librofm', …). Omit for every
+ *   account. Provider-specific screens must scope: handing one provider's accounts to
+ *   another's sync/refresh path will fail.
  * @returns Array of account objects
  */
-async function getAllAccounts(dbPath: string): Promise<Account[]> {
-  const response = await NativeModule!.getAllAccounts(dbPath);
+async function getAllAccounts(dbPath: string, provider?: ProviderId): Promise<Account[]> {
+  const response = await NativeModule!.getAllAccounts(dbPath, provider ?? null);
   const data = unwrapResult(response);
 
   if (!data.accounts) {
@@ -2222,6 +2396,38 @@ async function downloadLibrivoxFile(
   unwrapResult(response);
 }
 
+/**
+ * Enqueue a background download for any provider in the Rust registry.
+ *
+ * The provider produces the typed download plan (plain / aaxc / zip parts), so the
+ * download engine — and this call — stay provider-agnostic.
+ *
+ * @param provider - Provider id, e.g. 'librofm'
+ * @param account - The provider account (its credential blob lives in `identity`)
+ * @param itemRef - The provider's item id (ASIN, ISBN, …)
+ * @param options - Provider-specific settings, e.g. Libro.fm `{ format: 'parts' | 'm4b' }`
+ */
+async function enqueueProviderDownload(
+  provider: string,
+  account: Account,
+  itemRef: string,
+  title: string,
+  author: string | null,
+  outputDirectory: string,
+  options: Record<string, unknown> = {},
+): Promise<void> {
+  const response = await NativeModule!.enqueueProviderDownload(
+    provider,
+    JSON.stringify(account),
+    itemRef,
+    title,
+    author,
+    outputDirectory,
+    JSON.stringify(options),
+  );
+  unwrapResult(response);
+}
+
 // ============================================================================
 // Periodic Worker Scheduling
 // ============================================================================
@@ -2410,6 +2616,10 @@ export {
   initializeDatabase,
   syncLibrary,
   syncLibraryPage,
+  providerLogin,
+  providerSyncLibraryPage,
+  providerGetDownloadPlan,
+  providerSyncLibrary,
   syncPodcastEpisodes,
   setDownloadDirectory,
   getDownloadDirectory,
@@ -2461,6 +2671,7 @@ export {
   // LibriVox
   insertLibrivoxBook,
   downloadLibrivoxFile,
+  enqueueProviderDownload,
   // Testing
   clearDownloadState,
   getBookFilePath,

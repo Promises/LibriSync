@@ -1665,6 +1665,70 @@ pub async fn clear_library(pool: &SqlitePool) -> Result<()> {
 }
 
 /// Insert a LibriVox book with all related data in one operation.
+/// Insert a Libro.fm book (source='librofm', DRM-free). Product id = the ISBN.
+/// Owned by [account] (the Libro.fm email). Skips if it already exists.
+pub async fn insert_libro_book(
+    pool: &SqlitePool,
+    isbn: &str,
+    title: &str,
+    authors: &[String],
+    narrators: &[String],
+    description: &str,
+    length_in_minutes: i32,
+    cover_url: Option<&str>,
+    account: &str,
+) -> Result<i64> {
+    if let Some(existing) = find_book_by_asin(pool, isbn).await? {
+        return Ok(existing.book_id);
+    }
+
+    let result = sqlx::query(
+        r#"
+        INSERT INTO Books (
+            audible_product_id, title, subtitle, description, length_in_minutes,
+            content_type, locale, picture_large, source,
+            is_abridged, is_spatial, language,
+            rating_overall, rating_performance, rating_story,
+            is_finished, is_downloadable, is_ayce
+        ) VALUES (?, ?, NULL, ?, ?, 1, ?, ?, 'librofm', 0, 0, ?, 0.0, 0.0, 0.0, 0, 1, 0)
+        "#,
+    )
+    .bind(isbn)
+    .bind(title)
+    .bind(description)
+    .bind(length_in_minutes)
+    .bind("us")
+    .bind(cover_url)
+    .bind("english")
+    .execute(pool)
+    .await?;
+
+    let book_id = result.last_insert_rowid();
+
+    insert_library_book(
+        pool,
+        &NewLibraryBook {
+            book_id,
+            account: account.to_string(),
+        },
+    )
+    .await?;
+    insert_user_defined_item(pool, &NewUserDefinedItem::new(book_id)).await?;
+
+    for (i, author) in authors.iter().enumerate() {
+        let contributor_id = upsert_contributor(pool, &NewContributor::new(author.clone())).await?;
+        add_book_contributor(pool, book_id, contributor_id, Role::Author as i32, i as i16).await?;
+    }
+    for (i, narrator) in narrators.iter().enumerate() {
+        let contributor_id =
+            upsert_contributor(pool, &NewContributor::new(narrator.clone())).await?;
+        add_book_contributor(pool, book_id, contributor_id, Role::Narrator as i32, i as i16)
+            .await?;
+    }
+
+    Ok(book_id)
+}
+
 ///
 /// This handles inserting into Books (with source='librivox'), LibraryBooks,
 /// UserDefinedItems, and Contributors tables.

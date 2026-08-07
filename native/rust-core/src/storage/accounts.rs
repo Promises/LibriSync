@@ -30,14 +30,16 @@ pub async fn save_account(pool: &SqlitePool, account_id: &str, account_json: &st
 
     let account_name = account["account_name"].as_str().unwrap_or(account_id);
 
-    let locale = account
+    // Provider tag (multi-provider). Defaults to 'audible' for legacy accounts.
+    let provider = account["provider"].as_str().unwrap_or("audible");
+
+    // Locale is optional: Audible accounts carry one; DRM-free providers (Libro.fm)
+    // don't. Fall back to "us" so a locale-less account doesn't fail to save.
+    let locale_code = account
         .get("locale")
         .or_else(|| account.get("identity").and_then(|identity| identity.get("locale")))
-        .ok_or_else(|| LibationError::InvalidInput("Missing locale".to_string()))?;
-
-    let locale_code = locale["country_code"]
-        .as_str()
-        .ok_or_else(|| LibationError::InvalidInput("Missing locale country_code".to_string()))?;
+        .and_then(|locale| locale["country_code"].as_str())
+        .unwrap_or("us");
 
     // Extract identity JSON
     let identity_json = account["identity"].to_string();
@@ -56,14 +58,16 @@ pub async fn save_account(pool: &SqlitePool, account_id: &str, account_json: &st
             locale_code,
             identity_json,
             token_expires_at,
-            decrypt_key
-        ) VALUES (?, ?, ?, ?, ?, ?)
+            decrypt_key,
+            provider
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(account_id) DO UPDATE SET
             account_name = excluded.account_name,
             locale_code = excluded.locale_code,
             identity_json = excluded.identity_json,
             token_expires_at = excluded.token_expires_at,
             decrypt_key = excluded.decrypt_key,
+            provider = excluded.provider,
             updated_at = CURRENT_TIMESTAMP
         "#,
     )
@@ -73,6 +77,7 @@ pub async fn save_account(pool: &SqlitePool, account_id: &str, account_json: &st
     .bind(&identity_json)
     .bind(token_expires_at)
     .bind(decrypt_key)
+    .bind(provider)
     .execute(pool)
     .await?;
 
@@ -88,14 +93,15 @@ pub async fn save_account(pool: &SqlitePool, account_id: &str, account_json: &st
 /// # Returns
 /// Complete account JSON or None if not found
 pub async fn get_account(pool: &SqlitePool, account_id: &str) -> Result<Option<String>> {
-    let row: Option<(String, String, String, String, Option<String>)> = sqlx::query_as(
+    let row: Option<(String, String, String, String, Option<String>, String)> = sqlx::query_as(
         r#"
         SELECT
             account_id,
             account_name,
             locale_code,
             identity_json,
-            decrypt_key
+            decrypt_key,
+            COALESCE(provider, 'audible')
         FROM Accounts
         WHERE account_id = ?
         "#,
@@ -104,7 +110,7 @@ pub async fn get_account(pool: &SqlitePool, account_id: &str) -> Result<Option<S
     .fetch_optional(pool)
     .await?;
 
-    if let Some((acc_id, acc_name, locale_code, identity_json, decrypt_key)) = row {
+    if let Some((acc_id, acc_name, locale_code, identity_json, decrypt_key, provider)) = row {
         // Parse identity JSON from database
         let identity: serde_json::Value = serde_json::from_str(&identity_json).map_err(|e| {
             LibationError::InvalidState(format!("Corrupt identity JSON in database: {}", e))
@@ -116,10 +122,13 @@ pub async fn get_account(pool: &SqlitePool, account_id: &str) -> Result<Option<S
             })
         });
 
-        // Reconstruct account using serde_json (proper serialization)
+        // Reconstruct account using serde_json (proper serialization). `provider` must
+        // round-trip: without it every account reads back as Audible and the UI would
+        // hand a Libro.fm account to the Audible sync/refresh path.
         let mut account = serde_json::json!({
             "account_id": acc_id,
             "account_name": acc_name,
+            "provider": provider,
             "locale": locale,
             "identity": identity,
             "library_scan": true
@@ -141,20 +150,44 @@ pub async fn get_account(pool: &SqlitePool, account_id: &str) -> Result<Option<S
 ///
 /// # Arguments
 /// * `pool` - Database connection pool
+/// * `provider` - Scope to one provider (`"audible"`, `"librofm"`, …), or `None`
+///   for the first account of any provider. Callers on a provider-specific path
+///   must scope, or "the first account" can be another provider's.
 ///
 /// # Returns
 /// Complete account JSON or None if no accounts exist
-pub async fn get_primary_account(pool: &SqlitePool) -> Result<Option<String>> {
-    let row: Option<(String,)> = sqlx::query_as(
-        r#"
-        SELECT account_id
-        FROM Accounts
-        ORDER BY created_at ASC
-        LIMIT 1
-        "#,
-    )
-    .fetch_optional(pool)
-    .await?;
+pub async fn get_primary_account(
+    pool: &SqlitePool,
+    provider: Option<&str>,
+) -> Result<Option<String>> {
+    let row: Option<(String,)> = match provider {
+        Some(provider) => {
+            sqlx::query_as(
+                r#"
+                SELECT account_id
+                FROM Accounts
+                WHERE COALESCE(provider, 'audible') = ?
+                ORDER BY created_at ASC
+                LIMIT 1
+                "#,
+            )
+            .bind(provider)
+            .fetch_optional(pool)
+            .await?
+        }
+        None => {
+            sqlx::query_as(
+                r#"
+                SELECT account_id
+                FROM Accounts
+                ORDER BY created_at ASC
+                LIMIT 1
+                "#,
+            )
+            .fetch_optional(pool)
+            .await?
+        }
+    };
 
     if let Some((account_id,)) = row {
         get_account(pool, &account_id).await
@@ -164,16 +197,42 @@ pub async fn get_primary_account(pool: &SqlitePool) -> Result<Option<String>> {
 }
 
 /// Get all accounts in creation order.
-pub async fn get_all_accounts(pool: &SqlitePool) -> Result<Vec<String>> {
-    let account_ids: Vec<String> = sqlx::query_scalar(
-        r#"
-        SELECT account_id
-        FROM Accounts
-        ORDER BY created_at ASC
-        "#,
-    )
-    .fetch_all(pool)
-    .await?;
+///
+/// `provider` scopes the result to one provider (`"audible"`, `"librofm"`, …);
+/// `None` returns every account. Callers that drive a provider-specific screen
+/// must scope, or they will hand another provider's accounts to a sync/refresh
+/// path that can't handle them. Rows written before migration 7 default to
+/// `audible`, so the COALESCE keeps legacy accounts visible.
+pub async fn get_all_accounts(
+    pool: &SqlitePool,
+    provider: Option<&str>,
+) -> Result<Vec<String>> {
+    let account_ids: Vec<String> = match provider {
+        Some(provider) => {
+            sqlx::query_scalar(
+                r#"
+                SELECT account_id
+                FROM Accounts
+                WHERE COALESCE(provider, 'audible') = ?
+                ORDER BY created_at ASC
+                "#,
+            )
+            .bind(provider)
+            .fetch_all(pool)
+            .await?
+        }
+        None => {
+            sqlx::query_scalar(
+                r#"
+                SELECT account_id
+                FROM Accounts
+                ORDER BY created_at ASC
+                "#,
+            )
+            .fetch_all(pool)
+            .await?
+        }
+    };
 
     let mut accounts = Vec::with_capacity(account_ids.len());
     for account_id in account_ids {
@@ -312,8 +371,80 @@ mod tests {
             .unwrap();
 
         // Primary should be first one created
-        let primary = get_primary_account(db.pool()).await.unwrap().unwrap();
+        let primary = get_primary_account(db.pool(), None).await.unwrap().unwrap();
         let primary_json: serde_json::Value = serde_json::from_str(&primary).unwrap();
         assert_eq!(primary_json["account_id"], "first@example.com");
+    }
+
+    #[tokio::test]
+    async fn get_all_accounts_scopes_by_provider() {
+        let db = Database::new_in_memory().await.unwrap();
+
+        // A pre-multi-provider account: no `provider` field, must read as audible.
+        let audible = r#"{"account_id": "a@example.com", "account_name": "Audible",
+            "locale": {"country_code": "us"},
+            "identity": {"access_token": {"token": "a"},"refresh_token": "b","device_serial_number": "c"}}"#;
+        // Libro.fm: provider-tagged, and deliberately locale-less.
+        let librofm = r#"{"account_id": "l@example.com", "account_name": "Libro",
+            "provider": "librofm", "identity": {"access_token": "tok", "username": "l@example.com"}}"#;
+
+        save_account(db.pool(), "a@example.com", audible).await.unwrap();
+        save_account(db.pool(), "l@example.com", librofm).await.unwrap();
+
+        let ids = |accounts: Vec<String>| -> Vec<String> {
+            accounts
+                .iter()
+                .map(|a| {
+                    serde_json::from_str::<serde_json::Value>(a).unwrap()["account_id"]
+                        .as_str()
+                        .unwrap()
+                        .to_string()
+                })
+                .collect()
+        };
+
+        assert_eq!(
+            ids(get_all_accounts(db.pool(), Some("audible")).await.unwrap()),
+            vec!["a@example.com"]
+        );
+        assert_eq!(
+            ids(get_all_accounts(db.pool(), Some("librofm")).await.unwrap()),
+            vec!["l@example.com"]
+        );
+        assert_eq!(get_all_accounts(db.pool(), None).await.unwrap().len(), 2);
+
+        assert_eq!(
+            get_primary_account(db.pool(), Some("librofm"))
+                .await
+                .unwrap()
+                .map(|a| serde_json::from_str::<serde_json::Value>(&a).unwrap()["account_id"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()),
+            Some("l@example.com".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_round_trips_through_get_account() {
+        let db = Database::new_in_memory().await.unwrap();
+
+        let librofm = r#"{"account_id": "l@example.com", "account_name": "Libro",
+            "provider": "librofm", "identity": {"access_token": "tok"}}"#;
+        save_account(db.pool(), "l@example.com", librofm).await.unwrap();
+
+        let back: serde_json::Value =
+            serde_json::from_str(&get_account(db.pool(), "l@example.com").await.unwrap().unwrap())
+                .unwrap();
+        assert_eq!(back["provider"], "librofm");
+
+        // Legacy row with no provider column value still reads as audible.
+        let audible = r#"{"account_id": "a@example.com", "account_name": "A",
+            "locale": {"country_code": "us"}, "identity": {"access_token": {"token": "t"}}}"#;
+        save_account(db.pool(), "a@example.com", audible).await.unwrap();
+        let back: serde_json::Value =
+            serde_json::from_str(&get_account(db.pool(), "a@example.com").await.unwrap().unwrap())
+                .unwrap();
+        assert_eq!(back["provider"], "audible");
     }
 }

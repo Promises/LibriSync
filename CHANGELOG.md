@@ -4,6 +4,17 @@ All notable user-facing changes to LibriSync. Entries are phrased for the
 Google Play "What's new" field. Earlier entries were reconstructed from git
 history (no changelog was kept before v0.0.24), so wording is approximate.
 
+## v0.0.26
+
+- Libro.fm support — sign in and sync your owned library alongside Audible.
+- Download Libro.fm books as one packaged M4B or as a folder of MP3 parts,
+  your choice in Settings.
+- Filter the library by source: Audible, LibriVox, or Libro.fm.
+- Manage several accounts per provider, each with its own sync.
+- "Sync All Accounts" now only appears when a provider actually has more than one.
+- Library rows are less cluttered — the account name chip has been removed.
+- Fixed a finished sync reporting a library total of zero.
+
 ## v0.0.25
 
 - Auto-download new books after each library sync (optional, off by default, Wi-Fi only).

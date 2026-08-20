@@ -36,7 +36,7 @@ import {
 
 const DOWNLOAD_PATH_KEY = 'download_path';
 
-export default function LibriVoxBrowseScreen() {
+export default function LibriVoxBrowseScreen({ navigation }: any) {
   const styles = useStyles(createStyles);
   const { colors } = useTheme();
   const insets = useSafeAreaInsets();
@@ -288,8 +288,22 @@ export default function LibriVoxBrowseScreen() {
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
       <View style={styles.header}>
-        <Text style={styles.headerTitle}>Browse LibriVox</Text>
-        <Text style={styles.headerSubtitle}>Free public domain audiobooks</Text>
+        <View style={styles.headerTitleRow}>
+          {/* Pushed from the Accounts header, so it needs its own way back. */}
+          {navigation.canGoBack() && (
+            <TouchableOpacity
+              onPress={() => navigation.goBack()}
+              style={styles.backButton}
+              accessibilityLabel="Back"
+            >
+              <Ionicons name="chevron-back" size={24} color={colors.textPrimary} />
+            </TouchableOpacity>
+          )}
+          <View style={styles.headerTitleText}>
+            <Text style={styles.headerTitle}>Browse LibriVox</Text>
+            <Text style={styles.headerSubtitle}>Free public domain audiobooks</Text>
+          </View>
+        </View>
 
         <View style={styles.searchContainer}>
           <Ionicons
@@ -473,6 +487,18 @@ const createStyles = (theme: Theme) => ({
     padding: theme.spacing.lg,
     borderBottomWidth: 1,
     borderBottomColor: theme.colors.border,
+  },
+  headerTitleRow: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+  },
+  backButton: {
+    marginRight: theme.spacing.sm,
+    marginLeft: -theme.spacing.sm,
+    padding: theme.spacing.xs,
+  },
+  headerTitleText: {
+    flex: 1,
   },
   headerTitle: {
     ...theme.typography.title,

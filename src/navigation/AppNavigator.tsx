@@ -8,62 +8,34 @@ import Constants from 'expo-constants';
 import * as SecureStore from 'expo-secure-store';
 import { useTheme } from '../styles/theme';
 import { checkForUpdate, isGithubReleaseBuild } from '../utils/versionCheck';
-import { useProviders } from '../contexts/ProvidersContext';
 
 import LibraryScreen from '../screens/LibraryScreen';
-import ProvidersScreen from '../screens/ProvidersScreen';
+import AccountsScreen from '../screens/AccountsScreen';
 import LibriVoxBrowseScreen from '../screens/LibriVoxBrowseScreen';
-import LibroFmAccountScreen from '../screens/LibroFmAccountScreen';
-import SimpleAccountScreen from '../screens/SimpleAccountScreen';
 import SettingsScreen from '../screens/SettingsScreen';
 import TaskDebugScreen from '../screens/TaskDebugScreen';
 
 const Tab = createBottomTabNavigator();
-const ProvidersStack = createNativeStackNavigator();
+const AccountsStack = createNativeStackNavigator();
 const DEBUG_MODE_KEY = 'debug_mode_enabled';
 
-function ProvidersStackScreen() {
-  const { colors } = useTheme();
-
+/**
+ * One unified Accounts screen for every provider, with LibriVox — which needs no
+ * account — pushed on top as a browse destination from the header action.
+ *
+ * Both screens draw their own headers, hence `headerShown: false` throughout.
+ */
+function AccountsStackScreen() {
   return (
-    <ProvidersStack.Navigator
-      screenOptions={{
-        headerStyle: {
-          backgroundColor: colors.backgroundSecondary,
-        },
-        headerTintColor: colors.textPrimary,
-        headerTitleStyle: {
-          fontWeight: '600',
-        },
-      }}
-    >
-      <ProvidersStack.Screen
-        name="ProvidersList"
-        component={ProvidersScreen}
-        options={{ headerShown: false }}
-      />
-      <ProvidersStack.Screen
-        name="Audible"
-        component={SimpleAccountScreen}
-        options={{ headerShown: false }}
-      />
-      <ProvidersStack.Screen
-        name="LibriVox"
-        component={LibriVoxBrowseScreen}
-        options={{ headerShown: false }}
-      />
-      <ProvidersStack.Screen
-        name="LibroFm"
-        component={LibroFmAccountScreen}
-        options={{ headerShown: false }}
-      />
-    </ProvidersStack.Navigator>
+    <AccountsStack.Navigator screenOptions={{ headerShown: false }}>
+      <AccountsStack.Screen name="AccountsList" component={AccountsScreen} />
+      <AccountsStack.Screen name="LibriVoxBrowse" component={LibriVoxBrowseScreen} />
+    </AccountsStack.Navigator>
   );
 }
 
 export default function AppNavigator() {
   const { colors } = useTheme();
-  const { providers } = useProviders();
   const [enableDebugScreen, setEnableDebugScreen] = useState<boolean>(
     Constants.expoConfig?.extra?.enableDebugScreen ?? __DEV__
   );
@@ -141,43 +113,17 @@ export default function AppNavigator() {
             ),
           }}
         />
-        {providers.audible && providers.librivox ? (
-          <Tab.Screen
-            name="Providers"
-            component={ProvidersStackScreen}
-            options={{
-              tabBarLabel: 'Providers',
-              headerShown: false,
-              tabBarIcon: ({ color, size }) => (
-                <Ionicons name="globe-outline" size={size} color={color} />
-              ),
-            }}
-          />
-        ) : providers.librivox ? (
-          <Tab.Screen
-            name="Browse"
-            component={LibriVoxBrowseScreen}
-            options={{
-              tabBarLabel: 'Browse',
-              headerShown: false,
-              tabBarIcon: ({ color, size }) => (
-                <Ionicons name="globe-outline" size={size} color={color} />
-              ),
-            }}
-          />
-        ) : (
-          <Tab.Screen
-            name="Account"
-            component={SimpleAccountScreen}
-            options={{
-              tabBarLabel: 'Account',
-              headerShown: false,
-              tabBarIcon: ({ color, size }) => (
-                <Ionicons name="person" size={size} color={color} />
-              ),
-            }}
-          />
-        )}
+        <Tab.Screen
+          name="Accounts"
+          component={AccountsStackScreen}
+          options={{
+            tabBarLabel: 'Accounts',
+            headerShown: false,
+            tabBarIcon: ({ color, size }) => (
+              <Ionicons name="person" size={size} color={color} />
+            ),
+          }}
+        />
         <Tab.Screen
           name="Settings"
           component={SettingsScreen}

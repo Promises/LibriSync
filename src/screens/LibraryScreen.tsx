@@ -1024,7 +1024,7 @@ export default function LibraryScreen() {
                 const accountId = getBookAccountIds(book)[0];
                 const account = accountId ? await getAccount(dbPath, accountId) : null;
                 if (!account) {
-                    if (!silent) Alert.alert('Not Signed In', 'Sign in to Libro.fm again from the Providers tab.');
+                    if (!silent) Alert.alert('Not Signed In', 'Sign in to Libro.fm again from the Accounts tab.');
                     return false;
                 }
 

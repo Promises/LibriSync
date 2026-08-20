@@ -4,14 +4,23 @@ All notable user-facing changes to LibriSync. Entries are phrased for the
 Google Play "What's new" field. Earlier entries were reconstructed from git
 history (no changelog was kept before v0.0.24), so wording is approximate.
 
+## v0.0.27
+
+- One Accounts tab for every store — Audible and Libro.fm accounts now live in a
+  single list instead of behind a separate Providers screen.
+- "Add Account" asks which store you want to connect.
+- "Sync All Accounts" now syncs every store in one tap, not just one at a time.
+- Browse LibriVox moved to a button in the top right of the Accounts screen.
+
 ## v0.0.26
 
 - Libro.fm support — sign in and sync your owned library alongside Audible.
 - Download Libro.fm books as one packaged M4B or as a folder of MP3 parts,
   your choice in Settings.
 - Filter the library by source: Audible, LibriVox, or Libro.fm.
-- Manage several accounts per provider, each with its own sync.
-- "Sync All Accounts" now only appears when a provider actually has more than one.
+- Libro.fm gets the same multi-account handling as Audible — add several, sync each on its own.
+- Each store's accounts are kept separate, so adding one no longer changes the other's screen.
+- "Sync All Accounts" now only appears when a store actually has more than one.
 - Library rows are less cluttered — the account name chip has been removed.
 - Fixed a finished sync reporting a library total of zero.
 

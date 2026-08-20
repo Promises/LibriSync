@@ -28,6 +28,28 @@ export interface SyncAllResult {
 }
 
 /**
+ * Mint a new access token for an account and persist it, unconditionally.
+ *
+ * Exported so the Accounts screen's "Refresh Token" button and the automatic
+ * pre-sync refresh below mint tokens exactly the same way.
+ */
+export async function refreshAccountToken(dbPath: string, account: Account): Promise<Account> {
+  const newTokens = await refreshToken(account);
+  const newExpiry = new Date(Date.now() + parseInt(newTokens.expires_in.toString(), 10) * 1000);
+  const refreshed: Account = {
+    ...account,
+    identity: {
+      ...account.identity!,
+      access_token: { token: newTokens.access_token, expires_at: newExpiry.toISOString() },
+      refresh_token: newTokens.refresh_token || account.identity!.refresh_token,
+    },
+  };
+
+  await saveAccount(dbPath, refreshed);
+  return refreshed;
+}
+
+/**
  * Audible access tokens are short-lived, so refresh before a sync when the token
  * is nearly expired. Returns the account to sync with — refreshed and persisted,
  * or the original when no refresh was needed.
@@ -44,19 +66,7 @@ async function withFreshToken(dbPath: string, account: Account): Promise<Account
   const minutesUntilExpiry = (new Date(expiresAt).getTime() - Date.now()) / 1000 / 60;
   if (minutesUntilExpiry >= 5) return account;
 
-  const newTokens = await refreshToken(account);
-  const newExpiry = new Date(Date.now() + parseInt(newTokens.expires_in.toString(), 10) * 1000);
-  const refreshed: Account = {
-    ...account,
-    identity: {
-      ...account.identity!,
-      access_token: { token: newTokens.access_token, expires_at: newExpiry.toISOString() },
-      refresh_token: newTokens.refresh_token || account.identity!.refresh_token,
-    },
-  };
-
-  await saveAccount(dbPath, refreshed);
-  return refreshed;
+  return refreshAccountToken(dbPath, account);
 }
 
 /**

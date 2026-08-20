@@ -52,6 +52,36 @@ jobs:
             echo "Building GitHub version: $VERSION"
           fi
 
+      # Runs before the build on purpose: a missing entry fails in seconds rather
+      # than after a ~25 minute build that would then publish with the wrong notes.
+      - name: Extract changelog entry for this version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          # The "## vX.Y.Z" section, up to the next "## " heading, with surrounding
+          # blank lines trimmed. All in awk so it stays portable and locally testable.
+          # A -play tag reuses the same section, since -play was already stripped above.
+          awk -v want="## v$VERSION" '
+            $0 == want { inside = 1; next }
+            inside && /^## / { exit }
+            inside { lines[n++] = $0 }
+            END {
+              first = 0; last = n - 1
+              while (first < n   && lines[first] ~ /^[[:space:]]*$/) first++
+              while (last >= first && lines[last]  ~ /^[[:space:]]*$/) last--
+              for (i = first; i <= last; i++) print lines[i]
+            }
+          ' CHANGELOG.md > release-notes.md
+
+          if [ ! -s release-notes.md ]; then
+            echo "::error file=CHANGELOG.md::No '## v$VERSION' section found in CHANGELOG.md. Add one and re-tag."
+            exit 1
+          fi
+
+          echo "Release notes for v$VERSION:"
+          cat release-notes.md
+
       - name: Build signed release APK
         env:
           GIT_REPO: ${{ github.server_url }}/${{ github.repository }}.git
@@ -84,6 +114,9 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           files: build-output/librisync-*.apk
+          # body is pre-pended to the auto-generated notes, so the release reads
+          # as the user-facing changelog first, then the commit list + compare link.
+          body_path: release-notes.md
           draft: false
           prerelease: false
           generate_release_notes: true

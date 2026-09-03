@@ -156,6 +156,16 @@ impl LibrofmProvider {
             .to_string()
     }
 
+    /// Whether the caller asked for the MP3 parts folder rather than the single
+    /// packaged M4B. `"mp3"` is the shared cross-provider value; `"parts"` is the
+    /// older Libro.fm-only spelling and must keep working for stored preferences.
+    fn wants_parts(options: &PlanOptions) -> bool {
+        options
+            .get("format")
+            .and_then(|v| v.as_str())
+            .is_some_and(|f| f == "parts" || f == "mp3")
+    }
+
     /// Chapter markers from the manifest's `tracks[]`, which carry per-track
     /// durations rather than absolute offsets.
     fn chapters_from(tracks: &[ManifestTrack]) -> Vec<PlanChapter> {
@@ -280,6 +290,7 @@ impl Provider for LibrofmProvider {
             books_updated: updated,
             books_absent: 0,
             errors: Vec::new(),
+            items_failed: 0,
             has_more: page < lib.total_pages,
         })
     }
@@ -292,12 +303,7 @@ impl Provider for LibrofmProvider {
         options: &PlanOptions,
     ) -> Result<DownloadPlan> {
         let token = Self::token_of(creds)?;
-        // `{"format":"parts"}` gives a folder of MP3s (one zip per part);
-        // anything else (the default) gives the single packaged M4B.
-        let parts_folder = options
-            .get("format")
-            .and_then(|v| v.as_str())
-            .is_some_and(|f| f == "parts");
+        let parts_folder = Self::wants_parts(options);
 
         if parts_folder {
             let resp = Self::client()?
@@ -364,6 +370,15 @@ impl Provider for LibrofmProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wants_parts_accepts_both_spellings() {
+        let parts = |v| LibrofmProvider::wants_parts(&serde_json::json!(v));
+        assert!(parts(serde_json::json!({"format": "mp3"})));
+        assert!(parts(serde_json::json!({"format": "parts"})));
+        assert!(!parts(serde_json::json!({"format": "m4b"})));
+        assert!(!parts(serde_json::json!({})));
+    }
 
     #[test]
     fn isbn_accepts_number_or_string() {

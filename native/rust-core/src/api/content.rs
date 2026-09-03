@@ -322,23 +322,37 @@ pub struct ChapterInfo {
 /// - Sku (string) - Stock Keeping Unit
 /// - Version (string) - Content version
 /// - Codec (Codec) - Audio codec
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Every field is optional: Audible omits parts of this block for some titles, and a
+/// missing `sku` must not fail the whole license. The reference DTO types them the same
+/// way (`AudibleApi.Common/MetadataDtoV10.generated.cs:61-86`), including `codec` as a
+/// plain string — its values ("LC_128_44100_stereo", "aac", …) do not match the codec
+/// names used when *requesting* a license.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ContentReference {
     /// Audible Content Reference (unique content identifier)
-    #[serde(rename = "acr")]
-    pub acr: String,
+    #[serde(rename = "acr", default)]
+    pub acr: Option<String>,
 
     /// Stock Keeping Unit
-    #[serde(rename = "sku")]
-    pub sku: String,
+    #[serde(rename = "sku", default)]
+    pub sku: Option<String>,
 
     /// Content version (for tracking updates)
-    #[serde(rename = "version")]
-    pub version: String,
+    #[serde(rename = "version", default)]
+    pub version: Option<String>,
 
-    /// Audio codec
-    #[serde(rename = "codec")]
-    pub codec: Codec,
+    /// Audio codec, as reported by Audible.
+    #[serde(rename = "codec", default)]
+    pub codec: Option<String>,
+
+    /// Size of the encrypted asset, when reported.
+    #[serde(rename = "content_size_in_bytes", default)]
+    pub content_size_in_bytes: Option<i64>,
+
+    /// Marketplace the content is served from.
+    #[serde(rename = "marketplace", default)]
+    pub marketplace: Option<String>,
 }
 
 /// Content URL information
@@ -378,9 +392,10 @@ pub struct ContentMetadata {
     #[serde(rename = "content_reference", skip_serializing_if = "Option::is_none")]
     pub content_reference: Option<ContentReference>,
 
-    /// Download and streaming URLs
-    #[serde(rename = "content_url")]
-    pub content_url: ContentUrl,
+    /// Download and streaming URLs. Absent on a denied or partial license — the
+    /// reference DTO types it nullable too (`ContentMetadata.ContentUrl`).
+    #[serde(rename = "content_url", default)]
+    pub content_url: Option<ContentUrl>,
 }
 
 // ============================================================================

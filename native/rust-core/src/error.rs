@@ -184,6 +184,13 @@ pub enum LibationError {
         actual: u64,
     },
 
+    /// Audible refused to license the download. `reason` is Audible's own wording;
+    /// `throttled` marks the CustomerThrottled case, which is temporary and worth
+    /// retrying later rather than reporting as a broken book.
+    /// Reference: AudibleApi/ApiExceptions/ContentLicenseDeniedException.cs
+    #[error("Audible denied the download license: {reason}")]
+    LicenseDenied { reason: String, throttled: bool },
+
     /// Server returned unexpected status code (maps to WebException in NetworkFileStream.cs)
     #[error("Server responded with unexpected status code: {status_code}")]
     UnexpectedStatusCode {

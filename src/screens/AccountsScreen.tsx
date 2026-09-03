@@ -13,6 +13,7 @@ import { useTheme } from '../styles/theme';
 import type { Theme } from '../hooks/useStyles';
 import {
   accountProvider,
+  copyTextToClipboard,
   getAllAccounts,
   getBooksWithFilters,
   initializeDatabase,
@@ -24,6 +25,11 @@ import {
   syncAllProviderAccounts,
   syncProviderAccount,
 } from '../services/providerAccounts';
+import {
+  formatSyncReport,
+  storeSyncReport,
+  syncHadProblems,
+} from '../services/diagnostics';
 import {
   ACCOUNT_PROVIDERS,
   LIBRIVOX_BROWSE,
@@ -53,6 +59,7 @@ function bookCountStats(total: number): SyncStats {
     books_updated: 0,
     books_absent: 0,
     errors: [],
+    items_failed: 0,
     has_more: false,
   };
 }
@@ -220,6 +227,24 @@ export default function AccountsScreen({ navigation }: any) {
     return finishers;
   };
 
+  /** One line naming what the sync lost, or nothing when it lost nothing. */
+  const problemLine = (stats: SyncStats): string => {
+    const skipped = (stats.pages ?? []).filter((page) => page.error).length;
+    const parts: string[] = [];
+    if (stats.items_failed > 0) parts.push(`${stats.items_failed} unreadable`);
+    if (skipped > 0) parts.push(`${skipped} page${skipped === 1 ? '' : 's'} skipped`);
+    return parts.length > 0 ? `\nProblems: ${parts.join(', ')}` : '';
+  };
+
+  const copyReport = (report: string) => {
+    try {
+      copyTextToClipboard(report);
+      Alert.alert('Copied', 'Sync details copied — paste them into a bug report.');
+    } catch (error: any) {
+      Alert.alert('Copy Failed', error?.message || String(error));
+    }
+  };
+
   const runSync = async (targets: Account[]) => {
     if (targets.length === 0) return;
 
@@ -253,6 +278,8 @@ export default function AccountsScreen({ navigation }: any) {
       };
 
       let summary: string;
+      let report = '';
+      let problems = false;
 
       if (real.length === 1) {
         const { stats, account: syncedAccount } = await syncProviderAccount(
@@ -261,18 +288,24 @@ export default function AccountsScreen({ navigation }: any) {
         setSyncStats(stats);
         // A pre-sync token refresh mints a new expiry; keep the detail card current.
         if (syncedAccount !== real[0]) handleAccountUpdated(syncedAccount);
+        report = formatSyncReport(entryFor(real[0]).formatName(real[0]), stats);
+        problems = syncHadProblems(stats);
         summary =
           `Synced: ${stats.total_items} / ${stats.total_library_count}\n`
-          + `Added: ${stats.books_added}\nUpdated: ${stats.books_updated}`;
+          + `Added: ${stats.books_added}\nUpdated: ${stats.books_updated}`
+          + problemLine(stats);
       } else {
         const result = await syncAllProviderAccounts(
           dbPath, real, (acc) => entryFor(acc).formatName(acc), onProgress,
         );
         const failSummary = result.failed.length > 0 ? `\nFailed: ${result.failed.join(', ')}` : '';
+        report = formatSyncReport(`${real.length} accounts`, result.totals);
+        problems = syncHadProblems(result.totals) || result.failed.length > 0;
         summary =
           `Accounts synced: ${result.succeeded} / ${real.length}\n`
           + `Synced: ${result.totals.total_items} / ${result.totals.total_library_count}\n`
           + `Added: ${result.totals.books_added}\nUpdated: ${result.totals.books_updated}`
+          + problemLine(result.totals)
           + failSummary;
         if (selected) loadLibraryCount(dbPath, selected);
       }
@@ -281,10 +314,34 @@ export default function AccountsScreen({ navigation }: any) {
       const extraLines = extras.filter(Boolean).join('\n');
 
       setLastSyncDate(await recordSyncTime());
-      Alert.alert('Sync Complete!', extraLines ? `${summary}\n${extraLines}` : summary);
+      if (report) storeSyncReport(report);
+
+      const body = extraLines ? `${summary}\n${extraLines}` : summary;
+      // Anything lost during the sync is invisible from the counts alone (Audible sends
+      // no library total to compare against), so offer the page-by-page detail.
+      Alert.alert(
+        problems ? 'Sync Finished With Problems' : 'Sync Complete!',
+        body,
+        problems
+          ? [
+              { text: 'Copy Details', onPress: () => copyReport(report) },
+              { text: 'OK', style: 'cancel' },
+            ]
+          : [{ text: 'OK' }],
+      );
     } catch (error: any) {
       console.error('[AccountsScreen] Sync failed:', error);
-      Alert.alert('Sync Failed', error?.message || error?.rustError || 'Failed to sync library');
+      const message = error?.message || error?.rustError || 'Failed to sync library';
+      const failureReport = [
+        '=== LibriSync sync report ===',
+        `When: ${new Date().toISOString()}`,
+        `Sync failed: ${message}`,
+      ].join('\n');
+      storeSyncReport(failureReport);
+      Alert.alert('Sync Failed', message, [
+        { text: 'Copy Details', onPress: () => copyReport(failureReport) },
+        { text: 'OK', style: 'cancel' },
+      ]);
     } finally {
       setIsSyncing(false);
     }

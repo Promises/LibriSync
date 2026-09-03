@@ -112,43 +112,59 @@ use serde::{Deserialize, Serialize};
 /// ```
 #[derive(Debug, Clone, Serialize)]
 pub struct LicenseRequest {
-    /// Download quality (Normal, High, Extreme)
-    /// Reference: DownloadOptions.Factory.cs:59 - dlQuality
-    #[serde(rename = "quality")]
-    pub quality: DownloadQuality,
+    /// Media features the client can play. Audible expects this nested object; a flat
+    /// body is accepted but yields a license without `content_metadata.content_url`.
+    /// Reference: AudibleApi/Api.Download.cs:150-160 - GetDownloadLicenseAsync
+    #[serde(rename = "supported_media_features")]
+    pub supported_media_features: SupportedMediaFeatures,
+
+    /// Request spatial (Dolby Atmos) audio.
+    #[serde(rename = "spatial")]
+    pub spatial: bool,
 
     /// Consumption type (Download vs Streaming)
     /// Always "Download" for offline use
     #[serde(rename = "consumption_type")]
     pub consumption_type: ConsumptionType,
 
-    /// DRM type preference (Adrm, Mpeg/Widevine, or None)
-    /// Reference: DownloadOptions.Factory.cs:80 - DrmType.Widevine or implicit Adrm
-    #[serde(rename = "drm_type", skip_serializing_if = "Option::is_none")]
-    pub drm_type: Option<DrmType>,
+    /// Always "Audible".
+    #[serde(rename = "tenant_id")]
+    pub tenant_id: String,
+
+    /// Download quality (Normal, High, Extreme)
+    #[serde(rename = "quality")]
+    pub quality: DownloadQuality,
+
+    /// Response groups. `content_reference` and `chapter_info` are what carry the
+    /// codec/size and the chapter markers; without them the license comes back thin.
+    #[serde(rename = "response_groups")]
+    pub response_groups: String,
+}
+
+/// The `supported_media_features` object of a license request.
+/// Reference: AudibleApi/Api.Download.cs:152-160
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SupportedMediaFeatures {
+    /// DRM schemes the client accepts, e.g. `["Adrm", "Mpeg"]`. Audible picks one and
+    /// reports it back as the license's `drm_type`.
+    #[serde(rename = "drm_types")]
+    pub drm_types: Vec<DrmType>,
+
+    /// Audio codecs, as the MIME-style names the licence endpoint expects — these are
+    /// *not* the names Audible uses when reporting a codec back.
+    /// Reference: AudibleApi/Api.Download.cs:25-30 - class Codecs
+    #[serde(rename = "codecs")]
+    pub codecs: Vec<String>,
 
     /// Chapter titles type (Flat or Tree)
-    /// Reference: DownloadOptions.Factory.cs:80 - ChapterTitlesType.Tree
-    #[serde(
-        rename = "chapter_titles_type",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub chapter_titles_type: Option<ChapterTitlesType>,
+    #[serde(rename = "chapter_titles_type")]
+    pub chapter_titles_type: ChapterTitlesType,
 
-    /// Request spatial audio if available
-    /// Reference: DownloadOptions.Factory.cs:82 - config.RequestSpatial
-    #[serde(rename = "request_spatial", skip_serializing_if = "Option::is_none")]
-    pub request_spatial: Option<bool>,
+    #[serde(rename = "previews")]
+    pub previews: bool,
 
-    /// Preferred AAC codec (AAC_LC or xHE_AAC)
-    /// Reference: DownloadOptions.Factory.cs:72 - aacCodecChoice
-    #[serde(rename = "aac_codec", skip_serializing_if = "Option::is_none")]
-    pub aac_codec: Option<Codec>,
-
-    /// Preferred spatial codec (EC_3 or AC_4)
-    /// Reference: DownloadOptions.Factory.cs:74 - spatialCodecChoice
-    #[serde(rename = "spatial_codec", skip_serializing_if = "Option::is_none")]
-    pub spatial_codec: Option<Codec>,
+    #[serde(rename = "catalog_samples")]
+    pub catalog_samples: bool,
 }
 
 /// Consumption type for license request
@@ -163,17 +179,44 @@ pub enum ConsumptionType {
     Streaming,
 }
 
+/// Codec identifiers accepted by the license endpoint.
+/// Reference: AudibleApi/Api.Download.cs:25-30
+pub mod request_codecs {
+    pub const AAC_LC: &str = "mp4a.40.2";
+    pub const XHE_AAC: &str = "mp4a.40.42";
+    pub const EC_3: &str = "ec+3";
+    pub const AC_4: &str = "ac-4";
+}
+
+impl LicenseRequest {
+    /// Response groups Audible needs in order to return the download URL, chapters and
+    /// codec details. Reference: AudibleApi/Api.Download.cs:175.
+    pub const RESPONSE_GROUPS: &'static str =
+        "last_position_heard,pdf_url,content_reference,chapter_info";
+
+    /// A download request for `drm_type`, always offering `Mpeg` as the fallback scheme
+    /// the way the reference client does (podcast episodes are plain MP3).
+    pub fn download(quality: DownloadQuality, drm_type: DrmType) -> Self {
+        Self {
+            supported_media_features: SupportedMediaFeatures {
+                drm_types: vec![drm_type, DrmType::Mpeg],
+                codecs: vec![request_codecs::AAC_LC.to_string()],
+                chapter_titles_type: ChapterTitlesType::Tree,
+                previews: false,
+                catalog_samples: false,
+            },
+            spatial: false,
+            consumption_type: ConsumptionType::Download,
+            tenant_id: "Audible".to_string(),
+            quality,
+            response_groups: Self::RESPONSE_GROUPS.to_string(),
+        }
+    }
+}
+
 impl Default for LicenseRequest {
     fn default() -> Self {
-        Self {
-            quality: DownloadQuality::High,
-            consumption_type: ConsumptionType::Download,
-            drm_type: None,
-            chapter_titles_type: Some(ChapterTitlesType::Tree),
-            request_spatial: Some(false),
-            aac_codec: Some(Codec::AacLc),
-            spatial_codec: Some(Codec::Ec3),
-        }
+        Self::download(DownloadQuality::High, DrmType::Adrm)
     }
 }
 
@@ -498,15 +541,7 @@ pub enum FileType {
 
 impl AudibleClient {
     fn download_license_request(quality: DownloadQuality, drm_type: DrmType) -> LicenseRequest {
-        LicenseRequest {
-            quality,
-            consumption_type: ConsumptionType::Download,
-            chapter_titles_type: Some(ChapterTitlesType::Tree),
-            request_spatial: Some(false),
-            aac_codec: Some(Codec::AacLc),
-            spatial_codec: Some(Codec::Ec3),
-            drm_type: Some(drm_type),
-        }
+        LicenseRequest::download(quality, drm_type)
     }
 
     fn should_retry_license_as_mpeg(error: &LibationError) -> bool {
@@ -560,16 +595,133 @@ impl AudibleClient {
 
         let response: serde_json::Value = self.post(&endpoint, request).await?;
 
-        // Parse license response
         // The API may wrap in "content_license" or return directly
         let license_json = response.get("content_license").unwrap_or(&response);
 
+        // Audible reports refusals *inside* a 200 response, so the status has to be read
+        // before the typed parse. Deserializing straight away turns "your download was
+        // denied" into "missing field `content_url`", which is unactionable for a user.
+        // Reference: AudibleApi/Api.Download.cs:290-317 - GetDownloadLicenseAsync
+        if let Some(message) = license_json.get("message").and_then(|m| m.as_str()) {
+            // A refusal can carry both a message and structured denial reasons; the
+            // reasons say *why* (notably CustomerThrottled, which is temporary), so
+            // prefer them and fall back to the bare message.
+            let denial = Self::license_denied_error(license_json);
+            if let LibationError::LicenseDenied { reason, throttled } = denial {
+                if reason != "no reason given" {
+                    return Err(LibationError::LicenseDenied { reason, throttled });
+                }
+            }
+            let status = license_json
+                .get("status_code")
+                .and_then(|s| s.as_str())
+                .unwrap_or("none");
+            return Err(LibationError::ApiRequestFailed {
+                message: format!(
+                    "Audible rejected the license request: {message} \
+                     [status={status}, fields={}]",
+                    Self::json_keys(license_json)
+                ),
+                status_code: None,
+                endpoint: Some(endpoint),
+            });
+        }
+
+        match license_json.get("status_code").and_then(|s| s.as_str()) {
+            Some(status) if status.eq_ignore_ascii_case("granted") => {}
+            Some(status) if status.eq_ignore_ascii_case("denied") => {
+                return Err(Self::license_denied_error(license_json));
+            }
+            Some(status) => {
+                return Err(LibationError::InvalidApiResponse {
+                    message: format!("Unrecognized license status \"{status}\" for {asin}"),
+                    response_body: None,
+                });
+            }
+            None => {
+                // No status at all: report the shape rather than the contents, which
+                // carry personally identifying fields.
+                let keys = Self::json_keys(license_json);
+                return Err(LibationError::InvalidApiResponse {
+                    message: format!(
+                        "License response for {asin} has no status_code (fields: {keys})"
+                    ),
+                    response_body: None,
+                });
+            }
+        }
+
         serde_json::from_value(license_json.clone()).map_err(|e| {
             LibationError::InvalidApiResponse {
-                message: format!("Failed to parse content license: {}", e),
+                message: format!(
+                    "Failed to parse granted license for {asin}: {e} (fields: {})",
+                    Self::json_keys(license_json)
+                ),
                 response_body: Some(license_json.to_string()),
             }
         })
+    }
+
+    /// Turn a denied license into an error carrying Audible's own reasons.
+    /// Reference: AudibleApi/ApiExceptions/ContentLicenseDeniedException.cs
+    fn license_denied_error(license_json: &serde_json::Value) -> LibationError {
+        let reasons = license_json
+            .get("license_denial_reasons")
+            .and_then(|r| r.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let throttled = reasons.iter().any(|reason| {
+            reason
+                .get("rejectionReason")
+                .and_then(|r| r.as_str())
+                .is_some_and(|r| r.eq_ignore_ascii_case("CustomerThrottled"))
+        });
+
+        if throttled {
+            return LibationError::LicenseDenied {
+                reason: "Audible is temporarily throttling download licences for this \
+                         account. Wait a while, then try again."
+                    .to_string(),
+                throttled: true,
+            };
+        }
+
+        let detail = reasons
+            .iter()
+            .filter_map(|reason| {
+                let validation = reason.get("validationType").and_then(|v| v.as_str());
+                let rejection = reason.get("rejectionReason").and_then(|v| v.as_str());
+                let message = reason.get("message").and_then(|v| v.as_str());
+                match (validation, rejection, message) {
+                    (None, None, None) => None,
+                    _ => Some(format!(
+                        "{}: {}{}",
+                        validation.unwrap_or("Unknown"),
+                        rejection.unwrap_or("denied"),
+                        message.map(|m| format!(" ({m})")).unwrap_or_default()
+                    )),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+
+        LibationError::LicenseDenied {
+            reason: if detail.is_empty() {
+                "no reason given".to_string()
+            } else {
+                detail
+            },
+            throttled: false,
+        }
+    }
+
+    /// Field names of a JSON object, for diagnostics that must not log the values.
+    fn json_keys(value: &serde_json::Value) -> String {
+        value
+            .as_object()
+            .map(|obj| obj.keys().cloned().collect::<Vec<_>>().join(","))
+            .unwrap_or_else(|| "<not an object>".to_string())
     }
 
     /// Build download license with decryption keys
@@ -629,8 +781,8 @@ impl AudibleClient {
         let download_url = license
             .content_metadata
             .content_url
-            .offline_url
-            .clone()
+            .as_ref()
+            .and_then(|url| url.offline_url.clone())
             .ok_or(LibationError::MissingOfflineUrl)?;
 
         // Parse voucher to keys
@@ -765,7 +917,14 @@ impl AudibleClient {
         // Convert to MP3 if requested, unless it's AC-4 spatial audio
         if convert_to_mp3 {
             if let Some(ref content_ref) = license.content_metadata.content_reference {
-                if !matches!(content_ref.codec, Codec::Ac4) {
+                // Audible reports the codec as a free-form string ("aac", "ac-4",
+                // "LC_128_44100_stereo", …); only AC-4 spatial audio is worth keeping.
+                let is_ac4 = content_ref
+                    .codec
+                    .as_deref()
+                    .is_some_and(|codec| codec.to_ascii_lowercase().contains("ac-4")
+                        || codec.to_ascii_lowercase().contains("ac_4"));
+                if !is_ac4 {
                     return OutputFormat::Mp3;
                 }
             } else {
@@ -908,7 +1067,25 @@ mod tests {
         let request = LicenseRequest::default();
         assert_eq!(request.quality, DownloadQuality::High);
         assert_eq!(request.consumption_type, ConsumptionType::Download);
-        assert_eq!(request.chapter_titles_type, Some(ChapterTitlesType::Tree));
+        assert_eq!(
+            request.supported_media_features.chapter_titles_type,
+            ChapterTitlesType::Tree
+        );
+
+        // The body shape is the contract: Audible returns a license without a
+        // content_url for a flat request, which surfaces as an unreadable parse error.
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["tenant_id"], "Audible");
+        assert_eq!(json["consumption_type"], "Download");
+        assert_eq!(json["spatial"], false);
+        assert!(json["response_groups"].as_str().unwrap().contains("chapter_info"));
+        let features = &json["supported_media_features"];
+        assert_eq!(features["drm_types"][0], "Adrm");
+        assert_eq!(features["drm_types"][1], "Mpeg");
+        assert_eq!(features["codecs"][0], "mp4a.40.2");
+        assert_eq!(features["chapter_titles_type"], "Tree");
+        assert_eq!(features["previews"], false);
+        assert_eq!(features["catalog_samples"], false);
     }
 
     // ============================================================================
@@ -1054,8 +1231,8 @@ mod tests {
 
         if let Some(ref content_ref) = metadata.content_reference {
             println!("   Codec: {:?}", content_ref.codec);
-            println!("   ACR: {}", content_ref.acr);
-            println!("   Version: {}", content_ref.version);
+            println!("   ACR: {:?}", content_ref.acr);
+            println!("   Version: {:?}", content_ref.version);
         } else {
             println!("   Content Reference: Not available (license response only)");
         }

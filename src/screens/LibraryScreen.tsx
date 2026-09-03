@@ -883,6 +883,8 @@ export default function LibraryScreen() {
                     return {text: `🔍 Validating ${stagePct}%${etaSuffix}`, color: colors.info};
                 case 'copying':
                     return {text: `📁 Saving ${stagePct}%${etaSuffix}`, color: colors.info};
+                case 'encoding':
+                    return {text: `🎵 Converting ${stagePct}%${etaSuffix}`, color: colors.info};
                 case 'completed':
                     return {text: '✓ Downloaded', color: colors.success};
                 case 'failed':
@@ -1046,7 +1048,7 @@ export default function LibraryScreen() {
                     }
                 }
 
-                const formatResult = ExpoRustBridge.getLibroFmFormat();
+                const formatResult = ExpoRustBridge.getDownloadFormat();
                 const format = (formatResult?.success && (formatResult.data as any)?.format) || 'm4b';
                 const authorText = (book.authors?.length || 0) > 0 ? book.authors.join(', ') : null;
 
@@ -1509,7 +1511,7 @@ export default function LibraryScreen() {
         // status is also set once the download alone finishes (before decrypt/copy), so a
         // cancelled or interrupted book could otherwise look downloaded and block retry.
         const isDownloaded = !!item.file_path;
-        const isProcessing = task?.status === 'decrypting' || task?.status === 'validating' || task?.status === 'copying';
+        const isProcessing = task?.status === 'decrypting' || task?.status === 'validating' || task?.status === 'copying' || task?.status === 'encoding';
         const canRetryConversion = task?.status === 'failed' && !!task.aaxc_key;
         const isDownloading = task?.status === 'downloading';
         const isPaused = task?.status === 'paused';

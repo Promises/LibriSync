@@ -650,8 +650,12 @@ impl Account {
                 })?;
 
         // Call the get_activation_bytes function
-        let activation_bytes =
-            get_activation_bytes(&identity.locale, &identity.access_token.token).await?;
+        let activation_bytes = get_activation_bytes(
+            &identity.locale,
+            &identity.adp_token,
+            &identity.device_private_key,
+        )
+        .await?;
 
         // Store in decrypt_key field
         self.decrypt_key = activation_bytes.clone();
@@ -1820,17 +1824,33 @@ pub async fn register_device(
 ///
 /// # Errors
 /// Returns error if API call fails or activation bytes not found
-pub async fn get_activation_bytes(locale: &Locale, access_token: &str) -> Result<String> {
+pub async fn get_activation_bytes(
+    locale: &Locale,
+    adp_token: &str,
+    device_private_key: &str,
+) -> Result<String> {
     // AudibleApi uses the Audible login URI, not API URI
-    let api_url = format!(
-        "https://www.{}/license/token?action=register&player_manuf=Audible,iPhone&player_model=iPhone",
-        locale.domain
-    );
+    const ACTIVATION_PATH: &str =
+        "/license/token?action=register&player_manuf=Audible,iPhone&player_model=iPhone";
+    let api_url = format!("https://www.{}{}", locale.domain, ACTIVATION_PATH);
+
+    // Signed, not bearer: this endpoint rejects the access token outright.
+    // Reference: AudibleApi/Api.Activation.cs:21 (AdHocAuthenticatedGetAsync).
+    let signature = crate::api::signing::sign_request(
+        "GET",
+        ACTIVATION_PATH,
+        "",
+        adp_token,
+        device_private_key,
+        chrono::Utc::now(),
+    )?;
 
     let client = reqwest::Client::new();
-    let response = client
-        .get(&api_url)
-        .header("Authorization", format!("Bearer {}", access_token))
+    let mut request = client.get(&api_url);
+    for (name, value) in signature.headers() {
+        request = request.header(name, value);
+    }
+    let response = request
         .send()
         .await
         .map_err(|e| LibationError::NetworkError {
@@ -2517,8 +2537,14 @@ mod tests {
                         // Step 6: Get activation bytes
                         println!("🔓 Retrieving activation bytes...\n");
 
-                        match get_activation_bytes(&locale, &token_response.bearer.access_token)
-                            .await
+                        // Signed with the device key from this registration, not the
+                        // access token.
+                        match get_activation_bytes(
+                            &locale,
+                            &token_response.mac_dms.adp_token,
+                            &token_response.mac_dms.device_private_key,
+                        )
+                        .await
                         {
                             Ok(_) => {
                                 println!("✅ Activation Bytes Retrieved!");

@@ -244,7 +244,29 @@ export interface SyncStats {
   books_updated: number;
   books_absent: number;
   errors: string[];
+  /** Items the API returned that could not be parsed or imported. */
+  items_failed: number;
   has_more: boolean;
+  /** Per-page detail, filled in by `syncLibrary()`. Absent for single-page calls. */
+  pages?: SyncPageReport[];
+}
+
+/**
+ * What happened to one page of a library sync. Collected so a truncated sync can be
+ * diagnosed after the fact — Audible's library response carries no total to check
+ * against, so the page trail is the only evidence of where a sync stopped and why.
+ */
+export interface SyncPageReport {
+  page: number;
+  /** How many requests this page took (>1 means it failed and was retried). */
+  attempts: number;
+  items: number;
+  added: number;
+  updated: number;
+  failedItems: number;
+  durationMs: number;
+  /** Set when every attempt for this page failed; the page was skipped. */
+  error?: string;
 }
 
 /**
@@ -285,7 +307,7 @@ export interface DownloadDirectoryScanStats {
 /**
  * Download task status enumeration.
  */
-export type TaskStatus = 'queued' | 'downloading' | 'paused' | 'completed' | 'failed' | 'cancelled' | 'decrypting' | 'validating' | 'copying';
+export type TaskStatus = 'queued' | 'downloading' | 'paused' | 'completed' | 'failed' | 'cancelled' | 'decrypting' | 'validating' | 'copying' | 'encoding';
 
 /**
  * Download task representing a book download.
@@ -413,12 +435,12 @@ export interface ExpoRustBridgeModule {
    * Retrieve activation bytes for DRM decryption.
    *
    * @param localeCode - The Audible locale
-   * @param accessToken - Valid access token
+   * @param accountJson - The full account; the request is signed with its device key
    * @returns 8-character hex activation bytes
    */
   getActivationBytes(
     localeCode: string,
-    accessToken: string
+    accountJson: string
   ): Promise<RustResponse<{ activation_bytes: string }>>;
 
   // --------------------------------------------------------------------------
@@ -1045,16 +1067,16 @@ export interface ExpoRustBridgeModule {
   getDownloadMode(): RustResponse<{ mode: string }>;
 
   /**
-   * Set the Libro.fm download format.
+   * Set the download format used for every provider.
    *
-   * @param format - "m4b" (one packaged file) or "parts" (folder of MP3s)
+   * @param format - "m4b" (one file per book) or "mp3" (one MP3 per chapter/part)
    */
-  setLibroFmFormat(format: string): RustResponse<{}>;
+  setDownloadFormat(format: string): RustResponse<{}>;
 
   /**
-   * Get the Libro.fm download format preference.
+   * Get the download format preference.
    */
-  getLibroFmFormat(): RustResponse<{ format: string }>;
+  getDownloadFormat(): RustResponse<{ format: string }>;
 
   /**
    * Set audio validation depth after download.
@@ -1337,9 +1359,11 @@ async function getActivationBytes(account: Account): Promise<string> {
     throw new RustBridgeError('Account has no Audible locale; cannot get activation bytes');
   }
 
+  // The whole account: activation bytes come from a request signed with the device key
+  // stored at registration, which is why the access token alone is not enough.
   const response = await NativeModule!.getActivationBytes(
     account.locale.country_code,
-    account.identity.access_token.token
+    JSON.stringify(account)
   );
 
   const data = unwrapResult(response);
@@ -1384,14 +1408,25 @@ function initializeDatabase(dbPath: string): void {
  * });
  * ```
  */
-async function syncLibrary(
-  dbPath: string,
-  account: Account,
-  onPageComplete?: (stats: SyncStats, page: number, aggregatedStats: SyncStats) => void
+/**
+ * Run a paginated sync with per-page retries, recording what happened to each page.
+ *
+ * Pagination ends when a page reports `has_more: false`. Audible sends no library total
+ * (its response carries only `items` and `response_groups`), so nothing can cross-check
+ * the result: a sync that stops early looks exactly like one that finished. That makes
+ * two things load-bearing here — a failed page is retried and then *skipped* rather than
+ * ending the sync, and every page is recorded so a short library can be diagnosed after
+ * the fact.
+ */
+async function runPagedSync(
+  fetchPage: (page: number) => Promise<SyncStats>,
+  onPageComplete?: (stats: SyncStats, page: number, aggregatedStats: SyncStats) => void,
+  label = 'sync',
 ): Promise<SyncStats> {
-  const accountJson = JSON.stringify(account);
+  const PAGE_ATTEMPTS = 3;
+  const MAX_CONSECUTIVE_PAGE_FAILURES = 3;
+  const MAX_PAGES = 500; // runaway guard; 500 pages is 125k books at the current page size
 
-  // Aggregate stats across all pages
   const aggregatedStats: SyncStats = {
     total_items: 0,
     total_library_count: 0,
@@ -1399,18 +1434,60 @@ async function syncLibrary(
     books_updated: 0,
     books_absent: 0,
     errors: [],
+    items_failed: 0,
     has_more: false,
   };
 
+  const pages: SyncPageReport[] = [];
   let page = 1;
   let hasMore = true;
+  let consecutiveFailures = 0;
 
-  while (hasMore) {
-    console.log(`[syncLibrary] Fetching page ${page}...`);
-    const response = await NativeModule!.syncLibraryPage(dbPath, accountJson, page);
-    const pageStats = unwrapResult(response);
+  while (hasMore && page <= MAX_PAGES) {
+    console.log(`[${label}] Fetching page ${page}...`);
+    const startedAt = Date.now();
 
-    // Aggregate results
+    let pageStats: SyncStats | null = null;
+    let lastError: unknown = null;
+    let attempts = 0;
+
+    while (attempts < PAGE_ATTEMPTS && !pageStats) {
+      attempts++;
+      try {
+        pageStats = await fetchPage(page);
+      } catch (error) {
+        lastError = error;
+        console.warn(`[${label}] Page ${page} attempt ${attempts} failed:`, error);
+        if (attempts < PAGE_ATTEMPTS) {
+          await new Promise((resolve) => setTimeout(resolve, 1000 * attempts));
+        }
+      }
+    }
+
+    if (!pageStats) {
+      const message = (lastError as any)?.message || String(lastError);
+      consecutiveFailures++;
+      pages.push({
+        page, attempts, items: 0, added: 0, updated: 0, failedItems: 0,
+        durationMs: Date.now() - startedAt,
+        error: message,
+      });
+      aggregatedStats.errors.push(`Page ${page} failed after ${attempts} attempts: ${message}`);
+
+      // Consecutive failures mean the API or the connection is gone, not one bad page.
+      if (consecutiveFailures >= MAX_CONSECUTIVE_PAGE_FAILURES) {
+        aggregatedStats.errors.push(
+          `Stopped after ${consecutiveFailures} consecutive failed pages — the library may be incomplete.`
+        );
+        break;
+      }
+
+      page++;
+      continue;
+    }
+
+    consecutiveFailures = 0;
+
     aggregatedStats.total_items += pageStats.total_items;
     // Keep the last non-zero total: a final page that reports 0 would otherwise wipe
     // the library count and make the summary read "275 / 0".
@@ -1420,34 +1497,65 @@ async function syncLibrary(
     aggregatedStats.books_added += pageStats.books_added;
     aggregatedStats.books_updated += pageStats.books_updated;
     aggregatedStats.books_absent += pageStats.books_absent;
+    aggregatedStats.items_failed += pageStats.items_failed ?? 0;
     aggregatedStats.errors.push(...pageStats.errors);
 
     hasMore = pageStats.has_more;
 
+    pages.push({
+      page,
+      attempts,
+      items: pageStats.total_items,
+      added: pageStats.books_added,
+      updated: pageStats.books_updated,
+      failedItems: pageStats.items_failed ?? 0,
+      durationMs: Date.now() - startedAt,
+    });
+
     console.log(
-      `[syncLibrary] Page ${page} complete: ${pageStats.total_items} items, ` +
+      `[${label}] Page ${page} complete: ${pageStats.total_items} items, ` +
       `${pageStats.books_added} added, ${pageStats.books_updated} updated, ` +
-      `has_more=${hasMore}`
+      `${pageStats.items_failed ?? 0} failed, has_more=${hasMore}`
     );
 
-    // Notify caller of page completion
-    if (onPageComplete) {
-      onPageComplete(pageStats, page, aggregatedStats);
-    }
-
+    onPageComplete?.(pageStats, page, aggregatedStats);
     page++;
   }
 
+  if (page > MAX_PAGES) {
+    aggregatedStats.errors.push(`Stopped at the ${MAX_PAGES}-page limit.`);
+  }
+
+  aggregatedStats.pages = pages;
+
+  // No provider here reports a library total, so "synced X of Y" needs one.
   if (aggregatedStats.total_library_count === 0) {
     aggregatedStats.total_library_count = aggregatedStats.total_items;
   }
 
-  console.log(
-    `[syncLibrary] All pages synced. Total: ${aggregatedStats.total_items} items, ` +
-    `${aggregatedStats.books_added} added, ${aggregatedStats.books_updated} updated`
+  return aggregatedStats;
+}
+
+async function syncLibrary(
+  dbPath: string,
+  account: Account,
+  onPageComplete?: (stats: SyncStats, page: number, aggregatedStats: SyncStats) => void
+): Promise<SyncStats> {
+  const accountJson = JSON.stringify(account);
+
+  const stats = await runPagedSync(
+    async (page) => unwrapResult(await NativeModule!.syncLibraryPage(dbPath, accountJson, page)),
+    onPageComplete,
+    'syncLibrary',
   );
 
-  return aggregatedStats;
+  console.log(
+    `[syncLibrary] All pages synced. Total: ${stats.total_items} items, ` +
+    `${stats.books_added} added, ${stats.books_updated} updated, ` +
+    `${stats.items_failed} unreadable, ${(stats.pages ?? []).filter((p) => p.error).length} page(s) skipped`
+  );
+
+  return stats;
 }
 
 /**
@@ -1465,45 +1573,11 @@ async function providerSyncLibrary(
   account: Account,
   onPageComplete?: (stats: SyncStats, page: number, aggregatedStats: SyncStats) => void
 ): Promise<SyncStats> {
-  const aggregatedStats: SyncStats = {
-    total_items: 0,
-    total_library_count: 0,
-    books_added: 0,
-    books_updated: 0,
-    books_absent: 0,
-    errors: [],
-    has_more: false,
-  };
-
-  let page = 1;
-  let hasMore = true;
-
-  // Bounded so a provider that never clears has_more can't spin forever.
-  const MAX_PAGES = 500;
-  while (hasMore && page <= MAX_PAGES) {
-    const pageStats = await providerSyncLibraryPage(provider, dbPath, account, page);
-
-    aggregatedStats.total_items += pageStats.total_items;
-    if (pageStats.total_library_count > 0) {
-      aggregatedStats.total_library_count = pageStats.total_library_count;
-    }
-    aggregatedStats.books_added += pageStats.books_added;
-    aggregatedStats.books_updated += pageStats.books_updated;
-    aggregatedStats.books_absent += pageStats.books_absent;
-    aggregatedStats.errors.push(...pageStats.errors);
-
-    hasMore = pageStats.has_more;
-    onPageComplete?.(pageStats, page, aggregatedStats);
-    page++;
-  }
-
-  // Providers that don't report a library total (Libro.fm is per-page) still need
-  // one for "synced X of Y" to read sensibly.
-  if (aggregatedStats.total_library_count === 0) {
-    aggregatedStats.total_library_count = aggregatedStats.total_items;
-  }
-
-  return aggregatedStats;
+  return runPagedSync(
+    (page) => providerSyncLibraryPage(provider, dbPath, account, page),
+    onPageComplete,
+    `providerSync:${provider}`,
+  );
 }
 
 /**
@@ -1710,7 +1784,7 @@ async function providerSyncLibraryPage(provider: string, dbPath: string, account
 
 /**
  * Get the typed download plan for one book from its provider.
- * `options` carries provider-specific settings, e.g. Libro.fm `{ format: 'parts' | 'm4b' }`.
+ * `options` carries provider-specific settings, e.g. Libro.fm `{ format: 'mp3' | 'm4b' }`.
  */
 async function providerGetDownloadPlan(
   provider: string,
@@ -2405,7 +2479,7 @@ async function downloadLibrivoxFile(
  * @param provider - Provider id, e.g. 'librofm'
  * @param account - The provider account (its credential blob lives in `identity`)
  * @param itemRef - The provider's item id (ASIN, ISBN, …)
- * @param options - Provider-specific settings, e.g. Libro.fm `{ format: 'parts' | 'm4b' }`
+ * @param options - Provider-specific settings, e.g. Libro.fm `{ format: 'mp3' | 'm4b' }`
  */
 async function enqueueProviderDownload(
   provider: string,

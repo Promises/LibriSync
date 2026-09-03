@@ -4,6 +4,32 @@ All notable user-facing changes to LibriSync. Entries are phrased for the
 Google Play "What's new" field. Earlier entries were reconstructed from git
 history (no changelog was kept before v0.0.24), so wording is approximate.
 
+## v0.0.28
+
+- Download Format now applies to every store, not just Libro.fm. Choose one file per
+  book, or a folder of MP3s split by chapter.
+- Audible books can be saved as MP3s — LibriSync converts them on your device after
+  the download, one file per chapter.
+- Downloads show a "Converting" stage while MP3s are being written, and can be
+  cancelled during it.
+- Library sync is far harder to truncate: it fetches bigger pages, retries a page that
+  fails instead of giving up on the rest of your library, and double-checks an empty
+  response before deciding it has reached the end.
+- A book Audible sends in an unexpected shape no longer takes its whole page with it —
+  it is skipped and counted, and the rest of the page still syncs.
+- Sync now tells you when it lost something, and "Copy Details" puts a page-by-page
+  report on the clipboard. It is also available any time from Settings → Diagnostics.
+- If the app hits an unrecoverable error it now shows a proper screen with a
+  "Copy Crash Details" button instead of a blank one.
+- When Audible temporarily throttles downloads, LibriSync now says so plainly instead
+  of reporting a confusing file error, and stops asking for an hour rather than
+  retrying into the same refusal.
+- Fixed the download request itself, which did not match what Audible expects — the
+  response it produced was missing the download link.
+- Books with odd data from Audible (no purchase date, an unnamed author, a series with
+  no id) no longer go missing from your library.
+- Account details now load for regions where they previously showed a connection error.
+
 ## v0.0.27
 
 - One Accounts tab for every store — Audible and Libro.fm accounts now live in a

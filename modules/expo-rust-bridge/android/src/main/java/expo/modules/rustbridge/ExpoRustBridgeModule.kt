@@ -121,11 +121,13 @@ class ExpoRustBridgeModule : Module() {
      * @param accessToken The access token
      * @return Promise resolving to Map with activation bytes or rejecting with error
      */
-    AsyncFunction("getActivationBytes") { localeCode: String, accessToken: String ->
+    // Takes the whole account, not a token: activation bytes come from a signed request
+    // (device key from registration), which the access token cannot authenticate.
+    AsyncFunction("getActivationBytes") { localeCode: String, accountJson: String ->
       try {
         val params = JSONObject().apply {
           put("locale_code", localeCode)
-          put("access_token", accessToken)
+          put("account_json", accountJson)
         }
         val result = nativeGetActivationBytes(params.toString())
         parseJsonResponse(result)
@@ -1678,24 +1680,29 @@ class ExpoRustBridgeModule : Module() {
       }
     }
 
-    // Libro.fm serves each book two ways: a single packaged M4B, or a set of zipped
-    // MP3 parts. "m4b" | "parts"; reaches the provider as its download plan options.
-    Function("setLibroFmFormat") { format: String ->
+    // Output format for every provider: "m4b" = one file per book, "mp3" = one MP3 per
+    // chapter (Audible, split locally) or per part (Libro.fm, served that way). Libro.fm
+    // reaches its provider as download plan options; Audible is split by the engine.
+    Function("setDownloadFormat") { format: String ->
       try {
         val context = appContext.reactContext ?: throw Exception("Context not available")
         val prefs = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
-        prefs.edit().putString("librofm_format", format).apply()
+        prefs.edit().putString("download_format", format).apply()
         mapOf("success" to true)
       } catch (e: Exception) {
         mapOf("success" to false, "error" to e.message)
       }
     }
 
-    Function("getLibroFmFormat") {
+    Function("getDownloadFormat") {
       try {
         val context = appContext.reactContext ?: throw Exception("Context not available")
         val prefs = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
-        val format = prefs.getString("librofm_format", "m4b") ?: "m4b"
+        // "parts" is the pre-0.0.28 Libro.fm-only value for the same thing as "mp3".
+        val stored = prefs.getString("download_format", null)
+          ?: prefs.getString("librofm_format", null)
+          ?: "m4b"
+        val format = if (stored == "mp3" || stored == "parts") "mp3" else "m4b"
         mapOf("success" to true, "data" to mapOf("format" to format))
       } catch (e: Exception) {
         mapOf("success" to false, "error" to e.message)
@@ -1772,7 +1779,7 @@ class ExpoRustBridgeModule : Module() {
    * re-sync. So completed/failed/cancelled rows are preserved.
    */
   private fun cancelAllPersistentDownloads(dbPath: String): Int {
-    val cancelable = setOf("queued", "downloading", "paused", "decrypting", "validating", "copying")
+    val cancelable = setOf("queued", "downloading", "paused", "decrypting", "validating", "copying", "encoding")
     var cancelled = 0
     val listParsed = parseJsonResponse(nativeListDownloadTasks(JSONObject().apply { put("db_path", dbPath) }.toString()))
     if (listParsed["success"] != true) {

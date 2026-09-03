@@ -37,6 +37,15 @@ class DownloadOrchestrator(
         private const val PREFS_NAME = "download_orchestrator_prefs"
         private const val PREF_WIFI_ONLY = "wifi_only_mode"
         private const val PREF_MANUALLY_PAUSED = "manually_paused_asins"
+        // Output format, shared by every provider. "m4b" = one file per book,
+        // "mp3" = one MP3 per chapter/part. Stored by the Settings screen.
+        private const val FORMAT_M4B = "m4b"
+        private const val FORMAT_MP3 = "mp3"
+        // Audible refuses licences for a while once it decides an account is asking too
+        // often ("CustomerThrottled"). Retrying into that refusal is what prolongs it, so
+        // record the refusal and stop asking until this much time has passed.
+        private const val PREF_LICENSE_THROTTLED_UNTIL = "license_throttled_until"
+        private const val LICENSE_THROTTLE_COOLDOWN_MS = 60 * 60 * 1000L
     }
 
     private val prefs: SharedPreferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -54,6 +63,10 @@ class DownloadOrchestrator(
     // Running FFmpeg session id per ASIN, so a specific decrypt can be cancelled without
     // FFmpegKit.cancel() (which would kill every parallel conversion).
     private val activeFfmpegSessions = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    // Chapter markers from the provider's plan, kept until the book is finalized so the
+    // per-chapter MP3 step knows where to cut. Empty for providers that supply none; the
+    // encoder then falls back to the chapters embedded in the decrypted file.
+    private val planChapters = java.util.concurrent.ConcurrentHashMap<String, List<PlanChapter>>()
 
     // Callbacks
     private var progressCallback: ((String, String, Double, Long, Long, Long) -> Unit)? = null // (asin, stage, percentage, bytesDownloaded, totalBytes, etaSeconds)
@@ -106,6 +119,7 @@ class DownloadOrchestrator(
         outputDirectory: String,
     ): String {
         if (plan.parts.isEmpty()) throw Exception("Empty download plan for $asin")
+        if (plan.chapters.isNotEmpty()) planChapters[asin] = plan.chapters
         return enqueuePlanPart(asin, title, plan, 0, outputDirectory)
     }
 
@@ -223,6 +237,14 @@ class DownloadOrchestrator(
     ): String = withContext(Dispatchers.IO) {
         Log.d(TAG, "Enqueueing $provider book: $itemRef - $title")
 
+        val cooldown = licenseCooldownRemainingMs(accountJson)
+        if (cooldown > 0) {
+            val message = throttleMessage(cooldown)
+            Log.w(TAG, "Skipping $itemRef: $message")
+            errorCallback?.invoke(itemRef, title, message)
+            throw Exception(message)
+        }
+
         try {
             val params = JSONObject().apply {
                 put("provider", provider)
@@ -235,8 +257,12 @@ class DownloadOrchestrator(
             // consumes JSON, and round-tripping through nested Maps would lose the shape.
             val envelope = JSONObject(ExpoRustBridgeModule.nativeProviderGetDownloadPlan(params.toString()))
             if (!envelope.optBoolean("success")) {
+                if (envelope.optString("error_code") == "license_throttled") {
+                    recordLicenseThrottled(accountJson)
+                }
                 throw Exception("Download plan failed: ${envelope.optString("error")}")
             }
+            clearLicenseThrottled(accountJson)
             val planJson = envelope.optJSONObject("data")
                 ?: throw Exception("No download plan returned for $itemRef")
             enqueuePlan(itemRef, title, DownloadPlan.fromJson(planJson), outputDirectory)
@@ -259,6 +285,16 @@ class DownloadOrchestrator(
     ): String = withContext(Dispatchers.IO) {
         Log.d(TAG, "Enqueueing book: $asin - $title")
 
+        // Don't ask for a licence Audible is currently refusing: auto-download would
+        // otherwise retry every book in the library into the same refusal.
+        val cooldown = licenseCooldownRemainingMs(accountJson)
+        if (cooldown > 0) {
+            val message = throttleMessage(cooldown)
+            Log.w(TAG, "Skipping $asin: $message")
+            errorCallback?.invoke(asin, title, message)
+            throw Exception(message)
+        }
+
         try {
             // Step 1: Get download license
             val licenseParams = JSONObject().apply {
@@ -271,8 +307,12 @@ class DownloadOrchestrator(
             val parsedLicense = parseJsonResponse(licenseResult)
 
             if (parsedLicense["success"] != true) {
+                if (parsedLicense["error_code"] == "license_throttled") {
+                    recordLicenseThrottled(accountJson)
+                }
                 throw Exception("License request failed: ${parsedLicense["error"]}")
             }
+            clearLicenseThrottled(accountJson)
 
             val licenseData = parsedLicense["data"] as? Map<*, *> ?: throw Exception("No license data")
             val downloadUrl = licenseData["download_url"] as? String ?: throw Exception("No download URL")
@@ -356,51 +396,15 @@ class DownloadOrchestrator(
     ): String = withContext(Dispatchers.IO) {
         val cachedFile = File(downloadPath)
 
-        val treeUri = Uri.parse(outputDirectory)
-        val docDir = if (outputDirectory.startsWith("content://")) {
-            DocumentFile.fromTreeUri(context, treeUri)
-                ?: throw Exception("Invalid SAF URI")
-        } else null
-
-        if (docDir != null && !docDir.canWrite()) {
-            throw Exception("No write permission for SAF directory")
-        }
-
         // Build directory path using naming pattern (Author/Title/)
-        val filePath = buildFilePathForBook(asin)
-        Log.d(TAG, "Using file path: $filePath")
-
-        val pathParts = filePath.split('/')
-        val directories = pathParts.dropLast(1)
-
-        // Navigate/create subdirectories
-        var safTargetDir: DocumentFile? = null
-        var regularTargetPath: String? = null
-
-        if (docDir != null) {
-            var currentDir: DocumentFile = docDir
-            for (dirName in directories) {
-                val existing = currentDir.findFile(dirName)
-                currentDir = if (existing != null && existing.isDirectory) {
-                    existing
-                } else {
-                    currentDir.createDirectory(dirName)
-                        ?: throw Exception("Failed to create directory: $dirName")
-                }
-            }
-            safTargetDir = currentDir
-        } else {
-            val dir = File(outputDirectory, directories.joinToString("/"))
-            dir.mkdirs()
-            regularTargetPath = dir.absolutePath
-        }
+        val target = resolveBookTarget(asin, outputDirectory)
 
         val extension = cachedFile.extension.lowercase()
 
         val finalPath = if (extension == "zip") {
-            extractZipToDirectory(cachedFile, safTargetDir, regularTargetPath, asin)
+            extractZipToDirectory(cachedFile, target.safDir, target.regularPath, asin)
         } else {
-            copySingleFileToDirectory(cachedFile, extension, pathParts.last(), safTargetDir, regularTargetPath, asin)
+            copySingleFileToDirectory(cachedFile, extension, target.fileName, target.safDir, target.regularPath, asin)
         }
 
         cachedFile.delete()
@@ -486,6 +490,105 @@ class DownloadOrchestrator(
         Log.d(TAG, "Extracted $extractedCount audio files from zip")
         if (extractedCount == 0) throw Exception("No audio files found in zip")
         return firstPath!!
+    }
+
+    /** Remaining cooldown in ms after Audible throttled this account's licences, or 0. */
+    private fun licenseCooldownRemainingMs(accountJson: String?): Long {
+        val until = prefs.getLong(throttleKey(accountJson), 0L)
+        val remaining = until - System.currentTimeMillis()
+        return if (remaining > 0) remaining else 0L
+    }
+
+    /** Record that Audible just throttled this account, starting the cooldown. */
+    private fun recordLicenseThrottled(accountJson: String?) {
+        val until = System.currentTimeMillis() + LICENSE_THROTTLE_COOLDOWN_MS
+        prefs.edit().putLong(throttleKey(accountJson), until).apply()
+        Log.w(TAG, "Audible throttled licences; pausing download requests for ${LICENSE_THROTTLE_COOLDOWN_MS / 60000} minutes")
+    }
+
+    /** A cleared throttle: the last request went through, so stop holding books back. */
+    private fun clearLicenseThrottled(accountJson: String?) {
+        if (prefs.contains(throttleKey(accountJson))) {
+            prefs.edit().remove(throttleKey(accountJson)).apply()
+        }
+    }
+
+    /**
+     * Throttling is per Audible customer, so key the cooldown by account when the id is
+     * available and fall back to a shared key when it isn't.
+     */
+    private fun throttleKey(accountJson: String?): String {
+        val accountId = accountJson?.let {
+            runCatching { JSONObject(it).optString("account_id").takeIf(String::isNotBlank) }.getOrNull()
+        }
+        return if (accountId != null) "${PREF_LICENSE_THROTTLED_UNTIL}_$accountId" else PREF_LICENSE_THROTTLED_UNTIL
+    }
+
+    /** The message shown while a cooldown is in effect. */
+    private fun throttleMessage(remainingMs: Long): String {
+        val minutes = ((remainingMs + 59_999) / 60_000).coerceAtLeast(1)
+        return "Audible is throttling downloads for this account. Try again in about $minutes minute${if (minutes == 1L) "" else "s"}."
+    }
+
+    /**
+     * The folder a book's files belong in, plus the file name the naming pattern chose.
+     * SAF and plain-filesystem destinations are resolved the same way; exactly one of
+     * [safDir] / [regularPath] is non-null.
+     */
+    private data class BookTarget(
+        val safDir: DocumentFile?,
+        val regularPath: String?,
+        val fileName: String,
+    )
+
+    /**
+     * Resolve (and create) the destination folder for [asin] from the naming pattern.
+     */
+    private fun resolveBookTarget(asin: String, outputDirectory: String): BookTarget {
+        val docDir = if (outputDirectory.startsWith("content://")) {
+            DocumentFile.fromTreeUri(context, Uri.parse(outputDirectory))
+                ?: throw Exception("Invalid SAF URI")
+        } else null
+
+        if (docDir != null && !docDir.canWrite()) {
+            throw Exception("No write permission for SAF directory")
+        }
+
+        val filePath = buildFilePathForBook(asin)
+        Log.d(TAG, "Using file path: $filePath")
+
+        val pathParts = filePath.split('/')
+        val directories = pathParts.dropLast(1)
+
+        return if (docDir != null) {
+            var currentDir: DocumentFile = docDir
+            for (dirName in directories) {
+                val existing = currentDir.findFile(dirName)
+                currentDir = if (existing != null && existing.isDirectory) {
+                    existing
+                } else {
+                    currentDir.createDirectory(dirName)
+                        ?: throw Exception("Failed to create directory: $dirName")
+                }
+            }
+            BookTarget(currentDir, null, pathParts.last())
+        } else {
+            val dir = File(outputDirectory, directories.joinToString("/"))
+            dir.mkdirs()
+            BookTarget(null, dir.absolutePath, pathParts.last())
+        }
+    }
+
+    /**
+     * The user's output format, shared by every provider: one file per book, or one
+     * MP3 per chapter/part. `parts` is the pre-0.0.28 Libro.fm-only value for MP3.
+     */
+    private fun downloadFormat(): String {
+        val settings = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
+        val stored = settings.getString("download_format", null)
+            ?: settings.getString("librofm_format", null)
+            ?: FORMAT_M4B
+        return if (stored == FORMAT_MP3 || stored == "parts") FORMAT_MP3 else FORMAT_M4B
     }
 
     /**
@@ -976,12 +1079,19 @@ class DownloadOrchestrator(
 
             Log.d(TAG, "✓ Audio validation PASSED for $asin (${validationResult.duration}s, 0 errors)")
 
-            // Notify copying stage
-            resolvedTaskId?.let { updateTaskStatusInDb(it, "copying") }
-            progressCallback?.invoke(asin, "copying", 0.0, 0, 0, 0L)
+            // MP3 output: split the decrypted M4B into one MP3 per chapter rather than
+            // saving the single file. Books without usable chapter markers fall back to
+            // the single-file copy inside encodeChaptersToMp3.
+            val finalPath = if (downloadFormat() == FORMAT_MP3) {
+                encodeChaptersToMp3(asin, title, decryptedCachePath, outputDirectory, coverArtPath, resolvedTaskId)
+            } else {
+                // Notify copying stage
+                resolvedTaskId?.let { updateTaskStatusInDb(it, "copying") }
+                progressCallback?.invoke(asin, "copying", 0.0, 0, 0, 0L)
 
-            // Copy to final destination
-            val finalPath = copyToFinalDestination(asin, title, decryptedCachePath, outputDirectory, coverArtPath)
+                // Copy to final destination
+                copyToFinalDestination(asin, title, decryptedCachePath, outputDirectory, coverArtPath)
+            }
 
             // Cleanup encrypted file
             File(encryptedPath).delete()
@@ -991,6 +1101,7 @@ class DownloadOrchestrator(
 
             // Mark as completed in DB with the final SAF/file path
             resolvedTaskId?.let { updateTaskStatusInDb(it, "completed", finalPath) }
+            planChapters.remove(asin)
 
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException || asin in cancelledConversions) {
@@ -1129,6 +1240,275 @@ class DownloadOrchestrator(
         completionCallback?.invoke(asin, title, finalPath)
 
         finalPath
+    }
+
+    /** What a probe of the decrypted file tells us: its own chapters, and its bitrate. */
+    private data class SourceInfo(val chapters: List<PlanChapter>, val bitrateK: Int)
+
+    /**
+     * Probe the decrypted file for embedded chapters and audio bitrate. Both are
+     * best-effort: chapters are only a fallback for providers that supply none, and an
+     * unreadable bitrate just means encoding at the spoken-word default.
+     */
+    private fun probeSource(path: String): SourceInfo {
+        return try {
+            val session = com.arthenica.ffmpegkit.FFprobeKit.executeWithArguments(
+                arrayOf(
+                    "-v", "quiet", "-print_format", "json",
+                    "-show_chapters", "-show_streams", "-show_format", "-i", path
+                )
+            )
+            val json = JSONObject(session.output ?: "{}")
+
+            val chapterArray = json.optJSONArray("chapters") ?: org.json.JSONArray()
+            val chapters = ArrayList<PlanChapter>(chapterArray.length())
+            for (i in 0 until chapterArray.length()) {
+                val c = chapterArray.optJSONObject(i) ?: continue
+                val start = (c.optString("start_time").toDoubleOrNull() ?: continue) * 1000.0
+                val end = (c.optString("end_time").toDoubleOrNull() ?: continue) * 1000.0
+                if (end <= start) continue
+                val chapterTitle = c.optJSONObject("tags")?.optString("title").orEmpty()
+                chapters.add(PlanChapter(chapterTitle, start.toLong(), end.toLong()))
+            }
+
+            // Prefer the audio stream's bitrate; some containers only report it per-file.
+            val streams = json.optJSONArray("streams") ?: org.json.JSONArray()
+            var bitrate: Long? = null
+            for (i in 0 until streams.length()) {
+                val stream = streams.optJSONObject(i) ?: continue
+                if (stream.optString("codec_type") == "audio") {
+                    bitrate = stream.optString("bit_rate").toLongOrNull()
+                    break
+                }
+            }
+            if (bitrate == null) {
+                bitrate = json.optJSONObject("format")?.optString("bit_rate")?.toLongOrNull()
+            }
+            // Audiobooks are typically 64 kbps mono; keep the source rate but never encode
+            // absurdly high (pointless re-encode bloat) or low (audible damage).
+            val bitrateK = ((bitrate ?: 0L) / 1000L).toInt().coerceIn(48, 128)
+
+            SourceInfo(chapters, bitrateK)
+        } catch (e: Exception) {
+            Log.w(TAG, "Probe failed for $path: ${e.message}")
+            SourceInfo(emptyList(), 64)
+        }
+    }
+
+    /** Strip characters that are illegal (or merely painful) in file names. */
+    private fun sanitizeFileName(name: String): String {
+        val cleaned = name.replace(Regex("[/\\\\:*?\"<>|\\x00-\\x1f]"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+            .trimEnd('.')
+        return if (cleaned.isEmpty()) "Chapter" else cleaned.take(80)
+    }
+
+    /** Delete a file we wrote, whether it landed in SAF or on the plain filesystem. */
+    private fun deleteWrittenFile(path: String) {
+        if (path.startsWith("content://")) {
+            DocumentFile.fromSingleUri(context, Uri.parse(path))?.delete()
+        } else {
+            File(path).delete()
+        }
+    }
+
+    /**
+     * Encode one chapter of [source] to [output] as MP3.
+     *
+     * Registers the FFmpeg session so a cancel from the notification stops this chapter
+     * rather than every parallel conversion.
+     */
+    private fun encodeChapter(
+        asin: String,
+        source: File,
+        output: File,
+        chapter: PlanChapter,
+        coverArtPath: String?,
+        bitrateK: Int,
+        chapterTitle: String,
+        album: String,
+        artist: String?,
+        number: Int,
+        total: Int,
+    ) {
+        output.delete()
+        val startSec = chapter.startMs / 1000.0
+        val durationSec = (chapter.endMs - chapter.startMs) / 1000.0
+
+        // executeWithArguments (not a joined command string): chapter titles and folder
+        // names contain spaces and quotes, and an argument array needs no escaping.
+        val args = buildList {
+            add("-nostdin")
+            add("-y")
+            add("-ss")
+            add(String.format(java.util.Locale.US, "%.3f", startSec))
+            add("-i")
+            add(source.absolutePath)
+            if (coverArtPath != null) {
+                add("-i")
+                add(coverArtPath)
+            }
+            add("-t")
+            add(String.format(java.util.Locale.US, "%.3f", durationSec))
+            add("-map")
+            add("0:a:0")
+            if (coverArtPath != null) {
+                add("-map")
+                add("1:v:0")
+                add("-c:v")
+                add("mjpeg")
+                add("-disposition:v:0")
+                add("attached_pic")
+            }
+            add("-c:a")
+            add("libmp3lame")
+            add("-b:a")
+            add("${bitrateK}k")
+            add("-id3v2_version")
+            add("3")
+            add("-metadata")
+            add("title=$chapterTitle")
+            add("-metadata")
+            add("album=$album")
+            if (artist != null) {
+                add("-metadata")
+                add("artist=$artist")
+                add("-metadata")
+                add("album_artist=$artist")
+            }
+            add("-metadata")
+            add("track=$number/$total")
+            add("-metadata")
+            add("genre=Audiobook")
+            add(output.absolutePath)
+        }.toTypedArray()
+
+        val latch = java.util.concurrent.CountDownLatch(1)
+        val session = com.arthenica.ffmpegkit.FFmpegKit.executeWithArgumentsAsync(
+            args,
+            { _ -> latch.countDown() },
+            { _ -> },
+            { _ -> }
+        )
+        activeFfmpegSessions[asin] = session.sessionId
+        try {
+            latch.await()
+        } finally {
+            activeFfmpegSessions.remove(asin)
+        }
+
+        if (asin in cancelledConversions) {
+            output.delete()
+            throw kotlinx.coroutines.CancellationException("Encode cancelled by user")
+        }
+
+        if (!com.arthenica.ffmpegkit.ReturnCode.isSuccess(session.returnCode)) {
+            val logs = session.allLogsAsString
+            Log.e(TAG, "Chapter $number/$total encode failed for $asin: $logs")
+            output.delete()
+            throw Exception(ffmpegFailureMessage(logs))
+        }
+    }
+
+    /**
+     * Split the decrypted book into one MP3 per chapter and save them in the book folder.
+     *
+     * Chapter markers come from the provider's plan (Audible's license `chapter_info`);
+     * if the provider supplied none, the file's own markers are probed. A book with
+     * neither is saved as a single file rather than as one giant "chapter".
+     *
+     * Returns the first file written, which becomes the task's output path.
+     */
+    private suspend fun encodeChaptersToMp3(
+        asin: String,
+        title: String,
+        decryptedCachePath: String,
+        outputDirectory: String,
+        coverArtPath: String?,
+        taskId: String?,
+    ): String = withContext(Dispatchers.IO) {
+        val source = File(decryptedCachePath)
+        val probe = probeSource(decryptedCachePath)
+        val fromPlan = planChapters[asin]?.takeIf { it.isNotEmpty() }
+        val chapters = fromPlan ?: probe.chapters
+        val chapterSource = if (fromPlan != null) "provider plan" else "embedded markers"
+
+        if (chapters.isEmpty()) {
+            Log.w(TAG, "No chapter markers for $asin — saving as a single file instead")
+            taskId?.let { updateTaskStatusInDb(it, "copying") }
+            progressCallback?.invoke(asin, "copying", 0.0, 0, 0, 0L)
+            return@withContext copyToFinalDestination(
+                asin, title, decryptedCachePath, outputDirectory, coverArtPath
+            )
+        }
+
+        Log.d(TAG, "Encoding $asin as ${chapters.size} MP3 chapters at ${probe.bitrateK} kbps (chapters from $chapterSource)")
+        taskId?.let { updateTaskStatusInDb(it, "encoding") }
+        progressCallback?.invoke(asin, "encoding", 0.0, 0, 0, 0L)
+
+        val target = resolveBookTarget(asin, outputDirectory)
+        val metadata = fetchBookMetadata(asin)
+        val album = metadata?.get("title")?.toString() ?: title
+        val artist = metadata?.get("authors")?.toString()
+        val workDir = File(context.cacheDir, "audiobooks").apply { mkdirs() }
+        val written = mutableListOf<String>()
+
+        try {
+            chapters.forEachIndexed { index, chapter ->
+                if (asin in cancelledConversions) {
+                    throw kotlinx.coroutines.CancellationException("Encode cancelled by user")
+                }
+
+                val number = index + 1
+                val chapterTitle = chapter.title.ifBlank { "Chapter $number" }
+                // Encode to a space-free cache name; the display name is applied on copy.
+                val cacheFile = File(workDir, "$asin-chapter-$number.mp3")
+
+                encodeChapter(
+                    asin, source, cacheFile, chapter, coverArtPath, probe.bitrateK,
+                    chapterTitle, album, artist, number, chapters.size
+                )
+
+                val fileName = String.format(
+                    java.util.Locale.US, "%02d - %s.mp3", number, sanitizeFileName(chapterTitle)
+                )
+                written.add(
+                    copySingleFileToDirectory(
+                        cacheFile, "mp3", fileName, target.safDir, target.regularPath, asin
+                    )
+                )
+                cacheFile.delete()
+
+                progressCallback?.invoke(
+                    asin, "encoding", number * 100.0 / chapters.size, 0, 0, 0L
+                )
+            }
+        } catch (e: Exception) {
+            // Remove the half-written set: a partial book must not be left behind for the
+            // existing-download scanner to link as if it were complete.
+            written.forEach { path -> runCatching { deleteWrittenFile(path) } }
+            throw e
+        }
+
+        source.delete()
+
+        // Smart Audiobook Player cover, same as the single-file path.
+        if (coverArtPath != null && target.safDir != null) {
+            try {
+                val settings = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
+                if (settings.getString("smart_player_cover_enabled", "false") == "true") {
+                    saveSmartPlayerCover(coverArtPath, target.safDir)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to save Smart Audiobook Player cover: ${e.message}")
+            }
+        }
+
+        Log.d(TAG, "Wrote ${written.size} MP3 chapters for $asin")
+        clearManuallyPaused(asin)
+        completionCallback?.invoke(asin, title, written.first())
+        written.first()
     }
 
     /**

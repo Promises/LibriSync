@@ -77,7 +77,9 @@ echo ""
 echo -e "${YELLOW}Checking required build tools...${NC}"
 MISSING_TOOLS=()
 
-for tool in autoconf automake libtool pkg-config nasm cmake yasm; do
+# groff is not obvious: libiconv's build renders its man pages to HTML, and macOS
+# no longer ships groff, so the whole build dies there with "groff: command not found".
+for tool in autoconf automake libtool pkg-config nasm cmake yasm groff; do
     if ! command -v $tool &> /dev/null; then
         MISSING_TOOLS+=($tool)
     fi
@@ -97,21 +99,24 @@ cd "$FFMPEG_DIR"
 
 # Ask user for build options
 echo -e "${YELLOW}Build options:${NC}"
-echo "1. Default build (all architectures)"
-echo "2. Custom build (with fontconfig)"
+echo "1. Shipping configuration: --enable-lame (required for MP3 output)"
+echo "2. Bare build (no external libraries) — MP3 downloads will not work"
 echo "3. Show all options"
 echo ""
 read -p "Select option (1-3): " choice
 
-BUILD_CMD="./android.sh"
+# lame is what lets the app write MP3s. Without it FFmpeg can only *decode* MP3,
+# so the "MP3 per chapter" download format silently produces nothing usable —
+# build option 1 unless you have a specific reason not to.
+BUILD_CMD="./android.sh --enable-lame"
 
 case $choice in
     1)
-        echo -e "${GREEN}Building with default options...${NC}"
+        echo -e "${GREEN}Building the shipping configuration (--enable-lame)...${NC}"
         ;;
     2)
-        echo -e "${GREEN}Building with fontconfig enabled...${NC}"
-        BUILD_CMD="./android.sh --enable-fontconfig"
+        echo -e "${YELLOW}Building without external libraries — no MP3 encoder!${NC}"
+        BUILD_CMD="./android.sh"
         ;;
     3)
         ./android.sh --help
@@ -137,7 +142,7 @@ if [ $? -eq 0 ]; then
     echo -e "${GREEN}=== Build Successful! ===${NC}"
     echo ""
     echo -e "${GREEN}The .aar file is located at:${NC}"
-    echo "$FFMPEG_DIR/prebuilt/android-aar/ffmpeg-kit.aar"
+    echo "$FFMPEG_DIR/prebuilt/bundle-android-aar/ffmpeg-kit/ffmpeg-kit.aar"
     echo ""
     echo -e "${YELLOW}Next steps:${NC}"
     echo "1. Run: npm run integrate:ffmpeg"

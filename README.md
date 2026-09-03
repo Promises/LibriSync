@@ -23,6 +23,9 @@ Background downloads with progress notifications, pause/resume support, download
 **Smart File Organization**
 Choose how your audiobooks are organized on your device - flat files, Author/Book, or Author/Series/Book folders. Compatible with Smart Audiobook Player for seamless cover art integration.
 
+**Your Choice of Format**
+Save each book as a single file, or as a folder of MP3s split by chapter - with cover art and tags on every file. Applies to every store.
+
 **Export Your Library**
 Export your audiobook collection to CSV, JSON, XLSX, TXT, or PNG. Sort by name or length, group by author or series, and copy formatted text to clipboard.
 

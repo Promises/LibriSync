@@ -13,7 +13,9 @@ echo ""
 
 # Navigate to the project root
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-FFMPEG_AAR="$PROJECT_ROOT/native/ffmpeg-kit-16KB/android/ffmpeg-kit-android-lib/build/outputs/aar/ffmpeg-kit-release.aar"
+# android.sh bundles the archive under prebuilt/, not under the Gradle module's
+# build/outputs — the latter path is where it *would* be for a plain library build.
+FFMPEG_AAR="$PROJECT_ROOT/native/ffmpeg-kit-16KB/prebuilt/bundle-android-aar/ffmpeg-kit/ffmpeg-kit.aar"
 LIBS_DIR="$PROJECT_ROOT/android/app/libs"
 
 # Check if the .aar file exists
@@ -35,6 +37,13 @@ if [ ! -d "$LIBS_DIR" ]; then
     mkdir -p "$LIBS_DIR"
 fi
 
+# Keep the previous archive: a bad rebuild (e.g. one missing --enable-lame) is
+# otherwise unrecoverable without another hour-long build.
+if [ -f "$LIBS_DIR/ffmpeg-kit.aar" ]; then
+    echo -e "${YELLOW}Backing up current .aar to ffmpeg-kit.aar.bak${NC}"
+    cp "$LIBS_DIR/ffmpeg-kit.aar" "$LIBS_DIR/ffmpeg-kit.aar.bak"
+fi
+
 # Copy the .aar file
 echo -e "${YELLOW}Copying ffmpeg-kit.aar to android/app/libs/${NC}"
 cp "$FFMPEG_AAR" "$LIBS_DIR/ffmpeg-kit.aar"
@@ -53,5 +62,7 @@ echo -e "${YELLOW}Next steps:${NC}"
 echo "1. The build.gradle has been updated with the dependency"
 echo "2. You can now use FFmpeg-Kit in your Rust code via JNI"
 echo "3. Verify 16KB compatibility with: npm run verify:16kb"
+echo "4. Confirm the MP3 encoder is present (MP3 downloads depend on it):"
+echo "   unzip -p android/app/libs/ffmpeg-kit.aar jni/arm64-v8a/libavcodec.so | strings | grep -c 'libmp3lame encoder'"
 echo ""
 echo -e "${GREEN}All done!${NC}"

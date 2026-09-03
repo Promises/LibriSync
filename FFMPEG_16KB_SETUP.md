@@ -99,13 +99,43 @@ This script will:
 
 ```bash
 cd native/ffmpeg-kit-16KB
-./android.sh
+./android.sh --enable-lame
 ```
+
+**`--enable-lame` is not optional for a shipping build.** It is what gives FFmpeg an
+MP3 *encoder*; without it the bundled libraries can only decode MP3, and the
+"MP3 per chapter" download format has nothing to write with. A bare `./android.sh`
+builds an archive that looks fine, passes the 16 KB check, and silently breaks MP3
+downloads.
 
 The .aar file will be created at:
 ```
-native/ffmpeg-kit-16KB/prebuilt/android-aar/ffmpeg-kit.aar
+native/ffmpeg-kit-16KB/prebuilt/bundle-android-aar/ffmpeg-kit/ffmpeg-kit.aar
 ```
+
+Confirm the encoder actually made it in before integrating:
+
+```bash
+unzip -p native/ffmpeg-kit-16KB/prebuilt/bundle-android-aar/ffmpeg-kit/ffmpeg-kit.aar \
+  jni/arm64-v8a/libavcodec.so | strings | grep -c "libmp3lame encoder"   # expect 1
+```
+
+### Host tools the build needs
+
+Beyond the Android SDK/NDK and Java, the build shells out to a GNU autotools stack:
+
+```bash
+brew install autoconf automake libtool pkg-config nasm yasm cmake groff
+```
+
+`groff` is the non-obvious one: libiconv renders its man pages to HTML during the
+build, and recent macOS no longer ships groff, so the build dies with
+`groff: command not found` — reported as `libiconv: failed`, which looks like a
+compiler problem and is not.
+
+If a library fails partway through, delete its source tree (e.g.
+`rm -rf src/libiconv`) before retrying; a half-configured tree fails on the next
+run with `No rule to make target 'all'` rather than reconfiguring itself.
 
 ## Integration
 

@@ -69,7 +69,11 @@ impl AudibleClient {
             response_groups: "migration_details".to_string(),
         };
 
-        let response: serde_json::Value = self.get_with_query("/1.0/customer/information", &query).await?;
+        // Signed, not bearer: this endpoint answers a bearer token with
+        // "Request could not be authenticated". Reference: AudibleApi/Api.Customer.cs:72
+        // (AdHocAuthenticatedGetAsync).
+        let response: serde_json::Value =
+            self.get_signed("/1.0/customer/information", &query).await?;
 
         // Try to extract name from various possible locations in response
         let name = response.get("name")

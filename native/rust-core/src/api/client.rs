@@ -452,6 +452,66 @@ impl AudibleClient {
             .await
     }
 
+    /// GET an endpoint that will not accept the bearer token, signing the request with
+    /// the device key instead.
+    ///
+    /// `/1.0/customer/information` and `/license/token` answer a bearer token with
+    /// `{"message":"Request could not be authenticated"}`; the reference client signs
+    /// every request this way. See [`crate::api::signing`].
+    pub async fn get_signed<T, Q>(&self, endpoint: &str, query: &Q) -> Result<T>
+    where
+        T: serde::de::DeserializeOwned,
+        Q: Serialize,
+    {
+        let url = format!("{}{}", self.base_url, endpoint);
+
+        // Sign exactly what the server will see: path plus the encoded query string.
+        let query_string = serde_urlencoded::to_string(query).map_err(|e| {
+            LibationError::InvalidInput(format!("Could not encode query for signing: {e}"))
+        })?;
+        let signed_path = if query_string.is_empty() {
+            endpoint.to_string()
+        } else {
+            format!("{endpoint}?{query_string}")
+        };
+
+        let (adp_token, private_key) = {
+            let account = self.account.lock().await;
+            let identity = account.identity.as_ref().ok_or_else(|| {
+                LibationError::InvalidInput("Account is not signed in".to_string())
+            })?;
+            (
+                identity.adp_token.clone(),
+                identity.device_private_key.clone(),
+            )
+        };
+
+        let signature = crate::api::signing::sign_request(
+            "GET",
+            &signed_path,
+            "",
+            &adp_token,
+            &private_key,
+            chrono::Utc::now(),
+        )?;
+
+        self.request_with_retry(move |client, mut headers| {
+            // A signed request authenticates by signature; leaving the bearer token on it
+            // is what the reference deliberately does not do.
+            headers.remove(AUTHORIZATION);
+            for (name, value) in signature.headers() {
+                if let Ok(header_value) = HeaderValue::from_str(&value) {
+                    if let Ok(header_name) = reqwest::header::HeaderName::from_bytes(name.as_bytes())
+                    {
+                        headers.insert(header_name, header_value);
+                    }
+                }
+            }
+            client.get(&url).query(query).headers(headers)
+        })
+        .await
+    }
+
     /// Perform a POST request with JSON body
     ///
     /// # Reference

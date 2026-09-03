@@ -20,10 +20,12 @@ import {
   isAutoDownloadEnabled,
   cancelAllDownloads,
   cancelAllProcesses,
+  copyTextToClipboard,
   ExpoRustBridge,
 } from '../../modules/expo-rust-bridge';
 import { getDatabaseFiles, getDatabasePath } from '../utils/appPaths';
 import { useProviders } from '../contexts/ProvidersContext';
+import { getLastSyncReport } from '../services/diagnostics';
 import { checkForUpdate, isGithubReleaseBuild, type UpdateInfo } from '../utils/versionCheck';
 
 const DOWNLOAD_PATH_KEY = 'download_path';
@@ -41,7 +43,7 @@ type NamingPattern = 'flat_file' | 'author_book_folder' | 'author_series_book';
 type PodcastNamingPattern = 'podcast_episode_folder' | 'podcast_flat_file';
 type ValidationLevel = 'full' | 'quick' | 'off';
 type DownloadMode = 'parallel' | 'sequential';
-type LibroFmFormat = 'm4b' | 'parts';
+type DownloadFormat = 'm4b' | 'mp3';
 
 export default function SettingsScreen() {
   const styles = useStyles(createStyles);
@@ -53,7 +55,7 @@ export default function SettingsScreen() {
   const [smartPlayerCover, setSmartPlayerCover] = useState(false);
   const [validationLevel, setValidationLevel] = useState<ValidationLevel>('full');
   const [downloadMode, setDownloadMode] = useState<DownloadMode>('parallel');
-  const [libroFmFormat, setLibroFmFormat] = useState<LibroFmFormat>('m4b');
+  const [downloadFormat, setDownloadFormat] = useState<DownloadFormat>('m4b');
   const [isLoading, setIsLoading] = useState(true);
 
   // Sync settings
@@ -107,13 +109,13 @@ export default function SettingsScreen() {
       // Load naming pattern and Smart Player cover from native SharedPreferences
       if (Platform.OS === 'android') {
         try {
-          const [namingResult, podcastNamingResult, coverResult, validationResult, downloadModeResult, libroFmFormatResult] = await Promise.all([
+          const [namingResult, podcastNamingResult, coverResult, validationResult, downloadModeResult, downloadFormatResult] = await Promise.all([
             ExpoRustBridge.getNamingPattern(),
             ExpoRustBridge.getPodcastNamingPattern(),
             ExpoRustBridge.getSmartPlayerCover(),
             ExpoRustBridge.getValidationLevel(),
             ExpoRustBridge.getDownloadMode(),
-            ExpoRustBridge.getLibroFmFormat(),
+            ExpoRustBridge.getDownloadFormat(),
           ]);
 
           if (namingResult.success && namingResult.data) {
@@ -136,8 +138,8 @@ export default function SettingsScreen() {
             setDownloadMode((downloadModeResult.data as any).mode as DownloadMode);
           }
 
-          if (libroFmFormatResult.success && libroFmFormatResult.data) {
-            setLibroFmFormat((libroFmFormatResult.data as any).format as LibroFmFormat);
+          if (downloadFormatResult.success && downloadFormatResult.data) {
+            setDownloadFormat((downloadFormatResult.data as any).format as DownloadFormat);
           }
 
           // Reflect the native auto-download pref (default off).
@@ -498,32 +500,46 @@ export default function SettingsScreen() {
     }
   };
 
-  const getLibroFmFormatLabel = (format: LibroFmFormat): string => {
-    switch (format) {
-      case 'm4b': return 'Single M4B';
-      case 'parts': return 'Parts folder';
+  const handleCopySyncReport = () => {
+    const report = getLastSyncReport();
+    if (!report) {
+      Alert.alert('No Sync Report', 'Sync your library once and the report will appear here.');
+      return;
+    }
+    try {
+      copyTextToClipboard(report);
+      Alert.alert('Copied', 'Sync report copied — paste it into a bug report.');
+    } catch (error: any) {
+      Alert.alert('Copy Failed', error?.message || String(error));
     }
   };
 
-  const handleLibroFmFormatPress = () => {
+  const getDownloadFormatLabel = (format: DownloadFormat): string => {
+    switch (format) {
+      case 'm4b': return 'Single file';
+      case 'mp3': return 'MP3 per chapter';
+    }
+  };
+
+  const handleDownloadFormatPress = () => {
     Alert.alert(
-      'Libro.fm Format',
-      'How Libro.fm books are saved.',
+      'Download Format',
+      'How saved books are laid out. MP3 takes longer for Audible books, which are converted on your device.',
       [
-        { text: 'Single M4B', onPress: () => handleLibroFmFormatChange('m4b') },
-        { text: 'Parts folder (MP3)', onPress: () => handleLibroFmFormatChange('parts') },
+        { text: 'Single file (M4B)', onPress: () => handleDownloadFormatChange('m4b') },
+        { text: 'MP3 per chapter', onPress: () => handleDownloadFormatChange('mp3') },
         { text: 'Cancel', style: 'cancel' },
       ]
     );
   };
 
-  const handleLibroFmFormatChange = async (value: LibroFmFormat) => {
-    setLibroFmFormat(value);
+  const handleDownloadFormatChange = async (value: DownloadFormat) => {
+    setDownloadFormat(value);
     try {
-      await ExpoRustBridge.setLibroFmFormat(value);
+      await ExpoRustBridge.setDownloadFormat(value);
     } catch (error: any) {
-      console.error('[Settings] Failed to save Libro.fm format:', error);
-      Alert.alert('Error', error.message || 'Failed to update Libro.fm format');
+      console.error('[Settings] Failed to save download format:', error);
+      Alert.alert('Error', error.message || 'Failed to update download format');
     }
   };
 
@@ -817,17 +833,18 @@ export default function SettingsScreen() {
 
           <View style={styles.settingItem}>
             <View style={styles.settingInfo}>
-              <Text style={styles.settingLabel}>Libro.fm Format</Text>
+              <Text style={styles.settingLabel}>Download Format</Text>
               <Text style={styles.settingDescription}>
-                Libro.fm offers each book as one packaged M4B or as a folder of MP3 parts.
+                Save each book as one file, or as a folder of MP3s split by chapter.
+                Applies to every store.
               </Text>
             </View>
             <TouchableOpacity
               style={styles.button}
-              onPress={handleLibroFmFormatPress}
+              onPress={handleDownloadFormatPress}
               disabled={isLoading}
             >
-              <Text style={styles.buttonText}>{getLibroFmFormatLabel(libroFmFormat)}</Text>
+              <Text style={styles.buttonText}>{getDownloadFormatLabel(downloadFormat)}</Text>
             </TouchableOpacity>
           </View>
 
@@ -969,6 +986,27 @@ export default function SettingsScreen() {
               trackColor={{ false: colors.border, true: colors.accentDim }}
               thumbColor={providers.audible ? colors.accent : colors.textSecondary}
             />
+          </View>
+        </View>
+
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Diagnostics</Text>
+
+          <View style={styles.settingItem}>
+            <View style={styles.settingInfo}>
+              <Text style={styles.settingLabel}>Last Sync Report</Text>
+              <Text style={styles.settingDescription}>
+                Page-by-page detail of the most recent library sync. Copy it into a bug
+                report if books are missing.
+              </Text>
+            </View>
+            <TouchableOpacity
+              style={styles.button}
+              onPress={handleCopySyncReport}
+              disabled={isLoading}
+            >
+              <Text style={styles.buttonText}>Copy</Text>
+            </TouchableOpacity>
           </View>
         </View>
 

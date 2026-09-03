@@ -7,13 +7,15 @@ use async_trait::async_trait;
 
 use crate::api::auth::Account;
 use crate::api::client::AudibleClient;
-use crate::api::content::DownloadQuality;
+use crate::api::content::{flatten_chapters, DownloadQuality};
+use crate::api::license::DownloadLicense;
 use crate::api::library::SyncStats;
 use crate::storage::Database;
 use crate::{LibationError, Result};
 
 use super::{
-    CredentialBlob, DownloadPart, DownloadPlan, LoginInput, PlanOptions, Provider, ProviderId,
+    CredentialBlob, DownloadPart, DownloadPlan, LoginInput, PlanChapter, PlanOptions, Provider,
+    ProviderId,
 };
 
 /// Audible provider. Stateless — it rebuilds an [`AudibleClient`] from the stored
@@ -29,6 +31,42 @@ impl AudibleProvider {
         let refreshed = crate::api::auth::ensure_valid_token(db.pool(), &account_json, 30).await?;
         serde_json::from_str(&refreshed)
             .map_err(|e| LibationError::InvalidInput(format!("Invalid Audible account: {e}")))
+    }
+
+    /// Chapter markers for the plan, used by the engine when the user asked for
+    /// per-chapter output. The license response carries `chapter_info` for most
+    /// titles; when it doesn't, fall back to the content metadata endpoint.
+    /// Chapters are optional — a book without them still downloads as one file.
+    async fn plan_chapters(
+        client: &AudibleClient,
+        asin: &str,
+        license: &DownloadLicense,
+    ) -> Vec<PlanChapter> {
+        let info = match license.content_metadata.chapter_info.clone() {
+            Some(info) => Some(info),
+            None => client
+                .get_content_metadata(asin)
+                .await
+                .ok()
+                .and_then(|m| m.chapter_info),
+        };
+
+        let Some(info) = info else {
+            return Vec::new();
+        };
+
+        flatten_chapters(info.chapters, Some(": "))
+            .into_iter()
+            .filter(|c| c.length_ms > 0)
+            .map(|c| {
+                let start = c.start_offset_ms.max(0);
+                PlanChapter {
+                    title: c.title,
+                    start_ms: start as u64,
+                    end_ms: (start + c.length_ms) as u64,
+                }
+            })
+            .collect()
     }
 }
 
@@ -97,6 +135,14 @@ impl Provider for AudibleProvider {
             .to_ascii_lowercase();
         let filename = format!("{item_ref}.{ext}");
 
+        // Only encrypted (AAXC) downloads become one big M4B that the engine may
+        // need to split; a plain MP3 asset (podcast episode) is already one file.
+        let chapters = if license.drm_type.is_encrypted() {
+            Self::plan_chapters(&client, item_ref, &license).await
+        } else {
+            Vec::new()
+        };
+
         let part = if license.drm_type.is_encrypted() {
             let keys = license
                 .decryption_keys
@@ -132,7 +178,7 @@ impl Provider for AudibleProvider {
         Ok(DownloadPlan {
             parts: vec![part],
             embed_metadata: true,
-            chapters: Vec::new(),
+            chapters,
         })
     }
 }

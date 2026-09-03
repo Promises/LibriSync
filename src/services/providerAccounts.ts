@@ -24,7 +24,8 @@ export interface SyncAllResult {
   succeeded: number;
   /** Display names of accounts that failed, for the summary alert. */
   failed: string[];
-  totals: Pick<SyncStats, 'total_items' | 'total_library_count' | 'books_added' | 'books_updated'>;
+  /** Full stats across every account, so the sync report covers a multi-account run. */
+  totals: SyncStats;
 }
 
 /**
@@ -102,19 +103,36 @@ export async function syncAllProviderAccounts(
   formatName: (account: Account) => string,
   onProgress?: SyncProgress,
 ): Promise<SyncAllResult> {
-  const totals = { total_items: 0, total_library_count: 0, books_added: 0, books_updated: 0 };
+  const totals: SyncStats = {
+    total_items: 0,
+    total_library_count: 0,
+    books_added: 0,
+    books_updated: 0,
+    books_absent: 0,
+    errors: [],
+    items_failed: 0,
+    has_more: false,
+    pages: [],
+  };
   const failed: string[] = [];
 
   for (const account of accounts) {
+    const name = formatName(account);
     try {
       const { stats } = await syncProviderAccount(dbPath, account, onProgress);
       totals.total_items += stats.total_items;
       totals.total_library_count += stats.total_library_count;
       totals.books_added += stats.books_added;
       totals.books_updated += stats.books_updated;
+      totals.books_absent += stats.books_absent;
+      totals.items_failed += stats.items_failed ?? 0;
+      // Tag each line with its account: a mixed report is unreadable otherwise.
+      totals.errors.push(...stats.errors.map((error) => `${name}: ${error}`));
+      totals.pages!.push(...(stats.pages ?? []));
     } catch (error) {
       console.error(`[providerAccounts] Sync failed for ${account.account_id}:`, error);
-      failed.push(formatName(account));
+      failed.push(name);
+      totals.errors.push(`${name}: sync failed: ${(error as any)?.message ?? String(error)}`);
     }
   }
 

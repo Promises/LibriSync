@@ -43,6 +43,8 @@ pub enum TaskStatus {
     Validating,
     #[serde(rename = "copying")]
     Copying,
+    #[serde(rename = "encoding")]
+    Encoding,
 }
 
 impl TaskStatus {
@@ -57,6 +59,7 @@ impl TaskStatus {
             TaskStatus::Decrypting => "decrypting",
             TaskStatus::Validating => "validating",
             TaskStatus::Copying => "copying",
+            TaskStatus::Encoding => "encoding",
         }
     }
 
@@ -71,6 +74,7 @@ impl TaskStatus {
             "decrypting" => Ok(TaskStatus::Decrypting),
             "validating" => Ok(TaskStatus::Validating),
             "copying" => Ok(TaskStatus::Copying),
+            "encoding" => Ok(TaskStatus::Encoding),
             _ => Err(LibationError::InvalidInput(format!("Invalid task status: {}", s))),
         }
     }

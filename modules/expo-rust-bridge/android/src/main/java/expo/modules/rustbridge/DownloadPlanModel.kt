@@ -36,9 +36,21 @@ sealed class DownloadPart {
     ) : DownloadPart()
 }
 
+/**
+ * One chapter marker supplied by the provider (Audible license chapter_info,
+ * Libro.fm manifest tracks). Times are milliseconds from the start of the book.
+ * Used when the user asked for per-chapter output.
+ */
+data class PlanChapter(
+    val title: String,
+    val startMs: Long,
+    val endMs: Long,
+)
+
 data class DownloadPlan(
     val parts: List<DownloadPart>,
     val embedMetadata: Boolean = false,
+    val chapters: List<PlanChapter> = emptyList(),
 ) {
     companion object {
         /** Parse a plan from the JSON emitted by `nativeProviderGetDownloadPlan`. */
@@ -62,7 +74,22 @@ data class DownloadPlan(
                     else -> {}
                 }
             }
-            return DownloadPlan(parts, json.optBoolean("embed_metadata", false))
+            return DownloadPlan(parts, json.optBoolean("embed_metadata", false), chaptersOf(json))
+        }
+
+        /** Parse `chapters[]`; a provider that supplies none yields an empty list. */
+        private fun chaptersOf(json: JSONObject): List<PlanChapter> {
+            val arr = json.optJSONArray("chapters") ?: return emptyList()
+            val out = ArrayList<PlanChapter>(arr.length())
+            for (i in 0 until arr.length()) {
+                val c = arr.optJSONObject(i) ?: continue
+                val start = c.optLong("start_ms", -1L)
+                val end = c.optLong("end_ms", -1L)
+                // Drop malformed/zero-length markers rather than emitting empty files.
+                if (start < 0 || end <= start) continue
+                out.add(PlanChapter(c.optString("title"), start, end))
+            }
+            return out
         }
 
         private fun headersOf(obj: JSONObject?): Map<String, String> {

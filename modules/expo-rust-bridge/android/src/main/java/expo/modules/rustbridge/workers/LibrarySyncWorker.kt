@@ -32,6 +32,12 @@ class LibrarySyncWorker(
 
     companion object {
         private const val TAG = "LibrarySyncWorker"
+        /** Attempts per page before it is skipped. */
+        private const val PAGE_ATTEMPTS = 3
+        /** Consecutive skipped pages that mean the API/connection is gone, not one bad page. */
+        private const val MAX_CONSECUTIVE_PAGE_FAILURES = 3
+        /** Runaway guard: pagination ends on an empty page, so bound it regardless. */
+        private const val MAX_PAGES = 500
 
         /**
          * Parse date from multiple possible formats
@@ -114,28 +120,66 @@ class LibrarySyncWorker(
             var totalItemsAdded = 0
             var totalItemsUpdated = 0
 
-            while (hasMore) {
+            // A page that fails must not cost the rest of the library. Retry it, then skip
+            // it and continue — returning Result.retry() here restarted the whole sync from
+            // page 1, so a page that failed every time meant the library never completed.
+            var consecutiveFailures = 0
+            var pagesFailed = 0
+            var itemsFailed = 0
+
+            while (hasMore && page <= MAX_PAGES) {
                 Log.d(TAG, "Syncing page $page...")
 
-                // Sync this page
                 val syncParams = JSONObject().apply {
                     put("db_path", dbPath)
                     put("account_json", accountJson)
                     put("page", page)
                 }
-                val pageResultJson = ExpoRustBridgeModule.nativeSyncLibraryPage(syncParams.toString())
-                val pageResultObj = JSONObject(pageResultJson)
 
-                if (!pageResultObj.getBoolean("success")) {
-                    val error = pageResultObj.optString("error", "Sync failed")
-                    Log.e(TAG, "Library sync failed on page $page: $error")
-                    return@withContext Result.retry()
+                var statsObj: JSONObject? = null
+                var lastError = "unknown error"
+                for (attempt in 1..PAGE_ATTEMPTS) {
+                    val pageResultObj = try {
+                        JSONObject(ExpoRustBridgeModule.nativeSyncLibraryPage(syncParams.toString()))
+                    } catch (e: Exception) {
+                        lastError = e.message ?: "sync threw ${e.javaClass.simpleName}"
+                        Log.w(TAG, "Page $page attempt $attempt threw: $lastError")
+                        null
+                    }
+
+                    if (pageResultObj != null && pageResultObj.optBoolean("success")) {
+                        statsObj = pageResultObj.getJSONObject("data")
+                        break
+                    }
+                    if (pageResultObj != null) {
+                        lastError = pageResultObj.optString("error", "Sync failed")
+                    }
+                    Log.w(TAG, "Page $page attempt $attempt failed: $lastError")
+                    if (attempt < PAGE_ATTEMPTS) Thread.sleep(1000L * attempt)
                 }
 
-                val statsObj = pageResultObj.getJSONObject("data")
+                if (statsObj == null) {
+                    consecutiveFailures++
+                    pagesFailed++
+                    Log.e(TAG, "Library sync skipping page $page after $PAGE_ATTEMPTS attempts: $lastError")
+                    if (consecutiveFailures >= MAX_CONSECUTIVE_PAGE_FAILURES) {
+                        Log.e(TAG, "Giving up after $consecutiveFailures consecutive failed pages")
+                        // Nothing was importable at all: let WorkManager try again later.
+                        if (totalItemsAdded == 0 && totalItemsUpdated == 0) {
+                            return@withContext Result.retry()
+                        }
+                        break
+                    }
+                    page++
+                    continue
+                }
+
+                consecutiveFailures = 0
+
                 val totalItems = statsObj.getInt("total_items")
                 val booksAdded = statsObj.getInt("books_added")
                 val booksUpdated = statsObj.getInt("books_updated")
+                itemsFailed += statsObj.optInt("items_failed", 0)
                 hasMore = statsObj.getBoolean("has_more")
 
                 // Update totals
@@ -143,9 +187,13 @@ class LibrarySyncWorker(
                 totalItemsAdded += booksAdded
                 totalItemsUpdated += booksUpdated
 
-                Log.d(TAG, "Page $page synced: $totalItems total, $booksAdded added, $booksUpdated updated, hasMore=$hasMore")
+                Log.d(TAG, "Page $page synced: $totalItems items, $booksAdded added, $booksUpdated updated, ${statsObj.optInt("items_failed", 0)} failed, hasMore=$hasMore")
 
                 page++
+            }
+
+            if (pagesFailed > 0 || itemsFailed > 0) {
+                Log.w(TAG, "Library sync finished with $pagesFailed skipped page(s) and $itemsFailed unreadable item(s)")
             }
 
             Log.d(TAG, "Library sync complete: $totalItemsSynced items ($totalItemsAdded added, $totalItemsUpdated updated)")

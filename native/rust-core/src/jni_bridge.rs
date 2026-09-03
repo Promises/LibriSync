@@ -139,6 +139,29 @@ fn error_response(error: &str) -> String {
     .to_string()
 }
 
+/// Error envelope carrying a stable machine-readable code alongside the message, so the
+/// Kotlin side can act on a failure instead of matching on prose.
+fn error_response_coded(error: &crate::LibationError) -> String {
+    serde_json::json!({
+        "success": false,
+        "error": error.to_string(),
+        "error_code": error_code(error),
+    })
+    .to_string()
+}
+
+/// Stable codes for the failures callers need to branch on. Everything else is `null`
+/// and stays a message.
+fn error_code(error: &crate::LibationError) -> Option<&'static str> {
+    match error {
+        // Audible is refusing licences for this customer for a while. Callers must back
+        // off rather than retry, which is what prolongs it.
+        crate::LibationError::LicenseDenied { throttled: true, .. } => Some("license_throttled"),
+        crate::LibationError::LicenseDenied { .. } => Some("license_denied"),
+        _ => None,
+    }
+}
+
 /// Wrap a function call with panic catching
 fn catch_panic<F>(f: F) -> String
 where
@@ -626,10 +649,12 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetAct
     let params_str_result = jstring_to_string(&mut env, params_json);
 
     let response = catch_panic(move || {
+        // Takes the whole account: this endpoint is signed with the device key from
+        // registration, not authenticated with the access token.
         #[derive(Deserialize)]
         struct Params {
             locale_code: String,
-            access_token: String,
+            account_json: String,
         }
 
         match (move || -> crate::Result<String> {
@@ -645,8 +670,21 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetAct
                     ))
                 })?;
 
+            let account: crate::api::auth::Account = serde_json::from_str(&params.account_json)
+                .map_err(|e| {
+                    crate::LibationError::InvalidInput(format!("Invalid account JSON: {}", e))
+                })?;
+            let identity = account.identity.as_ref().ok_or_else(|| {
+                crate::LibationError::InvalidInput("Account is not signed in".to_string())
+            })?;
+
             let result = RUNTIME.block_on(async {
-                crate::api::auth::get_activation_bytes(&locale, &params.access_token).await
+                crate::api::auth::get_activation_bytes(
+                    &locale,
+                    &identity.adp_token,
+                    &identity.device_private_key,
+                )
+                .await
             })?;
 
             let response = serde_json::json!({
@@ -967,7 +1005,7 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeProvid
             Ok(success_response(result))
         })() {
             Ok(result) => result,
-            Err(e) => error_response(&e.to_string()),
+            Err(e) => error_response_coded(&e),
         }
     });
 
@@ -2702,7 +2740,7 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetDow
             Ok(success_response(result))
         })() {
             Ok(result) => result,
-            Err(e) => error_response(&e.to_string()),
+            Err(e) => error_response_coded(&e),
         }
     });
 

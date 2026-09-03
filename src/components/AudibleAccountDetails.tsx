@@ -71,7 +71,21 @@ export default function AudibleAccountDetails({ account, onAccountUpdated }: Pro
       const customerInfo = await getCustomerInformation(localeCode, accessToken);
       setAccountName(customerInfo.name || account.identity.customer_info?.name || null);
       setConnectionStatus('connected');
-    } catch (error) {
+    } catch (error: any) {
+      // Customer info is a *signed* request (device key from registration). Accounts
+      // added before the app stored those credentials cannot make it — that is not a
+      // connection problem, and reporting it as one is worse than saying nothing.
+      const message: string = error?.rustError || error?.message || '';
+      const missingDeviceCredentials = message.includes('ADP token')
+        || message.includes('device private key');
+
+      if (missingDeviceCredentials) {
+        console.warn('[AudibleAccountDetails] Account predates device-key storage; sign in again for full details');
+        setAccountName(account.identity?.customer_info?.name || account.account_name || null);
+        setConnectionStatus('connected');
+        return;
+      }
+
       console.error('[AudibleAccountDetails] Failed to fetch customer info:', error);
       setAccountName(account.identity?.customer_info?.name || null);
       setConnectionStatus('error');

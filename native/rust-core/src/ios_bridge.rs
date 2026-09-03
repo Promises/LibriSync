@@ -467,17 +467,30 @@ pub extern "C" fn rust_ensure_valid_token(
 #[no_mangle]
 pub extern "C" fn rust_get_activation_bytes(
     locale_code: *const c_char,
-    access_token: *const c_char,
+    account_json: *const c_char,
 ) -> *mut c_char {
     let response = catch_panic(|| {
         let locale_code = c_str_to_string(locale_code)?;
-        let access_token = c_str_to_string(access_token)?;
+        // The whole account, not just a token: the endpoint is signed with the device
+        // key from registration. See api::signing.
+        let account_json = c_str_to_string(account_json)?;
 
         let locale = crate::api::auth::Locale::from_country_code(&locale_code)
             .ok_or_else(|| crate::LibationError::InvalidInput(format!("Invalid locale: {}", locale_code)))?;
 
+        let account: crate::api::auth::Account = serde_json::from_str(&account_json)
+            .map_err(|e| crate::LibationError::InvalidInput(format!("Invalid account JSON: {}", e)))?;
+        let identity = account.identity.as_ref().ok_or_else(|| {
+            crate::LibationError::InvalidInput("Account is not signed in".to_string())
+        })?;
+
         let result = RUNTIME.block_on(async {
-            crate::api::auth::get_activation_bytes(&locale, &access_token).await
+            crate::api::auth::get_activation_bytes(
+                &locale,
+                &identity.adp_token,
+                &identity.device_private_key,
+            )
+            .await
         })?;
 
         let response = serde_json::json!({

@@ -128,7 +128,10 @@ impl Default for LibraryOptions {
     /// Reference: ApplicationServices/LibraryCommands.cs:122-133
     fn default() -> Self {
         Self {
-            number_of_results_per_page: 50, // Back to normal size
+            // Audible allows up to 1000 per page. Bigger pages mean fewer requests for a
+            // large library (a 600-book library is 3 requests, not 13), and every request
+            // is a chance for a transient empty/failed response to truncate the sync.
+            number_of_results_per_page: 250,
             page_number: 1,
             purchased_after: None,
             response_groups: [
@@ -208,8 +211,12 @@ pub struct LibraryItem {
 
     // === DATES ===
     /// Date added to library (purchase date)
-    #[serde(rename = "purchase_date")]
-    pub purchase_date: DateTime<Utc>,
+    /// Optional on purpose: real accounts have titles with a missing or
+    /// beginning-of-time `purchase_date`, and a book must not be lost over it.
+    /// Reference: Libation 2c882e88 "#1378 : allow for invalid beginning-of-time
+    /// 'purchase_date'. This is the case for an actual user".
+    #[serde(rename = "purchase_date", default)]
+    pub purchase_date: Option<DateTime<Utc>>,
 
     /// Release date (publication date)
     #[serde(rename = "release_date", default)]
@@ -460,7 +467,9 @@ pub struct AssetDetail {
 /// Maps to C# `Person` class in AudibleApi/Common/Person.cs
 #[derive(Debug, Clone, Deserialize)]
 pub struct Person {
-    /// Person's name
+    /// Person's name. Defaulted rather than required: Audible occasionally returns a
+    /// contributor with no name, and that must not fail the item.
+    #[serde(default)]
     pub name: String,
 
     /// Audible contributor ID (ASIN)
@@ -502,7 +511,9 @@ pub struct RatingDistribution {
 #[derive(Debug, Clone, Deserialize)]
 pub struct SeriesInfo {
     /// Series ASIN
-    #[serde(rename = "asin")]
+    /// Defaulted; a series entry without an ASIN is skipped when linking rather than
+    /// failing the whole item. Libation had to relax the same check for a real user.
+    #[serde(rename = "asin", default)]
     pub series_id: String,
 
     /// Series title
@@ -551,7 +562,9 @@ pub struct Plan {
 /// Maps to C# `Relationship` class in AudibleApi/Common/Relationship.cs
 #[derive(Debug, Clone, Deserialize)]
 pub struct Relationship {
-    /// Related product ASIN
+    /// Related product ASIN. Defaulted: a malformed relationship must not cost the
+    /// book it belongs to.
+    #[serde(default)]
     pub asin: String,
 
     /// Relationship type ("Episode", "Season", etc.)
@@ -616,6 +629,10 @@ pub struct SyncStats {
 
     /// Errors encountered during sync (non-fatal)
     pub errors: Vec<String>,
+
+    /// Items the API returned that could not be parsed or imported. These are the
+    /// silent losses: the page succeeded, the book did not arrive.
+    pub items_failed: i32,
 
     /// Whether there are more pages to fetch (for pagination)
     pub has_more: bool,
@@ -731,38 +748,93 @@ impl AudibleClient {
         let mut options = LibraryOptions::default();
         options.page_number = page;
 
-        let response: LibraryResponse = self.get_with_query("/1.0/library", &options).await?;
+        // Parse the envelope loosely: one malformed item must cost one book, not the
+        // whole page (and, because an empty/failed page ends pagination, not the whole
+        // rest of the library).
+        let mut raw: serde_json::Value = self.get_with_query("/1.0/library", &options).await?;
+        let mut raw_items = Self::take_raw_items(&mut raw);
 
-        stats.total_items = response.items.len() as i32;
-
-        // Set total_library_count and has_more from API response
-        if let Some(total) = response.total_results {
-            stats.total_library_count = total;
-            let page_size = options.number_of_results_per_page;
-            let total_pages = (total as f32 / page_size as f32).ceil() as i32;
-            stats.has_more = page < total_pages;
-        } else {
-            // If no total provided, check if page is empty to determine has_more
-            stats.has_more = !response.items.is_empty();
+        // An empty page is how this sync knows it has reached the end — Audible's library
+        // response carries no total to check against. A transient empty-but-successful
+        // response would therefore truncate the library and report success, so confirm it
+        // with a second request before believing it.
+        if raw_items.is_empty() {
+            let mut confirmation: serde_json::Value =
+                self.get_with_query("/1.0/library", &options).await?;
+            raw_items = Self::take_raw_items(&mut confirmation);
+            if !raw_items.is_empty() {
+                stats.errors.push(format!(
+                    "Page {page} returned no items on the first attempt but {} on retry \
+                     — the empty response was transient",
+                    raw_items.len()
+                ));
+            }
         }
 
-        if response.items.is_empty() {
+        stats.total_items = raw_items.len() as i32;
+
+        // Audible does not return `total_results` for /1.0/library (verified against
+        // captured responses), so the only end-of-library signal is an empty page.
+        if let Some(total) = raw
+            .get("total_results")
+            .and_then(serde_json::Value::as_i64)
+        {
+            stats.total_library_count = total as i32;
+        }
+        stats.has_more = !raw_items.is_empty();
+
+        if raw_items.is_empty() {
+            return Ok(stats);
+        }
+
+        // Convert item-by-item; a failure names its ASIN and is counted, never silent.
+        let mut items = Vec::with_capacity(raw_items.len());
+        for raw_item in raw_items {
+            let asin = raw_item
+                .get("asin")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("<unknown asin>")
+                .to_string();
+            match serde_json::from_value::<LibraryItem>(raw_item) {
+                Ok(item) => items.push(item),
+                Err(e) => {
+                    stats.items_failed += 1;
+                    stats
+                        .errors
+                        .push(format!("Page {page}: could not read item '{asin}': {e}"));
+                }
+            }
+        }
+
+        if items.is_empty() {
+            // Every item on a non-empty page failed to parse. has_more stays true so the
+            // sync keeps going rather than treating this as the end of the library.
             return Ok(stats);
         }
 
         // Import items into database
         let (new_count, updated_count, errors) = self
-            .import_items_to_db(db, &response.items, &account.account_id)
+            .import_items_to_db(db, &items, &account.account_id)
             .await?;
 
         stats.books_added = new_count;
         stats.books_updated = updated_count;
-        stats.errors = errors;
+        stats.items_failed += errors.len() as i32;
+        stats.errors.extend(errors);
 
         // Note: books_absent is only calculated at the end of full sync
         // Individual pages don't mark absent books
 
         Ok(stats)
+    }
+
+    /// Take the `items` array out of a raw library response, leaving the rest of the
+    /// envelope intact. Missing or non-array `items` reads as an empty page.
+    fn take_raw_items(raw: &mut serde_json::Value) -> Vec<serde_json::Value> {
+        match raw.get_mut("items").map(serde_json::Value::take) {
+            Some(serde_json::Value::Array(items)) => items,
+            _ => Vec::new(),
+        }
     }
 
     /// Fetch and import one page of episodes for a podcast or periodical parent.
@@ -1426,7 +1498,10 @@ impl AudibleClient {
         };
 
         // Upsert LibraryBook record
-        self.upsert_library_book(db, book_id, account_id, &item.purchase_date)
+        // No purchase date (or an unusable one) still deserves a library row; use the
+        // moment we first saw the book so ordering by "date added" stays sane.
+        let date_added = item.purchase_date.unwrap_or_else(Utc::now);
+        self.upsert_library_book(db, book_id, account_id, &date_added)
             .await?;
 
         // Link contributors (authors, narrators, publisher)
@@ -2141,9 +2216,92 @@ mod tests {
     }
 
     #[test]
+    fn take_raw_items_tolerates_a_missing_or_odd_items_field() {
+        let mut with_items = serde_json::json!({"items": [{"asin": "A"}, {"asin": "B"}]});
+        assert_eq!(AudibleClient::take_raw_items(&mut with_items).len(), 2);
+
+        let mut empty = serde_json::json!({"items": [], "response_groups": "media"});
+        assert!(AudibleClient::take_raw_items(&mut empty).is_empty());
+
+        let mut missing = serde_json::json!({"response_groups": "media"});
+        assert!(AudibleClient::take_raw_items(&mut missing).is_empty());
+
+        let mut wrong_type = serde_json::json!({"items": "nope"});
+        assert!(AudibleClient::take_raw_items(&mut wrong_type).is_empty());
+    }
+
+    #[test]
+    fn items_survive_the_shapes_real_accounts_actually_return() {
+        // Each of these cost a book (and, before per-item parsing, a whole page) because
+        // the field was required. All are shapes Audible has really returned:
+        // Libation had to relax the same validations for actual users.
+        let cases = [
+            // no purchase_date at all
+            serde_json::json!({"asin": "A1", "title": "No date"}),
+            // beginning-of-time purchase_date (Libation #1378)
+            serde_json::json!({"asin": "A2", "title": "Epoch", "purchase_date": "0001-01-01T00:00:00Z"}),
+            // a contributor with no name
+            serde_json::json!({"asin": "A3", "title": "Nameless author",
+                "purchase_date": "2024-01-01T00:00:00Z", "authors": [{"asin": "B1"}]}),
+            // a series with no asin
+            serde_json::json!({"asin": "A4", "title": "Series without id",
+                "purchase_date": "2024-01-01T00:00:00Z", "series": [{"title": "Some series"}]}),
+            // a relationship with no asin
+            serde_json::json!({"asin": "A5", "title": "Odd relationship",
+                "purchase_date": "2024-01-01T00:00:00Z",
+                "relationships": [{"relationship_to_product": "child"}]}),
+        ];
+
+        for case in cases {
+            let asin = case["asin"].as_str().unwrap().to_string();
+            let item: LibraryItem = serde_json::from_value(case)
+                .unwrap_or_else(|e| panic!("{asin} should still import: {e}"));
+            assert_eq!(item.asin, asin);
+        }
+    }
+
+    #[test]
+    fn one_unparseable_item_does_not_cost_its_neighbours() {
+        // A page used to be deserialized as a unit, so a single unreadable item took the
+        // whole page — and, because an empty/failed page ends pagination, everything
+        // after it too. (An unparseable date is the bad item here; a *missing* one is
+        // tolerated, see items_survive_the_shapes_real_accounts_actually_return.)
+        let mut page = serde_json::json!({"items": [
+            {"asin": "GOOD1", "title": "First", "purchase_date": "2024-01-01T00:00:00Z"},
+            {"asin": "BAD", "title": "Unreadable date", "purchase_date": "not-a-date"},
+            {"asin": "GOOD2", "title": "Second", "purchase_date": "2024-02-01T00:00:00Z"}
+        ]});
+
+        let raw_items = AudibleClient::take_raw_items(&mut page);
+        assert_eq!(raw_items.len(), 3);
+
+        let mut parsed = Vec::new();
+        let mut failed = Vec::new();
+        for raw_item in raw_items {
+            let asin = raw_item
+                .get("asin")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            match serde_json::from_value::<LibraryItem>(raw_item) {
+                Ok(item) => parsed.push(item),
+                Err(_) => failed.push(asin),
+            }
+        }
+
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(failed, vec!["BAD".to_string()]);
+        assert_eq!(parsed[0].asin, "GOOD1");
+        assert_eq!(parsed[1].asin, "GOOD2");
+    }
+
+    #[test]
     fn test_library_options_default() {
         let options = LibraryOptions::default();
-        assert_eq!(options.number_of_results_per_page, 50);
+        // Large pages on purpose: fewer requests per sync means fewer chances for a
+        // transient failure to truncate the library. Audible allows up to 1000.
+        assert_eq!(options.number_of_results_per_page, 250);
+        assert!(options.number_of_results_per_page <= 1000);
         assert_eq!(options.page_number, 1);
         assert!(options.response_groups.contains("media"));
         assert!(options.response_groups.contains("contributors"));

@@ -872,6 +872,62 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeSyncLi
 // These dispatch to the provider registry (crate::providers) by `provider` id,
 // so a new provider needs no new native functions. See providers/mod.rs.
 
+/// Build the sign-in cookies (`frc`, `map-md`, `sid`) for a device serial.
+///
+/// Params: `{ "device_serial": "...", "language": "en-US", "timezone_offset": "+02:00",
+/// "device_profile": { ... } }`. Returns `{ "frc": "...", "map_md": "...", "sid": "" }`.
+/// See api::signin_cookies for why these matter.
+#[no_mangle]
+pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeSignInCookies(
+    mut env: JNIEnv,
+    _class: JClass,
+    params_json: JString,
+) -> jstring {
+    let params_str_result = jstring_to_string(&mut env, params_json);
+
+    let response = catch_panic(move || {
+        #[derive(Deserialize)]
+        struct Params {
+            device_serial: String,
+            #[serde(default = "default_language")]
+            language: String,
+            #[serde(default = "default_timezone")]
+            timezone_offset: String,
+            #[serde(default)]
+            device_profile: Option<crate::api::auth::DeviceProfile>,
+        }
+        fn default_language() -> String {
+            "en-US".to_string()
+        }
+        fn default_timezone() -> String {
+            "+00:00".to_string()
+        }
+
+        match (move || -> crate::Result<String> {
+            let params_str = params_str_result?;
+            let params: Params = serde_json::from_str(&params_str)
+                .map_err(|e| crate::LibationError::InvalidInput(format!("Invalid JSON: {}", e)))?;
+
+            let profile = params.device_profile.unwrap_or_default();
+            let cookies = crate::api::signin_cookies::build(
+                &params.device_serial,
+                &profile,
+                &params.language,
+                &params.timezone_offset,
+            )?;
+
+            Ok(success_response(cookies))
+        })() {
+            Ok(result) => result,
+            Err(e) => error_response(&e.to_string()),
+        }
+    });
+
+    env.new_string(response)
+        .expect("Failed to create Java string")
+        .into_raw()
+}
+
 /// Log in to a provider with credential fields (password providers).
 /// Params: `{ "provider": "librofm", "fields": { "username": .., "password": .. } }`
 /// Returns the opaque credential blob to persist. (Audible uses its OAuth flow.)

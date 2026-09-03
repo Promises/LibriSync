@@ -71,6 +71,62 @@ class ExpoRustBridgeModule : Module() {
      * @param pkceVerifier The PKCE code verifier from initial OAuth request
      * @return Promise resolving to Map with tokens or rejecting with error
      */
+    /**
+     * Seed the cookies Amazon's sign-in page expects from a real Audible app
+     * (`frc`, `map-md`, `sid`) before the login WebView loads.
+     *
+     * The official app sets these; we never have. Since Audible started denying download
+     * licences to third-party registrations while serving its own app, the registration
+     * handshake is the only place the two still differ — so the login has to look right,
+     * not just the API calls that follow it.
+     */
+    AsyncFunction("prepareSignIn") { localeCode: String, deviceSerial: String ->
+      try {
+        val offsetMinutes = java.util.TimeZone.getDefault().getOffset(System.currentTimeMillis()) / 60000
+        val sign = if (offsetMinutes < 0) "-" else "+"
+        val absolute = kotlin.math.abs(offsetMinutes)
+        val params = JSONObject().apply {
+          put("device_serial", deviceSerial)
+          put("language", java.util.Locale.getDefault().toLanguageTag())
+          put("timezone_offset", String.format("%s%02d:%02d", sign, absolute / 60, absolute % 60))
+          put("device_profile", deviceProfile())
+        }
+
+        val parsed = parseJsonResponse(nativeSignInCookies(params.toString()))
+        if (parsed["success"] != true) throw Exception(parsed["error"]?.toString() ?: "unknown error")
+
+        @Suppress("UNCHECKED_CAST")
+        val cookies = parsed["data"] as? Map<String, Any?> ?: throw Exception("no cookies returned")
+        val amazonDomain = when (localeCode.lowercase()) {
+          "uk" -> "amazon.co.uk"
+          "de" -> "amazon.de"
+          "fr" -> "amazon.fr"
+          "ca" -> "amazon.ca"
+          "au" -> "amazon.com.au"
+          "it" -> "amazon.it"
+          "es" -> "amazon.es"
+          "in" -> "amazon.in"
+          "jp" -> "amazon.co.jp"
+          else -> "amazon.com"
+        }
+
+        val manager = android.webkit.CookieManager.getInstance()
+        manager.setAcceptCookie(true)
+        val base = "https://www.$amazonDomain"
+        // frc and map-md are scoped to /ap, sid to the whole site — as the app sets them.
+        manager.setCookie("$base/ap", "frc=${cookies["frc"]}; Path=/ap; Domain=.$amazonDomain")
+        manager.setCookie("$base/ap", "map-md=${cookies["map_md"]}; Path=/ap; Domain=.$amazonDomain")
+        manager.setCookie(base, "sid=${cookies["sid"]}; Path=/; Domain=.$amazonDomain")
+        manager.flush()
+
+        android.util.Log.d("ExpoRustBridge", "Seeded sign-in cookies for .$amazonDomain")
+        mapOf("success" to true)
+      } catch (e: Exception) {
+        android.util.Log.e("ExpoRustBridge", "Failed to seed sign-in cookies", e)
+        mapOf("success" to false, "error" to (e.message ?: "Failed to seed sign-in cookies"))
+      }
+    }
+
     AsyncFunction("exchangeAuthCode") { localeCode: String, authCode: String, deviceSerial: String, pkceVerifier: String ->
       try {
         val params = JSONObject().apply {
@@ -2644,6 +2700,7 @@ class ExpoRustBridgeModule : Module() {
     @JvmStatic external fun nativeGenerateOAuthUrl(paramsJson: String): String
     @JvmStatic external fun nativeParseOAuthCallback(paramsJson: String): String
     @JvmStatic external fun nativeExchangeAuthCode(paramsJson: String): String
+    @JvmStatic external fun nativeSignInCookies(paramsJson: String): String
     @JvmStatic external fun nativeRefreshAccessToken(paramsJson: String): String
     @JvmStatic external fun nativeGetActivationBytes(paramsJson: String): String
     @JvmStatic external fun nativeInitDatabase(paramsJson: String): String

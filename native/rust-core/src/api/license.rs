@@ -608,32 +608,9 @@ impl AudibleClient {
         // Audible reports refusals *inside* a 200 response, so the status has to be read
         // before the typed parse. Deserializing straight away turns "your download was
         // denied" into "missing field `content_url`", which is unactionable for a user.
-        // Reference: AudibleApi/Api.Download.cs:290-317 - GetDownloadLicenseAsync
-        if let Some(message) = license_json.get("message").and_then(|m| m.as_str()) {
-            // A refusal can carry both a message and structured denial reasons; the
-            // reasons say *why* (notably CustomerThrottled, which is temporary), so
-            // prefer them and fall back to the bare message.
-            let denial = Self::license_denied_error(license_json);
-            if let LibationError::LicenseDenied { reason, throttled } = denial {
-                if reason != "no reason given" {
-                    return Err(LibationError::LicenseDenied { reason, throttled });
-                }
-            }
-            let status = license_json
-                .get("status_code")
-                .and_then(|s| s.as_str())
-                .unwrap_or("none");
-            return Err(LibationError::ApiRequestFailed {
-                message: format!(
-                    "Audible rejected the license request: {message} \
-                     [status={status}, fields={}]",
-                    Self::json_keys(license_json)
-                ),
-                status_code: None,
-                endpoint: Some(endpoint),
-            });
-        }
-
+        // Read status_code FIRST: a *granted* licence also carries a `message`
+        // ("Ownership: User has Purchase rights"), so a message alone must not be read as
+        // a refusal. Reference: AudibleApi/Api.Download.cs:290-317 - GetDownloadLicenseAsync
         match license_json.get("status_code").and_then(|s| s.as_str()) {
             Some(status) if status.eq_ignore_ascii_case("granted") => {}
             Some(status) if status.eq_ignore_ascii_case("denied") => {
@@ -646,8 +623,25 @@ impl AudibleClient {
                 });
             }
             None => {
-                // No status at all: report the shape rather than the contents, which
-                // carry personally identifying fields.
+                // No status at all. A bare `message` here is a refusal Audible did not
+                // tag with a status (older shape); otherwise report the fields.
+                if let Some(message) = license_json.get("message").and_then(|m| m.as_str()) {
+                    let denial = Self::license_denied_error(license_json);
+                    if let LibationError::LicenseDenied { reason, throttled } = denial {
+                        if reason != "no reason given" {
+                            return Err(LibationError::LicenseDenied { reason, throttled });
+                        }
+                    }
+                    return Err(LibationError::ApiRequestFailed {
+                        message: format!(
+                            "Audible rejected the license request: {} [fields={}]",
+                            Self::redact_customer_id(message),
+                            Self::json_keys(license_json)
+                        ),
+                        status_code: None,
+                        endpoint: Some(endpoint),
+                    });
+                }
                 let keys = Self::json_keys(license_json);
                 return Err(LibationError::InvalidApiResponse {
                     message: format!(

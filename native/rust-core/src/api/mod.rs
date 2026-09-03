@@ -36,6 +36,7 @@ pub mod license;
 pub mod registration;
 pub mod customer;
 pub mod signing;
+pub mod signin_cookies;
 
 // Re-export commonly used types
 pub use auth::{Account, Identity};

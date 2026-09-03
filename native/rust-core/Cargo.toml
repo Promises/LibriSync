@@ -45,7 +45,14 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Crypto (for DRM)
 aes = "0.8"
-cbc = "0.1"
+# "alloc" provides encrypt_padded_vec_mut / decrypt_padded_vec_mut.
+cbc = { version = "0.1", features = ["alloc"] }
+# Amazon's `frc` sign-in cookie: gzip -> AES-CBC -> HMAC-SHA256, keys derived from the
+# device serial with PBKDF2-SHA1. See api/signin_cookies.rs.
+hmac = "0.12"
+sha1 = "0.10"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+flate2 = "1"
 # "oid" is needed for RSA PKCS#1 v1.5 signing (Pkcs1v15Sign::new::<Sha256>), which the
 # ADP request signing in api/signing.rs uses.
 sha2 = { version = "0.10", features = ["oid"] }

@@ -4,6 +4,14 @@ All notable user-facing changes to LibriSync. Entries are phrased for the
 Google Play "What's new" field. Earlier entries were reconstructed from git
 history (no changelog was kept before v0.0.24), so wording is approximate.
 
+## v0.0.30
+
+- Audible downloads are working normally again. The block Audible put on third-party
+  apps on 3 September no longer affects LibriSync — books download through the standard
+  path, and it keeps working after Audible retires the temporary fallback route.
+- If your Audible downloads have been failing, sign out of your Audible account and sign
+  in again — that is what applies the fix.
+
 ## v0.0.29
 
 - Audible downloads work again. Audible began refusing download licences to every

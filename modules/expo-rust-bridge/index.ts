@@ -438,6 +438,15 @@ export interface ExpoRustBridgeModule {
    * @param accountJson - The full account; the request is signed with its device key
    * @returns 8-character hex activation bytes
    */
+  /**
+   * Seed the sign-in cookies (frc, map-md, sid) Amazon expects from the Audible app,
+   * before the login WebView loads.
+   */
+  prepareSignIn(
+    localeCode: string,
+    deviceSerial: string
+  ): Promise<RustResponse<{}>>;
+
   getActivationBytes(
     localeCode: string,
     accountJson: string
@@ -1351,6 +1360,24 @@ async function refreshToken(account: Account): Promise<TokenResponse> {
  * // Store in account.decrypt_key
  * ```
  */
+/**
+ * Seed Amazon's sign-in cookies before opening the login page.
+ *
+ * The official app sets `frc`, `map-md` and `sid` on the sign-in domain; we never have.
+ * Since Audible began refusing download licences to third-party registrations while
+ * serving its own app, the registration handshake is the only remaining difference, so
+ * the login itself has to look like the app's.
+ *
+ * Best-effort: a failure here must not block signing in.
+ */
+async function prepareSignIn(localeCode: string, deviceSerial: string): Promise<void> {
+  try {
+    await NativeModule!.prepareSignIn(localeCode, deviceSerial);
+  } catch (error) {
+    console.warn('[prepareSignIn] Could not seed sign-in cookies:', error);
+  }
+}
+
 async function getActivationBytes(account: Account): Promise<string> {
   if (!account.identity?.access_token) {
     throw new RustBridgeError('No access token available');
@@ -2687,6 +2714,7 @@ export {
   completeOAuthFlow,
   refreshToken,
   getActivationBytes,
+  prepareSignIn,
   initializeDatabase,
   syncLibrary,
   syncLibraryPage,

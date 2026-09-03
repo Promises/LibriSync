@@ -72,6 +72,9 @@ export default function LoginScreen({ onLoginSuccess, onCancel, title = 'Log in 
         localeCode: region.code,
       };
 
+      // (No sign-in cookie seeding: the iOS device-type flow does not use the
+      // frc/map-md cookies, and the proven-working reference client sends none.)
+
       setOauthUrl(flowData.url);
       setStatus('Please log in with your Audible account');
       console.log('[LoginScreen] WebView should now load OAuth URL');

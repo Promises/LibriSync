@@ -921,12 +921,16 @@ pub struct OAuthConfig {
 impl Default for OAuthConfig {
     fn default() -> Self {
         Self {
-            client_id_format: "device:{}#A10KISP2GWF0E4",
+            client_id_format: "device:{}#A2CZJZGLK2JJVM",
             redirect_uri: "https://www.amazon.com/ap/maplanding",
             response_type: "code",
             scope: "device_auth_access",
             code_challenge_method: "S256",
-            device_type: "A10KISP2GWF0E4", // AudibleApi uses Android device type
+            // iOS/iPhone device type. Audible throttles licence requests from the Android
+            // device type (A10KISP2GWF0E4) but not the iPhone one (A2CZJZGLK2JJVM);
+            // verified 2026-09-03 on an account denied under Android and granted under iOS
+            // with the same request. This is why mkb79's audible-cli (iOS) still works.
+            device_type: "A2CZJZGLK2JJVM",
         }
     }
 }
@@ -1095,6 +1099,8 @@ pub fn generate_authorization_url(
             "openid.return_to",
             &format!("https://www.{}/ap/maplanding", amazon_domain),
         );
+        // iOS sign-in profile, matching the iPhone device type we register as. This is
+        // the flow mkb79's audible-cli uses and it is not throttled.
         query.append_pair(
             "openid.assoc_handle",
             &format!("amzn_audible_ios_{}", locale.country_code),
@@ -1439,35 +1445,31 @@ pub async fn exchange_authorization_code_as(
             // resolved Amazon domain so the cookie domain is always valid.
             "domain": format!(".{}", amazon_domain)
         },
+        // The iPhone registration shape (device_type A2CZJZGLK2JJVM, domain "Device").
+        // This is the whole fix: Audible throttles licence requests from the Android
+        // device type but grants them to this one. It also sends no `device_metadata`
+        // block, so we don't either. `profile` is unused here now but is still carried for
+        // the register signature and potential future use.
+        // Reference: mkb79/audible register.py (register()).
         "registration_data": {
-            "domain": "DeviceLegacy",
-            "device_type": "A10KISP2GWF0E4",
+            "domain": "Device",
+            "app_version": "3.56.2",
             "device_serial": device_serial,
-            "app_name": "com.audible.application",
-            "app_version": profile.app_version,
-            "device_name": format!("%FIRST_NAME%%FIRST_NAME_POSSESSIVE_STRING%%DUPE_STRATEGY_1ST%Android"),
-            "os_version": profile.os_version,
-            "software_version": profile.software_version,
-            "device_model": profile.model
-        },
-        "device_metadata": {
-            "device_os_family": "android",
-            "device_type": "A10KISP2GWF0E4",
-            "device_serial": device_serial,
-            "manufacturer": profile.manufacturer,
-            "model": profile.model,
-            // The OS API level, not the app version. We previously sent the API level for
-            // `product` too, duplicating it — upstream had the same bug and fixed it.
-            "os_version": profile.os_version_number,
-            "product": profile.product
+            "device_type": "A2CZJZGLK2JJVM",
+            "device_name": format!(
+                "%FIRST_NAME%%FIRST_NAME_POSSESSIVE_STRING%%DUPE_STRATEGY_1ST%Audible for iPhone"
+            ),
+            "os_version": "15.0.0",
+            "software_version": "35602678",
+            "device_model": "iPhone",
+            "app_name": "Audible"
         },
         "auth_data": {
-            "use_global_authentication": "true",
+            "client_id": &serial_type_hex,
             "authorization_code": authorization_code,
             "code_verifier": &pkce.verifier,
             "code_algorithm": "SHA-256",
-            "client_domain": "DeviceLegacy",
-            "client_id": &serial_type_hex
+            "client_domain": "DeviceLegacy"
         },
         "requested_extensions": ["device_info", "customer_info"]
     });
@@ -2263,10 +2265,11 @@ mod tests {
         assert!(url.contains("openid.ns=http"));
         // The colon and # are URL encoded in the URL
         assert!(url.contains("device%3A") || url.contains("device:"));
-        // Device type is hex-encoded in client_id, so look for hex(#A10KISP2GWF0E4)
+        // Device type is hex-encoded in client_id, so look for hex(#A2CZJZGLK2JJVM).
+        // hex("#A2CZ") = 23413243 5a...
         assert!(
-            url.contains("23413130") || url.contains("A10KISP2GWF0E4"),
-            "URL should contain device type in hex or plain form"
+            url.contains("2341324") || url.contains("A2CZJZGLK2JJVM"),
+            "URL should contain the iPhone device type in hex or plain form"
         );
         assert!(url.contains(&pkce.challenge));
         // State parameter intentionally not included (matches Libation)
@@ -2473,8 +2476,8 @@ mod tests {
         let config = OAuthConfig::default();
 
         assert_eq!(
-            config.device_type, "A10KISP2GWF0E4",
-            "Device type must match AudibleApi Android"
+            config.device_type, "A2CZJZGLK2JJVM",
+            "Device type must be the iPhone type — Audible throttles the Android type"
         );
         assert_eq!(config.response_type, "code");
         assert_eq!(config.scope, "device_auth_access");

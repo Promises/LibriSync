@@ -152,9 +152,22 @@ impl Provider for AudibleProvider {
                     LibationError::InvalidInput("No decryption keys in Audible license".into())
                 })?;
             let kd = &keys[0];
+            // 4 bytes = activation bytes from the legacy AAX fallback (no IV); 16 = AAXC.
+            if kd.key_part_1.len() == 4 {
+                return Ok(DownloadPlan {
+                    parts: vec![DownloadPart::Aax {
+                        url: license.download_url,
+                        headers: Default::default(),
+                        activation_bytes: hex::encode(&kd.key_part_1),
+                        filename: format!("{item_ref}.aax"),
+                    }],
+                    embed_metadata: true,
+                    chapters,
+                });
+            }
             if kd.key_part_1.len() != 16 {
                 return Err(LibationError::InvalidInput(
-                    "Unsupported Audible key format (AAXC only)".into(),
+                    "Unsupported Audible key format (expected AAXC key or activation bytes)".into(),
                 ));
             }
             let iv = kd.key_part_2.as_ref().ok_or_else(|| {

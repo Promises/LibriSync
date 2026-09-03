@@ -634,12 +634,12 @@ export interface ExpoRustBridgeModule {
    * Get customer information from Audible API.
    *
    * @param localeCode - The Audible locale
-   * @param accessToken - Valid access token
+   * @param accountJson - The full account; the request is signed with its device key
    * @returns Customer name and email (if available)
    */
   getCustomerInformation(
     localeCode: string,
-    accessToken: string
+    accountJson: string
   ): Promise<RustResponse<{ name?: string; given_name?: string; email?: string }>>;
 
   /**
@@ -1740,14 +1740,14 @@ function copyTextToClipboard(text: string): { copied: boolean } {
  * Get customer information from Audible API
  *
  * @param localeCode - Audible locale
- * @param accessToken - Valid access token
+ * @param account - The full account; the request is signed with its stored device key
  * @returns Customer name and email
  */
 async function getCustomerInformation(
   localeCode: string,
-  accessToken: string
+  account: Account
 ): Promise<{ name?: string; given_name?: string; email?: string }> {
-  const response = await NativeModule!.getCustomerInformation(localeCode, accessToken);
+  const response = await NativeModule!.getCustomerInformation(localeCode, JSON.stringify(account));
   return unwrapResult(response);
 }
 

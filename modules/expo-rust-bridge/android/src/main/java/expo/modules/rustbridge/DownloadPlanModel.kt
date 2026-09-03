@@ -22,6 +22,18 @@ sealed class DownloadPart {
         val filename: String,
     ) : DownloadPart()
 
+    /**
+     * Legacy AAX: decrypted with per-account activation bytes (FFmpeg
+     * `-activation_bytes`) rather than a per-book key/iv pair. Produced by the CDE
+     * fallback when Audible refuses a download licence.
+     */
+    data class AaxPart(
+        override val url: String,
+        override val headers: Map<String, String>,
+        val activationBytes: String,
+        val filename: String,
+    ) : DownloadPart()
+
     data class AaxcPart(
         override val url: String,
         override val headers: Map<String, String>,
@@ -68,6 +80,12 @@ data class DownloadPlan(
                         DownloadPart.AaxcPart(
                             p.getString("url"), headers,
                             p.getString("key"), p.getString("iv"), p.getString("filename")
+                        )
+                    )
+                    "aax" -> parts.add(
+                        DownloadPart.AaxPart(
+                            p.getString("url"), headers,
+                            p.getString("activation_bytes"), p.getString("filename")
                         )
                     )
                     "zip" -> parts.add(DownloadPart.ZipPart(p.getString("url"), headers))

@@ -78,6 +78,9 @@ class ExpoRustBridgeModule : Module() {
           put("authorization_code", authCode)
           put("device_serial", deviceSerial)
           put("pkce_verifier", pkceVerifier)
+          // Register as the handset we are actually running on. Desktop clients have to
+          // invent a device here and all of them invent an emulator; we do not have to.
+          put("device_profile", deviceProfile())
         }
         val result = nativeExchangeAuthCode(params.toString())
         parseJsonResponse(result)
@@ -530,10 +533,12 @@ class ExpoRustBridgeModule : Module() {
      * @param accessToken Valid access token
      * @return Map with success flag and customer info (name, email) or error message
      */
-    AsyncFunction("getCustomerInformation") { localeCode: String, accessToken: String, promise: Promise ->
+    // Takes the whole account: this endpoint is ADP-signed with the device key from
+    // registration, so an access token alone cannot authenticate it.
+    AsyncFunction("getCustomerInformation") { localeCode: String, accountJson: String, promise: Promise ->
       val params = JSONObject().apply {
         put("locale_code", localeCode)
-        put("access_token", accessToken)
+        put("account_json", accountJson)
       }
       val response = parseJsonResponse(nativeGetCustomerInformation(params.toString()))
       promise.resolve(response)
@@ -2602,6 +2607,25 @@ class ExpoRustBridgeModule : Module() {
   // ============================================================================
   // COMPANION OBJECT
   // ============================================================================
+
+  /**
+   * Real values from [android.os.Build] for device registration.
+   *
+   * Every third-party Audible client registers as an Android emulator with a stale app
+   * build; since 2026-09-02 they are all being denied download licences while the
+   * official app is served. Reporting the truth costs nothing and removes us from that
+   * shared fingerprint.
+   */
+  private fun deviceProfile(): JSONObject = JSONObject().apply {
+    put("manufacturer", android.os.Build.MANUFACTURER)
+    put("model", android.os.Build.MODEL)
+    put("product", android.os.Build.PRODUCT)
+    put("os_version", android.os.Build.FINGERPRINT)
+    put("os_version_number", android.os.Build.VERSION.SDK_INT.toString())
+    // Audible app version we mirror. Bump alongside the client identity in client.rs.
+    put("app_version", "2090263407")
+    put("software_version", "130050002")
+  }
 
   companion object {
     init {

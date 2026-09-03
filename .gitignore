@@ -85,6 +85,10 @@ tests/fixtures/test_account.json
 .env.test
 *.aax
 *.aaxc
+# Written by tests/helpers/mod.rs after an interactive registration: access token,
+# refresh token, RSA device key, ADP token, cookies. Never commit it.
+/native/rust-core/test_credentials.json
+
 /native/rust-core/test_fixtures/*
 !/native/rust-core/test_fixtures/
 !/native/rust-core/test_fixtures/registration_response.json

@@ -24,6 +24,11 @@ class AutoDownloadWorker(
 ) {
     companion object {
         private const val TAG = "AutoDownloadWorker"
+        /** Books enqueued per run. The rest wait for the next sync rather than asking
+         *  Audible for a hundred licences in a row. */
+        private const val MAX_BOOKS_PER_RUN = 10
+        /** Gap between licence requests within a run. */
+        private const val ENQUEUE_SPACING_MS = 3_000L
         private const val PREFS_NAME = "auto_download_prefs"
         private const val PREF_ENABLED = "enabled"
         private const val PREF_WIFI_ONLY = "wifi_only"
@@ -130,15 +135,31 @@ class AutoDownloadWorker(
             Log.d(TAG, "Found ${booksToDownload.size} books to auto-download")
             manager.emitEvent(TaskEvent.AutoDownloadStarted(task.id, booksToDownload.size))
 
-            // Enqueue downloads
+            // Enqueue downloads.
+            //
+            // Paced and capped on purpose. Every book here costs at least one Audible
+            // licence request, and Audible throttles an account that asks too often
+            // (rejectionReason "CustomerThrottled") — an unpaced loop over a 278-book
+            // library is exactly how that happens. A refusal also stops the run: the
+            // rest of the queue would only ask for licences Audible is already denying.
             var downloadedCount = 0
-            for (book in booksToDownload) {
+            for (book in booksToDownload.take(MAX_BOOKS_PER_RUN)) {
                 try {
+                    if (downloadedCount > 0) Thread.sleep(ENQUEUE_SPACING_MS)
                     enqueueDownload(book)
                     downloadedCount++
                 } catch (e: Exception) {
+                    val message = e.message ?: ""
+                    if (message.contains("throttl", ignoreCase = true)) {
+                        Log.w(TAG, "Audible is throttling licences; stopping this auto-download run")
+                        break
+                    }
                     Log.e(TAG, "Failed to enqueue download for ${book["asin"]}", e)
                 }
+            }
+
+            if (booksToDownload.size > MAX_BOOKS_PER_RUN) {
+                Log.d(TAG, "Capped at $MAX_BOOKS_PER_RUN of ${booksToDownload.size} books; the rest follow on the next run")
             }
 
             // Mark as completed

@@ -107,6 +107,15 @@ pub enum DownloadPart {
         iv: String,
         filename: String,
     },
+    /// Legacy AAX — download, then FFmpeg-decrypt with per-account `activation_bytes`
+    /// (no IV). Produced by the CDE fallback when Audible refuses a download licence.
+    Aax {
+        url: String,
+        #[serde(default)]
+        headers: Headers,
+        activation_bytes: String,
+        filename: String,
+    },
     /// A ZIP archive of audio files — download and extract into the book folder
     /// (LibriVox zip, Libro.fm manifest parts).
     Zip {

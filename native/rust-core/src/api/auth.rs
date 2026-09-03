@@ -1322,11 +1322,75 @@ pub struct DeviceInfo {
 /// # Note
 /// This function makes an HTTP request to Audible's token endpoint.
 /// The client_id must match the one used in authorization URL.
+/// The device this client claims to be when registering with Amazon.
+///
+/// Both LibriSync and Libation historically registered as an Android **emulator** with a
+/// year-old app build — `sdk_gphone64_x86_64` / `emu64x` / `userdebug` / `dev-keys`, app
+/// version 25.38.26. The official Audible app on a real handset reports its actual model,
+/// build fingerprint and current app version. Since 2026-09-02 every third-party client
+/// (Libation, OpenAudible, this one) has been denied download licences while the official
+/// app is served, so an emulator fingerprint plus a stale app version is at minimum a
+/// distinguishing trait of the failing set.
+///
+/// LibriSync runs on a real Android device, so it can report the truth. Values here are
+/// the fallback for when the platform does not supply them.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DeviceProfile {
+    /// `Build.MANUFACTURER`, e.g. "Google".
+    pub manufacturer: String,
+    /// `Build.MODEL`, e.g. "Pixel 6".
+    pub model: String,
+    /// `Build.PRODUCT`, e.g. "oriole".
+    pub product: String,
+    /// `Build.FINGERPRINT` — the full OS version string Amazon records.
+    pub os_version: String,
+    /// `Build.VERSION.SDK_INT` as a string, e.g. "36".
+    pub os_version_number: String,
+    /// Audible app version code, e.g. "2090263407".
+    pub app_version: String,
+    /// Audible app software version, e.g. "130050002".
+    pub software_version: String,
+}
+
+impl Default for DeviceProfile {
+    fn default() -> Self {
+        // A current, real handset profile. Prefer values passed in from the platform.
+        Self {
+            manufacturer: "Google".to_string(),
+            model: "Pixel 6".to_string(),
+            product: "oriole".to_string(),
+            os_version: "google/oriole/oriole:16/BP4A.251205.006/13750045:user/release-keys"
+                .to_string(),
+            os_version_number: "36".to_string(),
+            app_version: "2090263407".to_string(),
+            software_version: "130050002".to_string(),
+        }
+    }
+}
+
 pub async fn exchange_authorization_code(
     locale: &Locale,
     authorization_code: &str,
     device_serial: &str,
     pkce: &PkceChallenge,
+) -> Result<RegistrationResponse> {
+    exchange_authorization_code_as(
+        locale,
+        authorization_code,
+        device_serial,
+        pkce,
+        &DeviceProfile::default(),
+    )
+    .await
+}
+
+/// As [`exchange_authorization_code`], but registering as a specific device.
+pub async fn exchange_authorization_code_as(
+    locale: &Locale,
+    authorization_code: &str,
+    device_serial: &str,
+    pkce: &PkceChallenge,
+    profile: &DeviceProfile,
 ) -> Result<RegistrationResponse> {
     let config = OAuthConfig::default();
 
@@ -1380,20 +1444,22 @@ pub async fn exchange_authorization_code(
             "device_type": "A10KISP2GWF0E4",
             "device_serial": device_serial,
             "app_name": "com.audible.application",
-            "app_version": "177102",
+            "app_version": profile.app_version,
             "device_name": format!("%FIRST_NAME%%FIRST_NAME_POSSESSIVE_STRING%%DUPE_STRATEGY_1ST%Android"),
-            "os_version": "Android/sdk_phone64_x86_64/emu64x:14/UE1A.230829.036.A1/11228894:userdebug/test-keys",
-            "software_version": "130050002",
-            "device_model": "Android SDK built for x86_64"
+            "os_version": profile.os_version,
+            "software_version": profile.software_version,
+            "device_model": profile.model
         },
         "device_metadata": {
             "device_os_family": "android",
             "device_type": "A10KISP2GWF0E4",
             "device_serial": device_serial,
-            "manufacturer": "unknown",
-            "model": "Android SDK built for x86_64",
-            "os_version": "34",
-            "product": "34"
+            "manufacturer": profile.manufacturer,
+            "model": profile.model,
+            // The OS API level, not the app version. We previously sent the API level for
+            // `product` too, duplicating it — upstream had the same bug and fixed it.
+            "os_version": profile.os_version_number,
+            "product": profile.product
         },
         "auth_data": {
             "use_global_authentication": "true",

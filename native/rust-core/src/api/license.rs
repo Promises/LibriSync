@@ -199,6 +199,11 @@ impl LicenseRequest {
     pub fn download(quality: DownloadQuality, drm_type: DrmType) -> Self {
         Self {
             supported_media_features: SupportedMediaFeatures {
+                // Deliberately NOT offering Widevine or xHE-AAC, unlike the official app.
+                // The metadata endpoint reports `mp4a.40.2` for these titles, but offering
+                // xHE makes Audible answer in xHE/Widevine terms (`M4A_XHE`, a DASH
+                // manifest instead of an offline URL) — a shape this client cannot consume.
+                // Ask only for what we can actually decrypt.
                 drm_types: vec![drm_type, DrmType::Mpeg],
                 codecs: vec![request_codecs::AAC_LC.to_string()],
                 chapter_titles_type: ChapterTitlesType::Tree,
@@ -593,7 +598,9 @@ impl AudibleClient {
     ) -> Result<ContentLicense> {
         let endpoint = format!("/1.0/content/{}/licenserequest", asin);
 
-        let response: serde_json::Value = self.post(&endpoint, request).await?;
+        // post_once, not post: a licence request must never be retried automatically.
+        // Audible counts every one of them, and retrying is how an account gets throttled.
+        let response: serde_json::Value = self.post_once(&endpoint, request).await?;
 
         // The API may wrap in "content_license" or return directly
         let license_json = response.get("content_license").unwrap_or(&response);
@@ -662,6 +669,33 @@ impl AudibleClient {
         })
     }
 
+    /// Strip the customer id Audible embeds in denial messages, e.g.
+    /// "License not granted to customer [A2HF4ET2OTZN6C] for asin [B002VA9SWS]".
+    /// Upstream does the same before logging. Reference:
+    /// AudibleApi/ApiExceptions/ContentLicenseDeniedException.cs:11,33-37
+    fn redact_customer_id(message: &str) -> String {
+        let mut out = String::with_capacity(message.len());
+        let mut rest = message;
+        while let Some(open) = rest.find('[') {
+            let Some(close_rel) = rest[open..].find(']') else { break };
+            let close = open + close_rel;
+            let inner = &rest[open + 1..close];
+            let looks_like_customer_id = inner.len() >= 11
+                && inner.len() <= 21
+                && inner.starts_with('A')
+                && inner[1..].chars().all(|c| c.is_ascii_alphanumeric());
+            out.push_str(&rest[..open]);
+            out.push_str(if looks_like_customer_id {
+                "[##############]"
+            } else {
+                &rest[open..=close]
+            });
+            rest = &rest[close + 1..];
+        }
+        out.push_str(rest);
+        out
+    }
+
     /// Turn a denied license into an error carrying Audible's own reasons.
     /// Reference: AudibleApi/ApiExceptions/ContentLicenseDeniedException.cs
     fn license_denied_error(license_json: &serde_json::Value) -> LibationError {
@@ -699,7 +733,9 @@ impl AudibleClient {
                         "{}: {}{}",
                         validation.unwrap_or("Unknown"),
                         rejection.unwrap_or("denied"),
-                        message.map(|m| format!(" ({m})")).unwrap_or_default()
+                        message
+                            .map(|m| format!(" ({})", Self::redact_customer_id(m)))
+                            .unwrap_or_default()
                     )),
                 }
             })
@@ -722,6 +758,167 @@ impl AudibleClient {
             .as_object()
             .map(|obj| obj.keys().cloned().collect::<Vec<_>>().join(","))
             .unwrap_or_else(|| "<not an object>".to_string())
+    }
+
+    /// A [`DownloadLicense`] for the legacy AAX path: a CDS download URL plus activation
+    /// bytes, in place of an AAXC key/iv pair.
+    ///
+    /// Activation bytes are 4 bytes (8 hex characters) and are per-account, not per-book,
+    /// so FFmpeg takes `-activation_bytes` here rather than `-audible_key`/`-audible_iv`.
+    pub async fn aax_download_license(&self, asin: &str) -> Result<DownloadLicense> {
+        let download_url = self.aax_workaround_url(asin).await?;
+
+        let (locale, adp_token, private_key) = {
+            let account_lock = self.account();
+            let account = account_lock.lock().await;
+            let identity = account.identity.as_ref().ok_or_else(|| {
+                LibationError::InvalidState("No identity for AAX fallback".to_string())
+            })?;
+            (
+                identity.locale.clone(),
+                identity.adp_token.clone(),
+                identity.device_private_key.clone(),
+            )
+        };
+
+        let activation_bytes =
+            crate::api::auth::get_activation_bytes(&locale, &adp_token, &private_key).await?;
+
+        let key = hex::decode(&activation_bytes).map_err(|e| LibationError::InvalidApiResponse {
+            message: format!("Activation bytes are not hex: {e}"),
+            response_body: None,
+        })?;
+
+        Ok(DownloadLicense {
+            drm_type: DrmType::Adrm,
+            content_metadata: self.get_content_metadata(asin).await.unwrap_or_default(),
+            // 4 bytes marks this as activation bytes; an AAXC key is 16.
+            decryption_keys: Some(vec![KeyData { key_part_1: key, key_part_2: None }]),
+            download_url,
+        })
+    }
+
+    /// Codecs the legacy download service offers, best first.
+    /// Reference: AudibleApi/Api.Download.cs:366 (CodecPreferenceOrder).
+    const AAX_CODEC_PREFERENCE: [&'static str; 5] = [
+        "LC_128_44100_stereo",
+        "LC_64_44100_stereo",
+        "LC_64_22050_stereo",
+        "LC_32_22050_stereo",
+        "AAX",
+    ];
+
+    /// The "AAX workaround": ask the legacy CDE service for a download URL instead of
+    /// asking `licenserequest` for a licence.
+    ///
+    /// This is a completely separate service from the licence endpoint, authenticated by
+    /// ADP signature rather than an access token, and it still serves accounts whose
+    /// licence requests are refused with `CustomerThrottled` (verified 2026-09-03: a
+    /// throttled account fetched an 806 MB `audio/vnd.audible.aax` asset seconds after
+    /// being denied a licence for the same ASIN). The file is classic AAX, decrypted with
+    /// activation bytes rather than an AAXC key/iv pair.
+    ///
+    /// Reference: AudibleApi/Api.Download.cs:334-368 (DownloadAaxWorkaroundAsync).
+    pub async fn aax_workaround_url(&self, asin: &str) -> Result<String> {
+        // Which encodings does this title actually have?
+        let item: serde_json::Value = self
+            .get_with_query(
+                &format!("/1.0/library/{asin}"),
+                &[("response_groups", "product_attrs,relationships")],
+            )
+            .await?;
+
+        let codecs: Vec<String> = item
+            .get("item")
+            .unwrap_or(&item)
+            .get("available_codecs")
+            .and_then(|c| c.as_array())
+            .map(|list| {
+                list.iter()
+                    .filter_map(|c| c.get("enhanced_codec").and_then(|e| e.as_str()))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Order matters, so walk the preference list rather than intersecting.
+        let codec = Self::AAX_CODEC_PREFERENCE
+            .iter()
+            .find(|preferred| codecs.iter().any(|c| c.eq_ignore_ascii_case(preferred)))
+            .map(|c| c.to_string())
+            .or_else(|| codecs.first().cloned())
+            .ok_or_else(|| LibationError::InvalidApiResponse {
+                message: format!("{asin} reports no available codecs; cannot fall back to AAX"),
+                response_body: None,
+            })?;
+
+        let path = format!(
+            "/FionaCDEServiceEngine/FSDownloadContent?type=AUDI&currentTransportMethod=WIFI&key={asin}&codec={codec}"
+        );
+
+        let (adp_token, private_key, store_domain) = {
+            let account_lock = self.account();
+            let account = account_lock.lock().await;
+            let identity = account.identity.as_ref().ok_or_else(|| {
+                LibationError::InvalidState("No identity for AAX workaround".to_string())
+            })?;
+            (
+                identity.adp_token.clone(),
+                identity.device_private_key.clone(),
+                identity.locale.domain.clone(),
+            )
+        };
+
+        let signature = crate::api::signing::sign_request(
+            "GET",
+            &path,
+            "",
+            &adp_token,
+            &private_key,
+            chrono::Utc::now(),
+        )?;
+
+        // The answer is a 302; following it would consume the signed URL here rather
+        // than handing it to the downloader.
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| LibationError::InternalError(format!("HTTP client: {e}")))?;
+
+        let mut request = client.get(format!("https://cde-ta-g7g.amazon.com{path}"));
+        for (name, value) in signature.headers() {
+            request = request.header(name, value);
+        }
+
+        let response = request.send().await.map_err(|e| LibationError::NetworkError {
+            message: format!("AAX workaround request failed: {e}"),
+            is_transient: e.is_timeout() || e.is_connect(),
+        })?;
+
+        if response.status() != reqwest::StatusCode::FOUND {
+            return Err(LibationError::ApiRequestFailed {
+                message: format!(
+                    "AAX workaround expected a 302 redirect, got HTTP {}",
+                    response.status()
+                ),
+                status_code: Some(response.status().as_u16()),
+                endpoint: Some("/FionaCDEServiceEngine/FSDownloadContent".to_string()),
+            });
+        }
+
+        let url = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|l| l.to_str().ok())
+            .ok_or_else(|| LibationError::InvalidApiResponse {
+                message: "AAX workaround redirect carried no Location".to_string(),
+                response_body: None,
+            })?;
+
+        // The content belongs to the store it was bought from, not to whichever
+        // marketplace this identity happens to be registered with. `Locale::domain` is
+        // the full store host ("audible.co.uk"), so swap the whole host.
+        Ok(url.replace("cds.audible.com", &format!("cds.{store_domain}")))
     }
 
     /// Build download license with decryption keys
@@ -772,6 +969,23 @@ impl AudibleClient {
             {
                 let mpeg_request = Self::download_license_request(quality, DrmType::Mpeg);
                 self.get_download_license(asin, &mpeg_request).await?
+            }
+            // Audible refused to licence the download. Since 2026-09-02 it refuses every
+            // third-party client with `CustomerThrottled` while serving the official app,
+            // and the discriminator is the device registration that issued the token —
+            // nothing in the request can change it. The legacy AAX service is unaffected,
+            // so take that route rather than failing the download.
+            //
+            // Upstream has this fallback but only reaches it when `licenserequest`
+            // *throws*; a refusal arrives as HTTP 200 with `status_code: "Denied"`, so
+            // its escape hatch never fires for the current outage.
+            Err(error @ LibationError::LicenseDenied { .. }) => {
+                eprintln!("Licence denied ({error}); falling back to the AAX service");
+                return self.aax_download_license(asin).await.map_err(|fallback| {
+                    // Report the original refusal: it is the actionable one.
+                    eprintln!("AAX fallback also failed: {fallback}");
+                    error
+                });
             }
             Err(error) => return Err(error),
         };
@@ -1060,6 +1274,22 @@ mod tests {
         let key_data = KeyData::from_base64(&key, Some(&iv)).unwrap();
         assert_eq!(key_data.key_part_1, b"testkey1234567890");
         assert_eq!(key_data.key_part_2, Some(b"testiv1234567890".to_vec()));
+    }
+
+    #[test]
+    fn denial_messages_do_not_leak_the_customer_id() {
+        let raw = "License not granted to customer [A2HF4ET2OTZN6C] for asin [B002VA9SWS]";
+        let clean = AudibleClient::redact_customer_id(raw);
+        assert!(!clean.contains("A2HF4ET2OTZN6C"), "customer id must not survive: {clean}");
+        // The ASIN is not personal and stays: it is what makes the error actionable.
+        assert!(clean.contains("[B002VA9SWS]"), "asin should be kept: {clean}");
+        assert!(clean.contains("[##############]"));
+
+        // Nothing bracketed and harmless should be mangled.
+        assert_eq!(AudibleClient::redact_customer_id("no brackets"), "no brackets");
+        assert_eq!(AudibleClient::redact_customer_id("[Client] denied"), "[Client] denied");
+        // An unclosed bracket must not eat the rest of the message.
+        assert_eq!(AudibleClient::redact_customer_id("open [ only"), "open [ only");
     }
 
     #[test]

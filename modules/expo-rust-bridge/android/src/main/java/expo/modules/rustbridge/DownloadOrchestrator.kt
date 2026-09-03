@@ -157,6 +157,14 @@ class DownloadOrchestrator(
                 aaxcKey = part.key
                 aaxcIv = part.iv
             }
+            is DownloadPart.AaxPart -> {
+                encryptedPath = File(audiobooksDir, part.filename).absolutePath
+                decryptedCachePath = File(audiobooksDir, "$asin.m4b").absolutePath
+                plainAudio = false
+                // Activation bytes ride in the key slot with an empty IV; see decrypt.
+                aaxcKey = part.activationBytes
+                aaxcIv = ""
+            }
             is DownloadPart.PlainPart -> {
                 encryptedPath = File(audiobooksDir, "$partPrefix${part.filename}").absolutePath
                 decryptedCachePath = encryptedPath
@@ -323,8 +331,15 @@ class DownloadOrchestrator(
             val isPlainAudio = fileType == "mp3"
             val aaxcKey = licenseData["aaxc_key"] as? String
             val aaxcIv = licenseData["aaxc_iv"] as? String
-            if (!isPlainAudio && (aaxcKey.isNullOrEmpty() || aaxcIv.isNullOrEmpty())) {
+            // Present only when Rust fell back to the legacy AAX service because Audible
+            // refused to license the download.
+            val activationBytes = (licenseData["activation_bytes"] as? String).orEmpty()
+            val isAax = fileType == "aax" && activationBytes.isNotEmpty()
+            if (!isPlainAudio && !isAax && (aaxcKey.isNullOrEmpty() || aaxcIv.isNullOrEmpty())) {
                 throw Exception("No AAXC key")
+            }
+            if (isAax) {
+                Log.w(TAG, "Licence refused for $asin; using the legacy AAX download instead")
             }
             @Suppress("UNCHECKED_CAST")
             val requestHeaders = licenseData["request_headers"] as? Map<String, String>
@@ -335,10 +350,12 @@ class DownloadOrchestrator(
             // Step 2: Build a single-part plan from the license and route through the
             // unified plan engine (AAXC -> decrypt; plain MP3 -> copy).
             val filename = "$asin.$fileExtension"
-            val part = if (isPlainAudio) {
-                DownloadPart.PlainPart(downloadUrl, requestHeaders, filename)
-            } else {
-                DownloadPart.AaxcPart(downloadUrl, requestHeaders, aaxcKey.orEmpty(), aaxcIv.orEmpty(), filename)
+            val part = when {
+                isPlainAudio -> DownloadPart.PlainPart(downloadUrl, requestHeaders, filename)
+                isAax -> DownloadPart.AaxPart(downloadUrl, requestHeaders, activationBytes, filename)
+                else -> DownloadPart.AaxcPart(
+                    downloadUrl, requestHeaders, aaxcKey.orEmpty(), aaxcIv.orEmpty(), filename
+                )
             }
             enqueuePlan(asin, title, DownloadPlan(listOf(part), embedMetadata = true), outputDirectory)
         } catch (e: Exception) {
@@ -879,10 +896,17 @@ class DownloadOrchestrator(
             // Decrypt using FFmpeg-Kit with metadata and cover art
             val command = buildList {
                 add("-y")
-                add("-audible_key")
-                add(aaxcKey)
-                add("-audible_iv")
-                add(aaxcIv)
+                // Legacy AAX carries per-account activation bytes and no IV; AAXC carries
+                // a per-book key/iv pair. An empty IV is what tells them apart.
+                if (aaxcIv.isBlank()) {
+                    add("-activation_bytes")
+                    add(aaxcKey)
+                } else {
+                    add("-audible_key")
+                    add(aaxcKey)
+                    add("-audible_iv")
+                    add(aaxcIv)
+                }
                 add("-i")
                 add(encryptedPath)
 

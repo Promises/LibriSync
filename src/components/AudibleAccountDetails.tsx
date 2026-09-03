@@ -61,14 +61,12 @@ export default function AudibleAccountDetails({ account, onAccountUpdated }: Pro
 
     try {
       setConnectionStatus('checking');
-      const accessToken = typeof account.identity.access_token === 'string'
-        ? account.identity.access_token
-        : account.identity.access_token.token;
       const localeCode = getLocaleCode(account);
 
       if (!localeCode) throw new Error('Missing Audible region');
 
-      const customerInfo = await getCustomerInformation(localeCode, accessToken);
+      // The whole account: the customer endpoint is signed with its device key.
+      const customerInfo = await getCustomerInformation(localeCode, account);
       setAccountName(customerInfo.name || account.identity.customer_info?.name || null);
       setConnectionStatus('connected');
     } catch (error: any) {

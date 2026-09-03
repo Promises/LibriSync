@@ -401,6 +401,11 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeExchan
             authorization_code: String,
             device_serial: String,
             pkce_verifier: String,
+            /// Real values from `android.os.Build`, so registration describes the handset
+            /// this is actually running on rather than an emulator. Optional: an older
+            /// caller that omits it falls back to the default profile.
+            #[serde(default)]
+            device_profile: Option<crate::api::auth::DeviceProfile>,
         }
 
         match (move || -> crate::Result<String> {
@@ -422,12 +427,14 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeExchan
                 method: "S256".to_string(),
             };
 
+            let profile = params.device_profile.unwrap_or_default();
             let result = RUNTIME.block_on(async {
-                crate::api::auth::exchange_authorization_code(
+                crate::api::auth::exchange_authorization_code_as(
                     &locale,
                     &params.authorization_code,
                     &params.device_serial,
                     &pkce,
+                    &profile,
                 )
                 .await
             })?;
@@ -2193,9 +2200,12 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetCus
 
     let response = catch_panic(move || {
         #[derive(Deserialize)]
+        // Takes the whole account: /1.0/customer/information is an ADP-signed request, so
+        // a synthesised identity with empty device credentials can never authenticate.
         struct Params {
             locale_code: String,
-            access_token: String,
+            #[serde(default)]
+            account_json: String,
         }
 
         match (move || -> crate::Result<String> {
@@ -2224,28 +2234,21 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetCus
                     }
                 };
 
-                // Create identity with access token
-                let access_token = crate::api::auth::AccessToken {
-                    token: params.access_token.clone(),
-                    expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
-                };
+                // The stored account carries the ADP token and device key the signature
+                // needs; anything less cannot reach this endpoint.
+                let mut account: crate::api::auth::Account =
+                    serde_json::from_str(&params.account_json).map_err(|e| {
+                        crate::LibationError::InvalidInput(format!("Invalid account JSON: {}", e))
+                    })?;
 
-                let identity = crate::api::auth::Identity::new(
-                    access_token,
-                    String::new(), // refresh_token - not needed for this call
-                    String::new(), // device_private_key - not needed
-                    String::new(), // adp_token - not needed
-                    locale.clone(),
-                );
-
-                // Create account with identity
-                let account = crate::api::auth::Account {
-                    account_id: "temp".to_string(),
-                    account_name: "temp".to_string(),
-                    library_scan: true,
-                    decrypt_key: String::new(),
-                    identity: Some(identity),
-                };
+                match account.identity.as_mut() {
+                    Some(identity) => identity.locale = locale.clone(),
+                    None => {
+                        return Err(crate::LibationError::InvalidInput(
+                            "Account is not signed in".to_string(),
+                        ))
+                    }
+                }
 
                 let client = crate::api::client::AudibleClient::new(account)?;
                 let customer_info = client.get_customer_information().await?;
@@ -2343,7 +2346,19 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeDownlo
                     .build_download_license(&params.asin, quality, false)
                     .await?;
 
-                let file_type = if license.drm_type.is_encrypted() {
+                // A 4-byte key is activation bytes, i.e. the legacy AAX fallback path
+                // (FFmpeg takes -activation_bytes); 16 bytes is an AAXC key + IV pair.
+                let activation_bytes = license
+                    .decryption_keys
+                    .as_ref()
+                    .and_then(|keys| keys.first())
+                    .filter(|k| k.key_part_1.len() == 4)
+                    .map(|k| k.key_part_1.iter().map(|b| format!("{:02x}", b)).collect::<String>())
+                    .unwrap_or_default();
+
+                let file_type = if !activation_bytes.is_empty() {
+                    "aax".to_string()
+                } else if license.drm_type.is_encrypted() {
                     "aaxc".to_string()
                 } else {
                     "mp3".to_string()
@@ -2360,7 +2375,10 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeDownlo
                     .to_ascii_lowercase();
 
                 // Extract AAXC keys. Plain podcast MP3 downloads have no voucher.
-                let (key_hex, iv_hex) = if let Some(ref keys) = license.decryption_keys {
+                let (key_hex, iv_hex) = if !activation_bytes.is_empty() {
+                    // AAX: the activation bytes stand in for both.
+                    (String::new(), String::new())
+                } else if let Some(ref keys) = license.decryption_keys {
                     if !keys.is_empty() && keys[0].key_part_1.len() == 16 {
                         let key = keys[0]
                             .key_part_1
@@ -2633,7 +2651,19 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetDow
                     .build_download_license(&params.asin, quality, false)
                     .await?;
 
-                let file_type = if license.drm_type.is_encrypted() {
+                // A 4-byte key is activation bytes, i.e. the legacy AAX fallback path
+                // (FFmpeg takes -activation_bytes); 16 bytes is an AAXC key + IV pair.
+                let activation_bytes = license
+                    .decryption_keys
+                    .as_ref()
+                    .and_then(|keys| keys.first())
+                    .filter(|k| k.key_part_1.len() == 4)
+                    .map(|k| k.key_part_1.iter().map(|b| format!("{:02x}", b)).collect::<String>())
+                    .unwrap_or_default();
+
+                let file_type = if !activation_bytes.is_empty() {
+                    "aax".to_string()
+                } else if license.drm_type.is_encrypted() {
                     "aaxc".to_string()
                 } else {
                     "mp3".to_string()
@@ -2650,7 +2680,10 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetDow
                     .to_ascii_lowercase();
 
                 // Extract AAXC keys. Plain podcast MP3 downloads have no voucher.
-                let (key_hex, iv_hex) = if let Some(ref keys) = license.decryption_keys {
+                let (key_hex, iv_hex) = if !activation_bytes.is_empty() {
+                    // AAX: the activation bytes stand in for both.
+                    (String::new(), String::new())
+                } else if let Some(ref keys) = license.decryption_keys {
                     if !keys.is_empty() && keys[0].key_part_1.len() == 16 {
                         let key = keys[0]
                             .key_part_1
@@ -2722,6 +2755,8 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetDow
                     file_extension: String,
                     aaxc_key: String,
                     aaxc_iv: String,
+                    /// Set only for the legacy AAX fallback; 8 hex chars, per account.
+                    activation_bytes: String,
                     request_headers: std::collections::HashMap<String, String>,
                 }
 
@@ -2733,6 +2768,7 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetDow
                     file_extension,
                     aaxc_key: key_hex,
                     aaxc_iv: iv_hex,
+                    activation_bytes,
                     request_headers,
                 })
             })?;

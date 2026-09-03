@@ -4,6 +4,17 @@ All notable user-facing changes to LibriSync. Entries are phrased for the
 Google Play "What's new" field. Earlier entries were reconstructed from git
 history (no changelog was kept before v0.0.24), so wording is approximate.
 
+## v0.0.29
+
+- Audible downloads work again. Audible began refusing download licences to every
+  third-party app on 3 September; LibriSync now falls back to Audible's legacy download
+  service, which is unaffected, and tells you plainly when it has done so.
+- The fallback needs no setup and produces the same audio quality as before — the same
+  file the licensed download would have given you.
+- Fixed activation-byte retrieval, which had never worked. It is what makes the fallback
+  possible.
+- A download that is refused no longer reports a confusing file error.
+
 ## v0.0.28
 
 - Download Format now applies to every store, not just Libro.fm. Choose one file per

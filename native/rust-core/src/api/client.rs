@@ -223,14 +223,33 @@ pub struct ClientConfig {
     pub enable_cookies: bool,
 }
 
+/// How we identify to `api.audible.com`.
+///
+/// These come from a capture of the official Android app (com.audible.application
+/// 26.34.07) on 2026-09-03, which is the only client Audible is currently serving
+/// without complaint. The licence response carries `vary: User-Agent`, so Audible does
+/// vary behaviour on it — announcing ourselves as "Libation/… (rust-core)" was, at best,
+/// unwise while Libation users are being throttled.
+const DEFAULT_USER_AGENT: &str =
+    "Dalvik/2.1.0 (Linux; U; Android 14) com.audible.application 26.34.07 b:2090263407";
+
+/// `x-device-type-id`: the device type we register as (see api::auth). The official app
+/// presents it on every request; we registered with it and then never mentioned it again.
+const DEVICE_TYPE_ID: &str = "A10KISP2GWF0E4";
+
+/// `x-adp-sw`: the app build number the official client reports.
+const APP_BUILD_NUMBER: &str = "2090263407";
+
 impl Default for ClientConfig {
     fn default() -> Self {
         Self {
             domain: AudibleDomain::Us,
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             max_retries: MAX_RETRY_ATTEMPTS,
-            user_agent: "Libation/11.3.0 (rust-core)".to_string(),
-            enable_cookies: true,
+            user_agent: DEFAULT_USER_AGENT.to_string(),
+            // The official app sends no cookies on any api.audible.com request
+            // (verified by capture), and a cookie jar is one more way to look unlike it.
+            enable_cookies: false,
         }
     }
 }
@@ -496,9 +515,10 @@ impl AudibleClient {
         )?;
 
         self.request_with_retry(move |client, mut headers| {
-            // A signed request authenticates by signature; leaving the bearer token on it
+            // A signed request authenticates by signature; leaving the access token on it
             // is what the reference deliberately does not do.
             headers.remove(AUTHORIZATION);
+            headers.remove("x-amz-access-token");
             for (name, value) in signature.headers() {
                 if let Ok(header_value) = HeaderValue::from_str(&value) {
                     if let Ok(header_name) = reqwest::header::HeaderName::from_bytes(name.as_bytes())
@@ -529,6 +549,42 @@ impl AudibleClient {
         B: Serialize,
     {
         self.request(Method::POST, endpoint, Some(body)).await
+    }
+
+    /// POST once, with no retry.
+    ///
+    /// `request_with_retry` re-sends on 5xx and on a 401-after-refresh, which is right
+    /// for idempotent reads and wrong for a download licence: one tap became up to three
+    /// licence requests, and Audible throttles an account that asks too often. Use this
+    /// for anything Audible counts.
+    pub async fn post_once<T, B>(&self, endpoint: &str, body: B) -> Result<T>
+    where
+        T: serde::de::DeserializeOwned,
+        B: Serialize,
+    {
+        let url = format!("{}{}", self.base_url, endpoint);
+        let headers = self.build_auth_headers().await?;
+        let _permit = self.semaphore.acquire().await.map_err(|e| {
+            LibationError::InternalError(format!("Semaphore acquire failed: {}", e))
+        })?;
+
+        let response = self
+            .client
+            .post(&url)
+            .json(&body)
+            .headers(headers)
+            .send()
+            .await
+            .map_err(|e| LibationError::NetworkError {
+                message: format!("Request to {endpoint} failed: {e}"),
+                is_transient: e.is_timeout() || e.is_connect(),
+            })?;
+
+        if response.status().is_success() {
+            self.handle_success_response(response).await
+        } else {
+            self.handle_error_response(response).await
+        }
     }
 
     /// Perform a POST request with form data
@@ -733,13 +789,31 @@ impl AudibleClient {
         let mut headers = HeaderMap::new();
 
         if let Some(ref identity) = account.identity {
-            let auth_value = format!("Bearer {}", identity.access_token.token);
+            // `x-amz-access-token`, not `Authorization: Bearer`. The official app sends
+            // only this header (30/30 requests in the capture; zero Authorization
+            // headers), and the licence endpoint's only observed working form is this
+            // one. Bearer has worked historically and may still, but there is no reason
+            // to keep presenting a shape no real client sends.
             headers.insert(
-                AUTHORIZATION,
-                HeaderValue::from_str(&auth_value).map_err(|e| {
+                "x-amz-access-token",
+                HeaderValue::from_str(&identity.access_token.token).map_err(|e| {
                     LibationError::InvalidInput(format!("Invalid auth token: {}", e))
                 })?,
             );
+
+            // Device identity. We register as this device type and then, until now,
+            // never presented it on a single request.
+            headers.insert("x-device-type-id", HeaderValue::from_static(DEVICE_TYPE_ID));
+            headers.insert("x-adp-sw", HeaderValue::from_static(APP_BUILD_NUMBER));
+
+            // `session-id` ties the request to the Amazon session the account was
+            // registered through. The official app sends it on every API call; we are
+            // handed one in `website_cookies` at registration and have never used it.
+            if let Some(session_id) = identity.cookies.get("session-id") {
+                if let Ok(value) = HeaderValue::from_str(session_id) {
+                    headers.insert("session-id", value);
+                }
+            }
         }
 
         Ok(headers)

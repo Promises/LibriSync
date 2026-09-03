@@ -258,18 +258,19 @@ pub enum ChapterTitlesType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Chapter {
     /// Chapter title
+    #[serde(default)]
     pub title: String,
 
     /// Start offset in milliseconds from beginning of audiobook
-    #[serde(rename = "start_offset_ms")]
+    #[serde(rename = "start_offset_ms", default)]
     pub start_offset_ms: i64,
 
     /// Start offset in seconds (convenience field)
-    #[serde(rename = "start_offset_sec")]
+    #[serde(rename = "start_offset_sec", default)]
     pub start_offset_sec: i32,
 
     /// Chapter duration in milliseconds
-    #[serde(rename = "length_ms")]
+    #[serde(rename = "length_ms", default)]
     pub length_ms: i64,
 
     /// Nested chapters (for hierarchical structure)
@@ -306,12 +307,21 @@ pub struct ChapterInfo {
     /// Whether chapter timing is accurate
     /// Sometimes Audible provides inaccurate chapter metadata
     /// Reference: DownloadOptions.Factory.cs:29-35 - metadata comparison
-    #[serde(rename = "isAccurate", default)]
+    ///
+    /// Audible is genuinely inconsistent here: the brand-duration fields are camelCase
+    /// while these two are snake_case (`AudibleApi.Common/MetadataDtoV10.generated.cs:33-40`).
+    /// Accept either spelling rather than betting on one — a present-but-unparseable
+    /// `chapter_info` fails the whole licence, not just the chapters.
+    #[serde(rename = "is_accurate", alias = "isAccurate", default)]
     pub is_accurate: bool,
 
     /// Total runtime in milliseconds
-    #[serde(rename = "runtimeLengthMs")]
+    #[serde(rename = "runtime_length_ms", alias = "runtimeLengthMs", default)]
     pub runtime_length_ms: i64,
+
+    /// Total runtime in seconds, as sent alongside the millisecond value.
+    #[serde(rename = "runtime_length_sec", alias = "runtimeLengthSec", default)]
+    pub runtime_length_sec: i64,
 }
 
 /// Content reference with DRM information
@@ -380,7 +390,7 @@ pub struct ContentUrl {
 /// Note: Different API endpoints return different subsets:
 /// - /1.0/content/{asin}/metadata - Returns all fields
 /// - /1.0/content/{asin}/licenserequest - Returns only content_url
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ContentMetadata {
     /// Chapter information with timing
     /// Only present in full metadata endpoint, not in license response
@@ -862,7 +872,13 @@ impl AudibleClient {
     /// # }
     /// ```
     pub async fn get_content_metadata(&self, asin: &str) -> Result<ContentMetadata> {
-        let endpoint = format!("/1.0/content/{}/metadata", asin);
+        // Without response_groups this endpoint returns a bare envelope — no chapters,
+        // no content reference — and the caller silently gets nothing.
+        // Reference: AudibleApi/ApiUnauthenticated.Content.cs:20-28
+        let endpoint = format!(
+            "/1.0/content/{}/metadata?response_groups=chapter_info,content_reference&chapter_titles_type=Tree",
+            asin
+        );
 
         let response: serde_json::Value = self.get(&endpoint).await?;
 
@@ -994,6 +1010,41 @@ pub fn combine_credits(chapters: &mut Vec<Chapter>) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn chapter_info_parses_the_field_names_audible_actually_sends() {
+        // Audible mixes conventions in one object: camelCase brand durations, snake_case
+        // runtime and accuracy (AudibleApi.Common/MetadataDtoV10.generated.cs:24-40).
+        // Getting this wrong fails the *entire* licence, because a present-but-unparseable
+        // chapter_info is an error, not a None.
+        let live = serde_json::json!({
+            "brandIntroDurationMs": 2043,
+            "brandOutroDurationMs": 5061,
+            "is_accurate": true,
+            "runtime_length_ms": 21086000,
+            "runtime_length_sec": 21086,
+            "chapters": [
+                {"title": "Opening Credits", "start_offset_ms": 0, "start_offset_sec": 0, "length_ms": 14379}
+            ]
+        });
+        let info: ChapterInfo = serde_json::from_value(live).expect("live shape must parse");
+        assert!(info.is_accurate);
+        assert_eq!(info.runtime_length_ms, 21086000);
+        assert_eq!(info.chapters.len(), 1);
+        assert_eq!(info.chapters[0].title, "Opening Credits");
+
+        // The camelCase spelling we used to require still parses, and a sparse object
+        // must not fail either.
+        let legacy = serde_json::json!({"isAccurate": false, "runtimeLengthMs": 42});
+        let info: ChapterInfo = serde_json::from_value(legacy).expect("camelCase must parse");
+        assert_eq!(info.runtime_length_ms, 42);
+
+        let sparse = serde_json::json!({});
+        serde_json::from_value::<ChapterInfo>(sparse).expect("a sparse object must not fail");
+    }
+
+
     use super::*;
 
     #[test]

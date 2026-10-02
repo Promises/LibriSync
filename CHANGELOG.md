@@ -4,6 +4,16 @@ All notable user-facing changes to LibriSync. Entries are phrased for the
 Google Play "What's new" field. Earlier entries were reconstructed from git
 history (no changelog was kept before v0.0.24), so wording is approximate.
 
+## v0.0.31
+
+- Audible accounts signed in before v0.0.30 are now flagged. They still download, but
+  through Audible's older route, where the files are much larger and slower to fetch.
+  A notice on the Library tab and a warning icon on the account in the Accounts tab
+  explain the fix: sign out of that account and sign in again.
+- GitHub downloads now come as one APK per device type alongside the universal one.
+  Most phones want `arm64-v8a`, about a third of the size, so it's far less likely to
+  arrive incomplete and be rejected as "package appears to be invalid".
+
 ## v0.0.30
 
 - Audible downloads are working normally again. The block Audible put on third-party

@@ -156,8 +156,8 @@ RUN if [ "$BUILD_TYPE" = "release" ] && [ "$BUNDLE_TYPE" = "aab" ]; then \
         echo "Building release AAB..."; \
         cd android && ./gradlew bundleRelease; \
     elif [ "$BUILD_TYPE" = "release" ]; then \
-        echo "Building release APK..."; \
-        cd android && ./gradlew assembleRelease; \
+        echo "Building release APKs (per ABI + universal)..."; \
+        cd android && ./gradlew assembleRelease -PabiSplits=true; \
     else \
         echo "Building debug APK..."; \
         cd android && ./gradlew assembleDebug; \

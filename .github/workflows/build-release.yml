@@ -97,10 +97,22 @@ jobs:
           chmod +x ./docker-build.sh
           ./docker-build.sh build
 
-      - name: Rename APK with version
+      # The build emits app-<abi>-release.apk per ABI plus app-universal-release.apk.
+      # docker-build.sh reports success even when the inner build failed, so a
+      # missing APK has to fail here rather than publish a partial release.
+      - name: Rename APKs with version
         run: |
           VERSION=${{ github.ref_name }}
-          sudo mv build-output/app-release.apk build-output/librisync-${VERSION}.apk
+          for variant in universal arm64-v8a armeabi-v7a x86 x86_64; do
+            src="build-output/app-${variant}-release.apk"
+            if [ ! -f "$src" ]; then
+              echo "::error::Missing $src"
+              ls -l build-output/
+              exit 1
+            fi
+            sudo mv "$src" "build-output/librisync-${VERSION}-${variant}.apk"
+          done
+          ls -lh build-output/
 
       - name: Upload Release APK
         uses: actions/upload-artifact@v4
@@ -109,11 +121,26 @@ jobs:
           path: build-output/librisync-*.apk
           retention-days: 30
 
+      - name: Add APK guide to release notes
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          cat >> release-notes.md <<'EOF'
+
+          ### Which APK?
+
+          Most phones want **`arm64-v8a`**. If unsure, take **`universal`** — it runs
+          everywhere but is ~200 MB against ~60 MB. `armeabi-v7a` is for older
+          32-bit phones; `x86` / `x86_64` are for emulators and Chromebooks.
+          EOF
+
+      # Only the universal APK goes up with the release; the per-ABI ones follow
+      # in the next step. Builds up to v0.0.30 take the first .apk asset as their
+      # update, so the universal one must be uploaded first.
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v1
         with:
-          files: build-output/librisync-*.apk
+          files: build-output/librisync-*-universal.apk
           # body is pre-pended to the auto-generated notes, so the release reads
           # as the user-facing changelog first, then the commit list + compare link.
           body_path: release-notes.md
@@ -122,3 +149,13 @@ jobs:
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload per-ABI APKs
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          VERSION=${{ github.ref_name }}
+          for abi in arm64-v8a armeabi-v7a x86 x86_64; do
+            gh release upload "$VERSION" "build-output/librisync-${VERSION}-${abi}.apk" --clobber
+          done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

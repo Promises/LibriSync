@@ -1,4 +1,5 @@
 import Constants from 'expo-constants';
+import { getSupportedAbis } from '../../modules/expo-rust-bridge';
 
 const GITHUB_RELEASES_API = 'https://api.github.com/repos/Promises/LibriSync/releases/latest';
 
@@ -22,6 +23,35 @@ function compareVersions(current: string, latest: string): boolean {
   return false;
 }
 
+interface ReleaseAsset {
+  name?: string;
+  browser_download_url?: string;
+}
+
+/**
+ * Releases carry `librisync-vX-<abi>.apk` for each ABI plus
+ * `librisync-vX-universal.apk`. Prefer the device's own ABI — a fraction of the
+ * universal APK's size — then universal, then any APK (older releases shipped
+ * a single unsuffixed one).
+ */
+function pickApkAsset(assets: ReleaseAsset[]): ReleaseAsset | undefined {
+  const apks = assets.filter(a => a.name?.endsWith('.apk'));
+
+  let abis: string[] = [];
+  try {
+    abis = getSupportedAbis();
+  } catch {
+    // Older native module or non-Android platform: fall through to universal.
+  }
+
+  for (const abi of abis) {
+    const match = apks.find(a => a.name?.endsWith(`-${abi}.apk`));
+    if (match) return match;
+  }
+
+  return apks.find(a => a.name?.endsWith('-universal.apk')) ?? apks[0];
+}
+
 export async function checkForUpdate(): Promise<UpdateInfo | null> {
   try {
     const response = await fetch(GITHUB_RELEASES_API, {
@@ -34,9 +64,7 @@ export async function checkForUpdate(): Promise<UpdateInfo | null> {
     const latestVersion = release.tag_name as string;
     const currentVersion = Constants.expoConfig?.version || '0.0.0';
 
-    const apkAsset = release.assets?.find(
-      (a: any) => a.name?.endsWith('.apk')
-    );
+    const apkAsset = pickApkAsset(release.assets ?? []);
     const downloadUrl = apkAsset?.browser_download_url || release.html_url;
 
     return {

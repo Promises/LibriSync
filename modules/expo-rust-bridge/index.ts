@@ -549,6 +549,11 @@ export interface ExpoRustBridgeModule {
   copyTextToClipboard(text: string): RustResponse<{ copied: boolean }>;
 
   /**
+   * The device's ABIs (e.g. `arm64-v8a`), most preferred first.
+   */
+  getSupportedAbis(): RustResponse<{ abis: string[] }>;
+
+  /**
    * Synchronize library from Audible API to local database.
    *
    * @param dbPath - Absolute path to database file
@@ -1764,6 +1769,16 @@ function copyTextToClipboard(text: string): { copied: boolean } {
 }
 
 /**
+ * The device's ABIs, most preferred first.
+ *
+ * @returns ABI names such as `arm64-v8a`; empty where the platform has none
+ */
+function getSupportedAbis(): string[] {
+  if (typeof NativeModule!.getSupportedAbis !== 'function') return [];
+  return unwrapResult(NativeModule!.getSupportedAbis()).abis;
+}
+
+/**
  * Get customer information from Audible API
  *
  * @param localeCode - Audible locale
@@ -2733,6 +2748,7 @@ export {
   exportDatabase,
   createLibraryExportImage,
   copyTextToClipboard,
+  getSupportedAbis,
   getCustomerInformation,
   generateDeviceSerial,
   unwrapResult,

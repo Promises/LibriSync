@@ -571,6 +571,17 @@ class ExpoRustBridgeModule : Module() {
       }
     }
 
+    /**
+     * The device's ABIs, most preferred first, so the update check can offer
+     * the matching per-ABI APK instead of the universal one.
+     */
+    Function("getSupportedAbis") {
+      mapOf(
+        "success" to true,
+        "data" to mapOf("abis" to android.os.Build.SUPPORTED_ABIS.toList())
+      )
+    }
+
 
     /**
      * Get list of supported Audible locales.

@@ -30,9 +30,9 @@ interface ReleaseAsset {
 
 /**
  * Releases carry `librisync-vX-<abi>.apk` for each ABI plus
- * `librisync-vX-universal.apk`. Prefer the device's own ABI — a fraction of the
- * universal APK's size — then universal, then any APK (older releases shipped
- * a single unsuffixed one).
+ * `librisync-universal-vX.apk` (v0.0.31 named it `librisync-vX-universal.apk`).
+ * Prefer the device's own ABI — a fraction of the universal APK's size — then
+ * universal, then any APK (older releases shipped a single unsuffixed one).
  */
 function pickApkAsset(assets: ReleaseAsset[]): ReleaseAsset | undefined {
   const apks = assets.filter(a => a.name?.endsWith('.apk'));
@@ -49,7 +49,7 @@ function pickApkAsset(assets: ReleaseAsset[]): ReleaseAsset | undefined {
     if (match) return match;
   }
 
-  return apks.find(a => a.name?.endsWith('-universal.apk')) ?? apks[0];
+  return apks.find(a => a.name?.includes('-universal')) ?? apks[0];
 }
 
 export async function checkForUpdate(): Promise<UpdateInfo | null> {

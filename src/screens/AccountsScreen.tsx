@@ -8,6 +8,8 @@ import AccountsCard from '../components/AccountsCard';
 import AccountActions from '../components/AccountActions';
 import Button from '../components/Button';
 import ProviderPickerSheet from '../components/ProviderPickerSheet';
+import { showLegacyAccountInfo } from '../components/LegacyAccountBanner';
+import { isLegacyAudibleRegistration } from '../services/providers/audible';
 import { useStyles } from '../hooks/useStyles';
 import { useTheme } from '../styles/theme';
 import type { Theme } from '../hooks/useStyles';
@@ -436,6 +438,15 @@ export default function AccountsScreen({ navigation }: any) {
                   const entry = entryFor(acc);
                   return { name: entry.icon, color: colors[entry.tint] };
                 }}
+                rowWarning={(acc) =>
+                  isLegacyAudibleRegistration(acc)
+                    ? {
+                        color: colors.warning,
+                        accessibilityLabel: 'Needs re-login for full-speed downloads',
+                        onPress: showLegacyAccountInfo,
+                      }
+                    : null
+                }
                 disabled={isSyncing}
               />
 

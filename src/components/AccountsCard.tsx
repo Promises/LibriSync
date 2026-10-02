@@ -20,6 +20,11 @@ interface Props {
   formatSubtitle?: (account: Account) => string | null;
   /** Leading badge per row. Needed once the list mixes providers. */
   formatIcon?: (account: Account) => { name: React.ComponentProps<typeof Ionicons>['name']; color: string };
+  /**
+   * Optional trailing warning badge for a row (e.g. a legacy Audible registration).
+   * Return null for rows with no warning. `onPress` fires without selecting the row.
+   */
+  rowWarning?: (account: Account) => { color: string; accessibilityLabel: string; onPress?: () => void } | null;
   addAccountTitle?: string;
   disabled?: boolean;
 }
@@ -40,6 +45,7 @@ export default function AccountsCard({
   formatName,
   formatSubtitle,
   formatIcon,
+  rowWarning,
   addAccountTitle = 'Add Account',
   disabled = false,
 }: Props) {
@@ -52,6 +58,7 @@ export default function AccountsCard({
         const isSelected = account.account_id === selectedAccountId;
         const subtitle = formatSubtitle?.(account);
         const icon = formatIcon?.(account);
+        const warning = rowWarning?.(account);
         return (
           <TouchableOpacity
             key={account.account_id}
@@ -68,6 +75,17 @@ export default function AccountsCard({
               <Text style={styles.value}>{formatName(account)}</Text>
               {!!subtitle && <Text style={styles.caption}>{subtitle}</Text>}
             </View>
+            {!!warning && (
+              <TouchableOpacity
+                onPress={warning.onPress}
+                disabled={!warning.onPress}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                accessibilityLabel={warning.accessibilityLabel}
+                style={styles.warningBadge}
+              >
+                <Ionicons name="warning" size={20} color={warning.color} />
+              </TouchableOpacity>
+            )}
             {isSelected && <Text style={styles.selectedMark}>✓</Text>}
           </TouchableOpacity>
         );
@@ -138,5 +156,9 @@ const createStyles = (theme: Theme) => ({
     ...theme.typography.body,
     color: theme.colors.accent,
     fontWeight: '700' as const,
+  },
+  warningBadge: {
+    paddingHorizontal: theme.spacing.xs,
+    marginRight: theme.spacing.xs,
   },
 });

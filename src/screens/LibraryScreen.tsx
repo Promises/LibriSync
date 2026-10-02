@@ -41,6 +41,8 @@ import * as DocumentPicker from 'expo-document-picker';
 import {Directory, Paths} from 'expo-file-system';
 import {getDatabasePath} from '../utils/appPaths';
 import {getBook} from '../services/librivox';
+import LegacyAccountBanner from '../components/LegacyAccountBanner';
+import {hasLegacyAudibleAccounts} from '../services/providers/audible';
 import {DEMO_BOOKS, DEMO_SERIES, DEMO_CATEGORIES, DEMO_ACCOUNT} from '../services/demo/demoData';
 import {isDemoAccountId, isDemoBook, filterSortPaginate} from '../services/demo/demoMode';
 import * as demoDownloads from '../services/demo/demoDownloads';
@@ -56,6 +58,7 @@ const DOWNLOAD_PATH_KEY = 'download_path';
 const SELECTED_ACCOUNT_KEY = 'selected_audible_account_id';
 const LIBRARY_PREFS_KEY = 'library_preferences';
 const INCLUDE_PODCASTS_KEY = 'include_podcasts';
+const LEGACY_BANNER_DISMISSED_KEY = 'legacy_account_banner_dismissed';
 const PAGE_SIZE = 100;
 
 type SortField = 'title' | 'release_date' | 'date_added' | 'series' | 'length' | 'downloaded';
@@ -120,6 +123,20 @@ export default function LibraryScreen() {
     const [allSeries, setAllSeries] = useState<string[]>([]);
     const [allCategories, setAllCategories] = useState<string[]>([]);
     const [allAccounts, setAllAccounts] = useState<Account[]>([]);
+
+    // Legacy-registration warning banner. Default hidden until the persisted
+    // dismissal flag loads, so it never flashes on for already-dismissed users.
+    const [legacyBannerDismissed, setLegacyBannerDismissed] = useState(true);
+    useEffect(() => {
+        SecureStore.getItemAsync(LEGACY_BANNER_DISMISSED_KEY)
+            .then(value => setLegacyBannerDismissed(value === 'true'))
+            .catch(() => setLegacyBannerDismissed(false));
+    }, []);
+    const dismissLegacyBanner = () => {
+        setLegacyBannerDismissed(true);
+        SecureStore.setItemAsync(LEGACY_BANNER_DISMISSED_KEY, 'true').catch(() => {});
+    };
+    const showLegacyBanner = !legacyBannerDismissed && hasLegacyAudibleAccounts(allAccounts);
 
     // Modal state
     const [showFilterModal, setShowFilterModal] = useState(false);
@@ -2019,6 +2036,10 @@ export default function LibraryScreen() {
                     {totalCount > 0 ? `${audiobooks.length} of ${totalCount} audiobooks` : `${audiobooks.length} audiobooks`}
                 </Text>
             </View>
+
+            {showLegacyBanner && (
+                <LegacyAccountBanner dismissible onDismiss={dismissLegacyBanner} />
+            )}
 
             {isLoading ? (
                 <View style={styles.emptyState}>

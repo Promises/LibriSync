@@ -930,6 +930,10 @@ impl Default for OAuthConfig {
             // device type (A10KISP2GWF0E4) but not the iPhone one (A2CZJZGLK2JJVM);
             // verified 2026-09-03 on an account denied under Android and granted under iOS
             // with the same request. This is why mkb79's audible-cli (iOS) still works.
+            //
+            // Mirrored in TS as AUDIBLE_IPHONE_DEVICE_TYPE (src/services/providers/audible.ts),
+            // which flags accounts registered under any *other* type as needing re-login.
+            // Change both together, or every fresh sign-in gets flagged as legacy.
             device_type: "A2CZJZGLK2JJVM",
         }
     }

@@ -10,6 +10,7 @@ import { Alert, Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import { Directory, Paths } from 'expo-file-system';
 import {
+  accountProvider,
   cancelAllBackgroundTasks,
   deleteAccount,
   saveAccount,
@@ -20,6 +21,36 @@ import {
 } from '../../../modules/expo-rust-bridge';
 import type { Account } from '../../../modules/expo-rust-bridge';
 import { isDemoAccount } from '../demo/demoMode';
+
+/**
+ * The iPhone device type the app registers as since v0.0.30. Audible throttles
+ * licence requests from the old Android device type, so downloads for accounts
+ * registered before the fix fall back to the slower legacy AAX path.
+ *
+ * Must match OAuthConfig::default().device_type in native/rust-core/src/api/auth.rs.
+ * If registration ever switches device type, change this too — otherwise every
+ * fresh sign-in is flagged as a legacy registration.
+ */
+export const AUDIBLE_IPHONE_DEVICE_TYPE = 'A2CZJZGLK2JJVM';
+
+/**
+ * True for an Audible account whose stored registration predates the v0.0.30
+ * device-type fix: it registered as the Android device type, or (from before
+ * multi-account support) has no device_type at all. Signing out and back in
+ * re-registers it as the iPhone device type and restores full-speed AAXC
+ * downloads. Non-Audible and demo accounts are never flagged.
+ */
+export function isLegacyAudibleRegistration(account: Account): boolean {
+  if (accountProvider(account) !== 'audible') return false;
+  const deviceType = account.identity?.device_type;
+  if (deviceType === 'DEMO') return false;
+  return deviceType !== AUDIBLE_IPHONE_DEVICE_TYPE;
+}
+
+/** Whether any account in the list is a pre-fix Audible registration. */
+export function hasLegacyAudibleAccounts(accounts: Account[]): boolean {
+  return accounts.some(isLegacyAudibleRegistration);
+}
 
 /**
  * Which Audible account the app last had selected.

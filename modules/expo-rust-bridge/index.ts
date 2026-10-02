@@ -1093,14 +1093,15 @@ export interface ExpoRustBridgeModule {
   getDownloadFormat(): RustResponse<{ format: string }>;
 
   /**
-   * Set audio validation depth after download.
+   * Turn post-download audio validation on or off.
    *
-   * @param level - "full" (all sample points), "quick" (ends only), or "off"
+   * @param level - "full" to validate (a full decode pass) or "off" to skip. A stored
+   *   legacy "quick" is treated as "full".
    */
   setValidationLevel(level: string): RustResponse<{}>;
 
   /**
-   * Get audio validation depth preference.
+   * Get the audio validation preference ("full" or "off"; legacy "quick" means "full").
    *
    * @returns Current validation level
    */

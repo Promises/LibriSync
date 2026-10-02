@@ -41,7 +41,6 @@ const INCLUDE_PODCASTS_KEY = 'include_podcasts';
 type SyncFrequency = 'manual' | '1h' | '6h' | '12h' | '24h';
 type NamingPattern = 'flat_file' | 'author_book_folder' | 'author_series_book';
 type PodcastNamingPattern = 'podcast_episode_folder' | 'podcast_flat_file';
-type ValidationLevel = 'full' | 'quick' | 'off';
 type DownloadMode = 'parallel' | 'sequential';
 type DownloadFormat = 'm4b' | 'mp3';
 
@@ -53,7 +52,7 @@ export default function SettingsScreen() {
   const [namingPattern, setNamingPattern] = useState<NamingPattern>('author_series_book');
   const [podcastNamingPattern, setPodcastNamingPattern] = useState<PodcastNamingPattern>('podcast_episode_folder');
   const [smartPlayerCover, setSmartPlayerCover] = useState(false);
-  const [validationLevel, setValidationLevel] = useState<ValidationLevel>('full');
+  const [validateDownloads, setValidateDownloads] = useState(true);
   const [downloadMode, setDownloadMode] = useState<DownloadMode>('parallel');
   const [downloadFormat, setDownloadFormat] = useState<DownloadFormat>('m4b');
   const [isLoading, setIsLoading] = useState(true);
@@ -131,7 +130,8 @@ export default function SettingsScreen() {
           }
 
           if (validationResult.success && validationResult.data) {
-            setValidationLevel((validationResult.data as any).level as ValidationLevel);
+            // Only "off" skips; legacy "full" / "quick" values both mean validate.
+            setValidateDownloads((validationResult.data as any).level !== 'off');
           }
 
           if (downloadModeResult.success && downloadModeResult.data) {
@@ -438,32 +438,11 @@ export default function SettingsScreen() {
     }
   };
 
-  const getValidationLevelLabel = (level: ValidationLevel): string => {
-    switch (level) {
-      case 'full': return 'Full';
-      case 'quick': return 'Quick';
-      case 'off': return 'Off';
-    }
-  };
-
-  const handleValidationLevelPress = () => {
-    Alert.alert(
-      'Audio Validation',
-      'How thoroughly downloaded files are checked for corruption. Less checking is faster but may miss a bad file.',
-      [
-        { text: 'Full (5 points)', onPress: () => handleValidationLevelChange('full') },
-        { text: 'Quick (start + end)', onPress: () => handleValidationLevelChange('quick') },
-        { text: 'Off (skip)', onPress: () => handleValidationLevelChange('off') },
-        { text: 'Cancel', style: 'cancel' },
-      ]
-    );
-  };
-
-  const handleValidationLevelChange = async (value: ValidationLevel) => {
-    setValidationLevel(value);
+  const handleValidateDownloadsChange = async (enabled: boolean) => {
+    setValidateDownloads(enabled);
     try {
-      await ExpoRustBridge.setValidationLevel(value);
-      console.log(`[Settings] Validation level changed to: ${value}`);
+      await ExpoRustBridge.setValidationLevel(enabled ? 'full' : 'off');
+      console.log(`[Settings] Download validation ${enabled ? 'enabled' : 'disabled'}`);
     } catch (error: any) {
       console.error('[Settings] Failed to save validation level:', error);
       Alert.alert('Error', error.message || 'Failed to update validation level');
@@ -801,18 +780,19 @@ export default function SettingsScreen() {
 
           <View style={styles.settingItem}>
             <View style={styles.settingInfo}>
-              <Text style={styles.settingLabel}>Audio Validation</Text>
+              <Text style={styles.settingLabel}>Validate Downloads</Text>
               <Text style={styles.settingDescription}>
-                Corruption check after download. Quick or Off speeds up large audiobooks.
+                Decode each finished book end to end to catch corruption. Turning it off saves
+                a few minutes on large audiobooks.
               </Text>
             </View>
-            <TouchableOpacity
-              style={styles.button}
-              onPress={handleValidationLevelPress}
+            <Switch
+              value={validateDownloads}
+              onValueChange={handleValidateDownloadsChange}
               disabled={isLoading}
-            >
-              <Text style={styles.buttonText}>{getValidationLevelLabel(validationLevel)}</Text>
-            </TouchableOpacity>
+              trackColor={{ false: colors.border, true: colors.accentDim }}
+              thumbColor={validateDownloads ? colors.accent : colors.textSecondary}
+            />
           </View>
 
           <View style={styles.settingItem}>

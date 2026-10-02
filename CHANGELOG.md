@@ -13,6 +13,9 @@ history (no changelog was kept before v0.0.24), so wording is approximate.
 - GitHub downloads now come as one APK per device type alongside the universal one.
   Most phones want `arm64-v8a`, about a third of the size, so it's far less likely to
   arrive incomplete and be rejected as "package appears to be invalid".
+- Download validation now checks the whole book instead of a few spot samples, and is
+  faster on long audiobooks. The Full / Quick / Off choice in Settings is replaced by a
+  single "Validate Downloads" switch; if you had chosen Quick, validation stays on.
 
 ## v0.0.30
 

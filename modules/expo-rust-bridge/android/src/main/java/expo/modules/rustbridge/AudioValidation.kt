@@ -3,14 +3,14 @@ package expo.modules.rustbridge
 import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.atomic.AtomicLong
 
 private const val TAG = "AudioValidation"
+
+/** More decode errors than this and the file is corrupt; stop decoding early. */
+private const val MAX_ERRORS_BEFORE_ABORT = 50
 
 /** Result of the post-conversion corruption check. */
 data class AudioValidationResult(
@@ -18,25 +18,17 @@ data class AudioValidationResult(
     val errorCount: Int,
     val errorMessage: String,
     val duration: Double,
-    val samplePoints: List<String> = emptyList()
 )
 
-private fun formatTimestamp(seconds: Long): String {
-    val hours = seconds / 3600
-    val minutes = (seconds % 3600) / 60
-    val secs = seconds % 60
-    return "%02d:%02d:%02d".format(hours, minutes, secs)
-}
-
 /**
- * Validate a decoded audiobook by decoding short samples at several points and counting
- * FFmpeg errors. Shared by the foreground (DownloadOrchestrator) and background
- * (DownloadWorker) pipelines; each supplies its own progress sink and cancel check so the
- * behaviour is identical apart from where progress is reported.
+ * Validate a decoded audiobook by decoding it end to end and counting FFmpeg errors.
+ * Shared by the foreground (DownloadOrchestrator) and background (DownloadWorker)
+ * pipelines; each supplies its own progress sink and cancel check so the behaviour is
+ * identical apart from where progress is reported.
  *
- * Depth is read from the "validation_level" preference: "full" (all points), "quick"
- * (ends only) or "off" (skip). Progress + ETA are driven by a timer because the cost is
- * seeking into a huge file, which emits no FFmpeg statistics.
+ * The "validation_level" preference is "off" to skip validation; any other value
+ * (including the retired "full" / "quick") validates. Progress + ETA come from FFmpeg's
+ * statistics.
  */
 suspend fun validateAudioFile(
     context: Context,
@@ -69,15 +61,13 @@ suspend fun validateAudioFile(
         // times decreased toward the end — cost ∝ distance-to-EOF, i.e. the input is drained
         // past the requested window and no output-side cap stops it). Five seeks therefore
         // cost ~2.5x a single pass AND miss everything between the points. One straight
-        // decode is a single EOF traversal that checks every second. ("quick" now behaves
-        // like "full"; only "off" skips.) Progress + ETA come from FFmpeg's real statistics.
-        Log.d(TAG, "Full-decode validation pass (level=$validationLevel, ${"%.2f".format(duration / 3600)}h)")
+        // decode is a single EOF traversal that checks every second.
+        Log.d(TAG, "Full-decode validation pass (${"%.2f".format(duration / 3600)}h)")
 
         val errorCounter = AtomicInteger(0)
-        val abortedForErrors = AtomicInteger(0)
+        val tooManyErrors = AtomicBoolean(false)
         val command = "-v error -i \"$filePath\" -f null -"
         val latch = java.util.concurrent.CountDownLatch(1)
-        var sessionId = 0L
 
         var lastPct = -1
         val statsCallback = com.arthenica.ffmpegkit.StatisticsCallback { stat ->
@@ -92,15 +82,12 @@ suspend fun validateAudioFile(
             }
         }
         // Count decode errors live so a badly corrupt file can be aborted early instead of
-        // decoding the whole thing.
+        // decoding the whole thing. The callback only raises the flag: it can fire before
+        // executeAsync has returned the session id, so the cancel happens in the wait loop.
         val logCallback = com.arthenica.ffmpegkit.LogCallback { log ->
             val msg = log.message ?: ""
             if (msg.contains("Error", ignoreCase = true) || msg.contains("Invalid data", ignoreCase = true)) {
-                val n = errorCounter.incrementAndGet()
-                if (n > 50 && abortedForErrors.compareAndSet(0, 1)) {
-                    Log.w(TAG, "High error count ($n), aborting validation early")
-                    if (sessionId != 0L) com.arthenica.ffmpegkit.FFmpegKit.cancel(sessionId)
-                }
+                if (errorCounter.incrementAndGet() > MAX_ERRORS_BEFORE_ABORT) tooManyErrors.set(true)
             }
         }
 
@@ -110,13 +97,19 @@ suspend fun validateAudioFile(
             logCallback,
             statsCallback
         )
-        sessionId = session.sessionId
+        val sessionId = session.sessionId
 
         try {
+            var abortSent = false
             while (!latch.await(300, java.util.concurrent.TimeUnit.MILLISECONDS)) {
                 if (isCancelled()) {
                     com.arthenica.ffmpegkit.FFmpegKit.cancel(sessionId)
                     throw kotlinx.coroutines.CancellationException("Validation cancelled by user")
+                }
+                if (!abortSent && tooManyErrors.get()) {
+                    Log.w(TAG, "High error count (${errorCounter.get()}), aborting validation early")
+                    com.arthenica.ffmpegkit.FFmpegKit.cancel(sessionId)
+                    abortSent = true
                 }
             }
         } finally {
@@ -124,17 +117,15 @@ suspend fun validateAudioFile(
         }
 
         val totalErrors = errorCounter.get()
-        val sampleResults = emptyList<String>()
-
         val isValid = totalErrors == 0
         val errorMessage = if (isValid) {
             "Audio file validated successfully"
         } else {
-            "Audio corruption detected: $totalErrors total errors\n${sampleResults.joinToString("\n")}"
+            "Audio corruption detected: $totalErrors total errors"
         }
         Log.d(TAG, "Validation result: ${if (isValid) "VALID" else "CORRUPT"} ($totalErrors errors)")
 
-        AudioValidationResult(isValid, totalErrors, errorMessage, duration, sampleResults)
+        AudioValidationResult(isValid, totalErrors, errorMessage, duration)
     } catch (e: kotlinx.coroutines.CancellationException) {
         // A user cancel must propagate as a cancel, not masquerade as a corrupt file —
         // callers delete the cached source on a failed validation.

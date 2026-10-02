@@ -55,15 +55,6 @@ suspend fun validateAudioFile(
         }
         Log.d(TAG, "File duration: ${duration}s (${duration / 3600}h)")
 
-        // Check: 30s, 25%, 50%, 75%, end-30s
-        val samplePoints = listOf(
-            30.0,
-            duration * 0.25,
-            duration * 0.50,
-            duration * 0.75,
-            maxOf(duration - 30, 60.0)
-        ).distinct().sorted()
-
         val validationLevel = context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
             .getString("validation_level", "full") ?: "full"
         if (validationLevel == "off") {
@@ -71,79 +62,69 @@ suspend fun validateAudioFile(
             onProgress(100, 0)
             return@withContext AudioValidationResult(true, 0, "Validation skipped by setting", duration)
         }
-        val effectiveSamplePoints = if (validationLevel == "quick")
-            listOf(samplePoints.first(), samplePoints.last()).distinct()
-        else samplePoints
 
-        Log.d(TAG, "Sampling ${effectiveSamplePoints.size} points ($validationLevel): ${effectiveSamplePoints.map { "%.1fmin".format(it / 60) }}")
+        // Single full-decode pass — NOT per-point seeking. On FFmpegKit's ffmpeg build an
+        // input -ss seek into these files traverses to EOF regardless of -t or -frames:a
+        // caps (verified on-device: a sample at 0:30 of a 32h book took 184s and the sample
+        // times decreased toward the end — cost ∝ distance-to-EOF, i.e. the input is drained
+        // past the requested window and no output-side cap stops it). Five seeks therefore
+        // cost ~2.5x a single pass AND miss everything between the points. One straight
+        // decode is a single EOF traversal that checks every second. ("quick" now behaves
+        // like "full"; only "off" skips.) Progress + ETA come from FFmpeg's real statistics.
+        Log.d(TAG, "Full-decode validation pass (level=$validationLevel, ${"%.2f".format(duration / 3600)}h)")
 
-        var totalErrors = 0
-        val sampleResults = mutableListOf<String>()
-        val totalSamples = effectiveSamplePoints.size
-        val testDuration = 10 // seconds decoded per sample
+        val errorCounter = AtomicInteger(0)
+        val abortedForErrors = AtomicInteger(0)
+        val command = "-v error -i \"$filePath\" -f null -"
+        val latch = java.util.concurrent.CountDownLatch(1)
+        var sessionId = 0L
 
-        // Seed a timer-driven estimate BEFORE the first sample finishes, refined by each
-        // real sample's measured duration.
-        val completedSamples = AtomicInteger(0)
-        val sampleStartMs = AtomicLong(System.currentTimeMillis())
-        val avgSampleMs = AtomicLong(4000L)
-
-        val progressTicker = launch {
-            var lastPct = -1
-            while (isActive) {
-                val done = completedSamples.get()
-                val avg = avgSampleMs.get().toDouble()
-                val sampleElapsed = (System.currentTimeMillis() - sampleStartMs.get()).toDouble()
-                val subFrac = (sampleElapsed / avg).coerceIn(0.0, 0.99)
-                val overall = ((done + subFrac) / totalSamples).coerceIn(0.0, 0.999)
-                val pct = (overall * 100.0).toInt()
-                if (pct != lastPct) {
-                    lastPct = pct
-                    val remaining = (totalSamples - (done + subFrac)).coerceAtLeast(0.0)
-                    val etaSec = (remaining * avg / 1000.0).toInt().coerceAtLeast(0)
-                    onProgress(pct, etaSec)
+        var lastPct = -1
+        val statsCallback = com.arthenica.ffmpegkit.StatisticsCallback { stat ->
+            val processedSec = stat.time.toDouble() / 1000.0
+            val pct = ((processedSec / duration).coerceIn(0.0, 1.0) * 100.0).toInt()
+            if (pct != lastPct) {
+                lastPct = pct
+                val speed = stat.speed
+                val etaSec = if (speed > 0.0)
+                    ((duration - processedSec) / speed).toInt().coerceAtLeast(0) else 0
+                onProgress(pct, etaSec)
+            }
+        }
+        // Count decode errors live so a badly corrupt file can be aborted early instead of
+        // decoding the whole thing.
+        val logCallback = com.arthenica.ffmpegkit.LogCallback { log ->
+            val msg = log.message ?: ""
+            if (msg.contains("Error", ignoreCase = true) || msg.contains("Invalid data", ignoreCase = true)) {
+                val n = errorCounter.incrementAndGet()
+                if (n > 50 && abortedForErrors.compareAndSet(0, 1)) {
+                    Log.w(TAG, "High error count ($n), aborting validation early")
+                    if (sessionId != 0L) com.arthenica.ffmpegkit.FFmpegKit.cancel(sessionId)
                 }
-                delay(400)
             }
         }
 
+        val session = com.arthenica.ffmpegkit.FFmpegKit.executeAsync(
+            command,
+            { _ -> latch.countDown() },
+            logCallback,
+            statsCallback
+        )
+        sessionId = session.sessionId
+
         try {
-            for ((index, timestamp) in effectiveSamplePoints.withIndex()) {
-                if (isCancelled()) throw kotlinx.coroutines.CancellationException("Validation cancelled by user")
-                sampleStartMs.set(System.currentTimeMillis())
-                val command = "-v error -ss $timestamp -i \"$filePath\" -t $testDuration -f null -"
-
-                val session = com.arthenica.ffmpegkit.FFmpegKit.execute(command)
-                val output = session.allLogsAsString
-
-                val errors = output.lines().count {
-                    it.contains("Error", ignoreCase = true) ||
-                    it.contains("Invalid data", ignoreCase = true)
-                }
-
-                totalErrors += errors
-                val statusMark = if (errors == 0) "✓" else "✗ $errors errors"
-                val timestampStr = formatTimestamp(timestamp.toLong())
-                sampleResults.add("  [$timestampStr] $statusMark")
-
-                val took = System.currentTimeMillis() - sampleStartMs.get()
-                avgSampleMs.set(
-                    if (index == 0) took.coerceAtLeast(250L)
-                    else (0.6 * avgSampleMs.get() + 0.4 * took).toLong().coerceAtLeast(250L)
-                )
-                completedSamples.set(index + 1)
-
-                Log.d(TAG, "Sample ${index + 1}/$totalSamples at $timestampStr: $errors errors (${took}ms)")
-
-                if (errors > 50) {
-                    Log.w(TAG, "High error count detected at $timestampStr, stopping validation")
-                    break
+            while (!latch.await(300, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                if (isCancelled()) {
+                    com.arthenica.ffmpegkit.FFmpegKit.cancel(sessionId)
+                    throw kotlinx.coroutines.CancellationException("Validation cancelled by user")
                 }
             }
         } finally {
-            progressTicker.cancel()
             onProgress(100, 0)
         }
+
+        val totalErrors = errorCounter.get()
+        val sampleResults = emptyList<String>()
 
         val isValid = totalErrors == 0
         val errorMessage = if (isValid) {

@@ -4,6 +4,16 @@ All notable user-facing changes to LibriSync. Entries are phrased for the
 Google Play "What's new" field. Earlier entries were reconstructed from git
 history (no changelog was kept before v0.0.24), so wording is approximate.
 
+## v0.0.32
+
+- Audible downloads work again for accounts Audible started refusing around 21 October
+  ("denied a content license", often only for Audible Plus / membership titles). Audible
+  stopped accepting the way older app versions registered; new sign-ins now register
+  the way the current Audible app does.
+- **Sign out of your Audible account and sign in again** to apply the fix. Affected
+  accounts show a warning on the Library and Accounts tabs, even if you dismissed the
+  earlier one. Your library, settings and downloaded books are kept.
+
 ## v0.0.31
 
 - Audible accounts signed in before v0.0.30 are now flagged. They still download, but

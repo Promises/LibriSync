@@ -1,6 +1,7 @@
 # Audible device registration — profiles, the 2026-09 throttle, and the deferred switcher
 
-**Status:** LibriSync registers as **iPhone** and that is the shipped, working path (v0.0.30).
+**Status:** LibriSync registers as **iPhone** and that is the shipped, working path (v0.0.30),
+with the Audible 4.60 iPhone profile since the 2026-10 throttle (see below).
 A settings switcher between iPhone and Android profiles is **deliberately deferred** — see
 the decision below. This doc exists so the recipe and the reasoning survive; do not rely on
 chat memory for it.
@@ -16,16 +17,17 @@ chat memory for it.
 - The "iPhone fixes it, Android doesn't" pattern everyone observed was **incidental**: the
   iPhone/audible-cli path used a correct-length GUID serial and so dodged the bug. It was
   never really iPhone-vs-Android; it was serial length.
-- **LibriSync was never exposed to the bug.** We register as iPhone with a 16-byte/32-hex
-  serial (`generateDeviceSerial()` in `modules/expo-rust-bridge/index.ts`), which is exactly
+- **LibriSync was never exposed to the bug.** We registered as iPhone with a 16-byte/32-hex
+  serial (`generateDeviceSerial()` in `modules/expo-rust-bridge/index.ts`), which was exactly
   the iPhone/audible-cli (`Mkb79IPhone`) recipe. We never sent a 20-byte serial.
+- **2026-10: Audible throttles that old iPhone profile too.** See the section below.
 
 ## The two profiles
 
 | | **iPhone** (what we ship) | **Android** (upstream default) |
 |---|---|---|
 | `device_type` | `A2CZJZGLK2JJVM` | `A10KISP2GWF0E4` |
-| Serial | GUID, 32 hex chars (16 bytes) — we generate 16 | **10 bytes / 20 hex chars** (the load-bearing detail) |
+| Serial | 40 random ASCII letters and digits (was 32 hex chars until 2026-10) | **10 bytes / 20 hex chars** (the load-bearing detail) |
 | Login surface | iOS (`amzn_audible_ios*`, maplanding on `amazon.TLD`, `forceMobileLayout=true`) | Android (`amzn_audible_android_aui*`, maplanding on `audible.TLD`, `disableLoginPrepopulate=1`) |
 | Codecs available | **AAC-LC only** | AAC-LC **and xHE-AAC** |
 | xHE-AAC / Widevine | No | Yes (requires a Widevine CDM decryption path) |
@@ -76,7 +78,7 @@ throttles — the exact failure that started this.
    - `user_context_map.frc` in the **registration body** (added in PR #84), plus the Android
      frc/map-md/sid sign-in cookies.
 2. **Serial length** — the Android profile **must** use a **10-byte** serial (20 hex chars).
-   Our `generateDeviceSerial()` produces 16 bytes; keep 16 for iPhone, use 10 for Android.
+   Our `generateDeviceSerial()` produces the 40-character iPhone format; use 10 bytes for Android.
 3. **Settings UI** — a picker (iPhone / Android). Not a live toggle: switching **forces a
    full re-registration** (sign out + sign in). Guard against users re-registering
    repeatedly and throttling themselves.
@@ -98,10 +100,29 @@ then (a) building the Android switcher wouldn't have fixed it anyway, and (b) wh
 real second cause is would be directly portable to us. This is why the hourly upstream watch
 (rmcrackan/AudibleApi, rmcrackan/Libation, issue 2021) stays running.
 
+## 2026-10: the old iPhone profile is throttled too
+
+From about 2026-10-21, fresh registrations with the iPhone profile we shipped in v0.0.30
+(app 3.56.2, iOS 15.0.0, software 35602678, 32-character hex serial) are refused on their
+licence requests with `AYCL / CustomerThrottled`, while the official app on the same account
+is granted. mkb79 reproduced it on a German account: the same title is denied under that
+profile and granted under the Audible 4.60 one (app 4.60, iOS 26.2, software 46000856,
+40-character alphanumeric serial). Serial length and version fields changed together, so the
+exact trigger is not isolated. Fixed in mkb79/audible v0.13.1 (mkb79/Audible#909, PR #910).
+
+We now register with the 4.60 profile (`IPHONE_*` constants in `native/rust-core/src/api/auth.rs`,
+`generateDeviceSerial()` in the TS bridge). Existing registrations keep their old serial, so
+`isLegacyAudibleRegistration()` also flags iPhone registrations whose serial is not 40
+characters; signing out and back in re-registers them.
+
+Libation users hit the same wave (rmcrackan/Libation#2110, #2112, #2121); there, switching to
+its corrected Android profile also cleared it.
+
 ## References
 
 - AudibleApi PR #84 (Mbucari, "Fix Android device registration") — the root-cause fix.
 - Libation issue 2021 ("License denied error message - unable to download").
 - Our fix commit: `0eebd71` — register as the iPhone device type (v0.0.30).
+- mkb79/Audible#909 and PR #910 — the Audible 4.60 iPhone profile (audible v0.13.1).
 - Serial generation: `generateDeviceSerial()` in `modules/expo-rust-bridge/index.ts`.
 - Registration/auth: `native/rust-core/src/api/auth.rs`.

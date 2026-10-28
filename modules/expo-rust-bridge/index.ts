@@ -1200,26 +1200,35 @@ function unwrapResult<T>(response: RustResponse<T>): T {
 // Helper Functions
 // ============================================================================
 
+/** Length of the device serials generateDeviceSerial() produces. */
+export const AUDIBLE_DEVICE_SERIAL_LENGTH = 40;
+
 /**
- * Generate a random device serial number.
+ * Generate a random device serial number in the official Audible app's format.
  *
- * @returns 32-character hex string (16 bytes)
+ * Since 2026-10 Audible refuses licences (CustomerThrottled) to fresh iPhone
+ * registrations that use the old 32-character hex serial.
+ * Reference: mkb79/audible login.py build_device_serial() (v0.13.1).
+ *
+ * @returns 40 random ASCII letters and digits
  */
 function generateDeviceSerial(): string {
-  const bytes = new Uint8Array(16);
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  const byte = new Uint8Array(1);
+  let serial = '';
 
-  // Use crypto.getRandomValues if available, fallback to Math.random
-  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
-    crypto.getRandomValues(bytes);
-  } else {
-    for (let i = 0; i < bytes.length; i++) {
-      bytes[i] = Math.floor(Math.random() * 256);
+  while (serial.length < AUDIBLE_DEVICE_SERIAL_LENGTH) {
+    // Use crypto.getRandomValues if available, fallback to Math.random
+    if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+      crypto.getRandomValues(byte);
+    } else {
+      byte[0] = Math.floor(Math.random() * 256);
     }
+    // 248 = 4 * 62: skip the top bytes so every character is equally likely.
+    if (byte[0] < 248) serial += alphabet[byte[0] % alphabet.length];
   }
 
-  return Array.from(bytes)
-    .map(b => b.toString(16).padStart(2, '0').toUpperCase())
-    .join('');
+  return serial;
 }
 
 /**

@@ -939,6 +939,17 @@ impl Default for OAuthConfig {
     }
 }
 
+/// The Audible for iPhone build we register as, used for registration and token refresh.
+///
+/// Since 2026-10 Audible refuses licences (`AYCL / CustomerThrottled`) to fresh
+/// registrations with the previous profile (app 3.56.2, iOS 15.0.0, software 35602678,
+/// 32-character hex serial) and grants the same request under this one with a
+/// 40-character alphanumeric serial (generateDeviceSerial() in the TS bridge).
+/// Reference: mkb79/audible _device.py (v0.13.1, mkb79/Audible#909).
+const IPHONE_APP_VERSION: &str = "4.60";
+const IPHONE_OS_VERSION: &str = "26.2";
+const IPHONE_SOFTWARE_VERSION: &str = "46000856";
+
 /// PKCE code verifier and challenge pair
 ///
 /// PKCE (Proof Key for Code Exchange) is used to prevent authorization code
@@ -1457,14 +1468,14 @@ pub async fn exchange_authorization_code_as(
         // Reference: mkb79/audible register.py (register()).
         "registration_data": {
             "domain": "Device",
-            "app_version": "3.56.2",
+            "app_version": IPHONE_APP_VERSION,
             "device_serial": device_serial,
             "device_type": "A2CZJZGLK2JJVM",
             "device_name": format!(
                 "%FIRST_NAME%%FIRST_NAME_POSSESSIVE_STRING%%DUPE_STRATEGY_1ST%Audible for iPhone"
             ),
-            "os_version": "15.0.0",
-            "software_version": "35602678",
+            "os_version": IPHONE_OS_VERSION,
+            "software_version": IPHONE_SOFTWARE_VERSION,
             "device_model": "iPhone",
             "app_name": "Audible"
         },
@@ -1663,7 +1674,7 @@ pub async fn refresh_access_token(
 
     let mut form_data = StdHashMap::new();
     form_data.insert("app_name".to_string(), "Audible".to_string());
-    form_data.insert("app_version".to_string(), "3.56.2".to_string());
+    form_data.insert("app_version".to_string(), IPHONE_APP_VERSION.to_string());
     form_data.insert("source_token".to_string(), refresh_token.to_string());
     form_data.insert("source_token_type".to_string(), "refresh_token".to_string());
     form_data.insert(

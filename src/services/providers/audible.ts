@@ -10,6 +10,7 @@ import { Alert, Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import { Directory, Paths } from 'expo-file-system';
 import {
+  AUDIBLE_DEVICE_SERIAL_LENGTH,
   accountProvider,
   cancelAllBackgroundTasks,
   deleteAccount,
@@ -34,17 +35,22 @@ import { isDemoAccount } from '../demo/demoMode';
 export const AUDIBLE_IPHONE_DEVICE_TYPE = 'A2CZJZGLK2JJVM';
 
 /**
- * True for an Audible account whose stored registration predates the v0.0.30
- * device-type fix: it registered as the Android device type, or (from before
- * multi-account support) has no device_type at all. Signing out and back in
- * re-registers it as the iPhone device type and restores full-speed AAXC
- * downloads. Non-Audible and demo accounts are never flagged.
+ * True for an Audible account whose stored registration predates the current
+ * iPhone profile: it registered as the Android device type (before v0.0.30),
+ * has no device_type at all (from before multi-account support), or registered
+ * as iPhone with the old 32-character serial, which Audible throttles since
+ * 2026-10. Signing out and back in re-registers it with the current profile and
+ * restores full-speed AAXC downloads. Non-Audible and demo accounts are never
+ * flagged.
  */
 export function isLegacyAudibleRegistration(account: Account): boolean {
   if (accountProvider(account) !== 'audible') return false;
   const deviceType = account.identity?.device_type;
   if (deviceType === 'DEMO') return false;
-  return deviceType !== AUDIBLE_IPHONE_DEVICE_TYPE;
+  return (
+    deviceType !== AUDIBLE_IPHONE_DEVICE_TYPE ||
+    account.identity?.device_serial_number?.length !== AUDIBLE_DEVICE_SERIAL_LENGTH
+  );
 }
 
 /** Whether any account in the list is a pre-fix Audible registration. */

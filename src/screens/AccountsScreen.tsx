@@ -442,7 +442,7 @@ export default function AccountsScreen({ navigation }: any) {
                   isLegacyAudibleRegistration(acc)
                     ? {
                         color: colors.warning,
-                        accessibilityLabel: 'Needs re-login for full-speed downloads',
+                        accessibilityLabel: 'Needs signing in again for downloads to work',
                         onPress: showLegacyAccountInfo,
                       }
                     : null

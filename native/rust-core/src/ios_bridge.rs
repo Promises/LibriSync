@@ -167,7 +167,7 @@ where
 ///
 /// # Arguments
 /// * `locale_code` - Audible locale (e.g., "us", "uk", "de")
-/// * `device_serial` - 32-character hex device serial
+/// * `device_serial` - Device serial, or empty to generate one
 ///
 /// # Returns
 /// JSON string with format:
@@ -177,7 +177,8 @@ where
 ///   "data": {
 ///     "authorization_url": "https://...",
 ///     "pkce_verifier": "...",
-///     "state": "..."
+///     "state": "...",
+///     "device_serial": "..."
 ///   }
 /// }
 /// ```
@@ -192,6 +193,11 @@ pub extern "C" fn rust_generate_oauth_url(
     let response = catch_panic(|| {
         let locale_code = c_str_to_string(locale_code)?;
         let device_serial = c_str_to_string(device_serial)?;
+        let device_serial = if device_serial.trim().is_empty() {
+            crate::api::auth::generate_device_serial()
+        } else {
+            device_serial
+        };
 
         // Get locale
         let locale = crate::api::auth::Locale::from_country_code(&locale_code)
@@ -213,6 +219,7 @@ pub extern "C" fn rust_generate_oauth_url(
             "authorization_url": auth_url,
             "pkce_verifier": pkce.verifier,
             "state": state.value,
+            "device_serial": device_serial,
         });
 
         Ok(success_response(response))
@@ -261,7 +268,7 @@ pub extern "C" fn rust_parse_oauth_callback(callback_url: *const c_char) -> *mut
 /// # Arguments
 /// * `locale_code` - Audible locale (e.g., "us", "uk", "de")
 /// * `auth_code` - Authorization code from OAuth callback
-/// * `device_serial` - 32-character hex device serial
+/// * `device_serial` - Device serial from `rust_generate_oauth_url`
 /// * `pkce_verifier` - PKCE verifier string from initial auth request
 ///
 /// # Returns
@@ -331,7 +338,7 @@ pub extern "C" fn rust_exchange_auth_code(
 /// # Arguments
 /// * `locale_code` - Audible locale (e.g., "us", "uk", "de")
 /// * `refresh_token` - Refresh token from previous authentication
-/// * `device_serial` - 32-character hex device serial
+/// * `device_serial` - Device serial from `rust_generate_oauth_url`
 ///
 /// # Returns
 /// JSON string with format:

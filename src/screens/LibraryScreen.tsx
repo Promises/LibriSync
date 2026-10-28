@@ -58,7 +58,9 @@ const DOWNLOAD_PATH_KEY = 'download_path';
 const SELECTED_ACCOUNT_KEY = 'selected_audible_account_id';
 const LIBRARY_PREFS_KEY = 'library_preferences';
 const INCLUDE_PODCASTS_KEY = 'include_podcasts';
-const LEGACY_BANNER_DISMISSED_KEY = 'legacy_account_banner_dismissed';
+// Versioned: a dismissal of the v0.0.31 banner (Android registrations) must not hide
+// the 2026-10 one (old iPhone profile), which affects nearly every Audible account.
+const LEGACY_BANNER_DISMISSED_KEY = 'legacy_account_banner_dismissed_2026_10';
 const PAGE_SIZE = 100;
 
 type SortField = 'title' | 'release_date' | 'date_added' | 'series' | 'length' | 'downloaded';

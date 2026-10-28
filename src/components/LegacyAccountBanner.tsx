@@ -1,8 +1,9 @@
 /**
- * Warns that one or more Audible accounts were signed in before the v0.0.30
- * device-registration fix, so Audible rate-limits them and their downloads fall
- * back to the legacy AAX path, whose files are far larger and so slower to
- * download. Shown on the Library list, dismissible permanently. The Accounts tab
+ * Warns that one or more Audible accounts are registered with a device profile
+ * Audible no longer grants download licences to (see isLegacyAudibleRegistration).
+ * Their downloads fall back to the legacy AAX path where Audible allows it — far
+ * larger files, so slower — and fail where it doesn't. Shown on the Library list,
+ * dismissible permanently. The Accounts tab
  * instead marks each affected account with a warning icon that opens the same
  * explanation (showLegacyAccountInfo).
  *
@@ -22,12 +23,13 @@ interface Props {
   onDismiss?: () => void;
 }
 
-const INFO_TITLE = 'Why some downloads are slower';
+const INFO_TITLE = 'Why to sign in again';
 const INFO_BODY =
   "One or more of your Audible accounts were signed in before an app update that " +
   "changed how the app registers with Audible.\n\n" +
-  "Audible now rate-limits the old registration, so downloads for those accounts " +
-  "fall back to a slower legacy method and may occasionally fail.\n\n" +
+  "Audible now refuses downloads to the old registration. Where it can, the app " +
+  "falls back to a slower legacy method, but some books can't be downloaded that " +
+  "way at all.\n\n" +
   "To fix it: open the Accounts tab, sign out of the affected Audible account, then " +
   "sign in again. Your library, settings, and already-downloaded books are kept — " +
   "only the sign-in is redone.";
@@ -45,12 +47,12 @@ export default function LegacyAccountBanner({ dismissible = false, onDismiss }: 
     <View style={styles.container}>
       <Ionicons name="warning" size={20} color={colors.warning} style={styles.leadIcon} />
       <Text style={styles.message}>
-        Some Audible accounts need to be signed in again for full-speed downloads.
+        Some Audible accounts need to be signed in again for downloads to work.
       </Text>
       <TouchableOpacity
         onPress={showLegacyAccountInfo}
         hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-        accessibilityLabel="Why downloads are slower"
+        accessibilityLabel="Why to sign in again"
         style={styles.iconButton}
       >
         <Ionicons name="information-circle-outline" size={22} color={colors.accent} />

@@ -34,20 +34,35 @@ import { isDemoAccount } from '../demo/demoMode';
 export const AUDIBLE_IPHONE_DEVICE_TYPE = 'A2CZJZGLK2JJVM';
 
 /**
- * True for an Audible account whose stored registration predates the v0.0.30
- * device-type fix: it registered as the Android device type, or (from before
- * multi-account support) has no device_type at all. Signing out and back in
- * re-registers it as the iPhone device type and restores full-speed AAXC
- * downloads. Non-Audible and demo accounts are never flagged.
+ * The serial format of the current iPhone registration profile: 40 ASCII letters
+ * and digits. Registrations from before it used 32 uppercase hex characters, and
+ * since ~2026-10-21 Audible denies them download licences.
+ *
+ * Must match DEVICE_SERIAL_LEN / generate_device_serial in
+ * native/rust-core/src/api/auth.rs, for the same reason as the device type above.
+ */
+const CURRENT_PROFILE_SERIAL = /^[A-Za-z0-9]{40}$/;
+
+/**
+ * True for an Audible account registered with a profile Audible no longer grants
+ * licences to, so it needs signing out and back in:
+ *
+ * - the Android device type, or no device_type at all (before v0.0.30);
+ * - the iPhone device type with the old serial and version profile (before the
+ *   2026-10 profile update). Only the serial is stored, so it stands in for the
+ *   whole profile; both changed in the same release.
+ *
+ * Non-Audible and demo accounts are never flagged.
  */
 export function isLegacyAudibleRegistration(account: Account): boolean {
   if (accountProvider(account) !== 'audible') return false;
   const deviceType = account.identity?.device_type;
   if (deviceType === 'DEMO') return false;
-  return deviceType !== AUDIBLE_IPHONE_DEVICE_TYPE;
+  if (deviceType !== AUDIBLE_IPHONE_DEVICE_TYPE) return true;
+  return !CURRENT_PROFILE_SERIAL.test(account.identity?.device_serial_number ?? '');
 }
 
-/** Whether any account in the list is a pre-fix Audible registration. */
+/** Whether any account in the list is an outdated Audible registration. */
 export function hasLegacyAudibleAccounts(accounts: Account[]): boolean {
   return accounts.some(isLegacyAudibleRegistration);
 }

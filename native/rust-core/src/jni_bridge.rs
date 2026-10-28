@@ -252,12 +252,19 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGenera
         #[derive(Deserialize)]
         struct Params {
             locale_code: String,
+            /// Empty asks Rust to generate one; the serial used is returned.
+            #[serde(default)]
             device_serial: String,
         }
 
         match (move || -> crate::Result<String> {
             let params: Params = serde_json::from_str(&params_str)
                 .map_err(|e| crate::LibationError::InvalidInput(format!("Invalid JSON: {}", e)))?;
+            let device_serial = if params.device_serial.trim().is_empty() {
+                crate::api::auth::generate_device_serial()
+            } else {
+                params.device_serial
+            };
 
             // Get locale
             let locale = crate::api::auth::Locale::from_country_code(&params.locale_code)
@@ -275,7 +282,7 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGenera
             // Generate authorization URL
             let auth_url = crate::api::auth::generate_authorization_url(
                 &locale,
-                &params.device_serial,
+                &device_serial,
                 &pkce,
                 &state,
             )?;
@@ -284,6 +291,7 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGenera
                 "authorization_url": auth_url,
                 "pkce_verifier": pkce.verifier,
                 "state": state.value,
+                "device_serial": device_serial,
             });
 
             Ok(success_response(response))

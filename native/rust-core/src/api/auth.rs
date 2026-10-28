@@ -939,6 +939,33 @@ impl Default for OAuthConfig {
     }
 }
 
+// The Audible for iPhone profile we register as, from mkb79/Audible PR #910 (v0.13.1).
+//
+// Since ~2026-10-21 Audible denies ADRM licences (`AYCL / CustomerThrottled`) to
+// registrations made with the old profile: a 32-hex serial with app 3.56.2, iOS 15.0.0,
+// software 35602678. Upstream's controlled test on one account granted a licence to a
+// fresh registration with the values below and denied one with the old ones. Serial
+// format and version fields changed together and were not isolated, so keep them as a
+// set. An existing registration keeps its old profile: users must sign in again.
+//
+// The TS side flags old-profile accounts by serial format (isLegacyAudibleRegistration
+// in src/services/providers/audible.ts). Change DEVICE_SERIAL_LEN there too.
+pub const IPHONE_APP_VERSION: &str = "4.60";
+pub const IPHONE_OS_VERSION: &str = "26.2";
+pub const IPHONE_SOFTWARE_VERSION: &str = "46000856";
+pub const DEVICE_SERIAL_LEN: usize = 40;
+
+/// A fresh device serial: [`DEVICE_SERIAL_LEN`] random ASCII letters and digits.
+///
+/// Reference: mkb79/Audible `login.py` `build_device_serial()`.
+pub fn generate_device_serial() -> String {
+    rand::thread_rng()
+        .sample_iter(&rand::distributions::Alphanumeric)
+        .take(DEVICE_SERIAL_LEN)
+        .map(char::from)
+        .collect()
+}
+
 /// PKCE code verifier and challenge pair
 ///
 /// PKCE (Proof Key for Code Exchange) is used to prevent authorization code
@@ -1457,14 +1484,14 @@ pub async fn exchange_authorization_code_as(
         // Reference: mkb79/audible register.py (register()).
         "registration_data": {
             "domain": "Device",
-            "app_version": "3.56.2",
+            "app_version": IPHONE_APP_VERSION,
             "device_serial": device_serial,
             "device_type": "A2CZJZGLK2JJVM",
             "device_name": format!(
                 "%FIRST_NAME%%FIRST_NAME_POSSESSIVE_STRING%%DUPE_STRATEGY_1ST%Audible for iPhone"
             ),
-            "os_version": "15.0.0",
-            "software_version": "35602678",
+            "os_version": IPHONE_OS_VERSION,
+            "software_version": IPHONE_SOFTWARE_VERSION,
             "device_model": "iPhone",
             "app_name": "Audible"
         },
@@ -1663,7 +1690,7 @@ pub async fn refresh_access_token(
 
     let mut form_data = StdHashMap::new();
     form_data.insert("app_name".to_string(), "Audible".to_string());
-    form_data.insert("app_version".to_string(), "3.56.2".to_string());
+    form_data.insert("app_version".to_string(), IPHONE_APP_VERSION.to_string());
     form_data.insert("source_token".to_string(), refresh_token.to_string());
     form_data.insert("source_token_type".to_string(), "refresh_token".to_string());
     form_data.insert(
@@ -1863,8 +1890,7 @@ pub async fn register_device(
             LibationError::InternalError(format!("Failed to encode private key: {}", e))
         })?;
 
-    // Generate device serial number
-    let device_serial = Uuid::new_v4().to_string();
+    let device_serial = generate_device_serial();
 
     // In a full implementation, this would POST to the device registration endpoint
     // For now, return the generated device info
@@ -2227,6 +2253,18 @@ mod tests {
 
         assert_ne!(pkce1.verifier, pkce2.verifier);
         assert_ne!(pkce1.challenge, pkce2.challenge);
+    }
+
+    #[test]
+    fn test_generated_device_serial_format() {
+        let serials: Vec<String> = (0..32).map(|_| generate_device_serial()).collect();
+
+        for serial in &serials {
+            assert_eq!(serial.len(), DEVICE_SERIAL_LEN);
+            assert!(serial.chars().all(|c| c.is_ascii_alphanumeric()));
+        }
+        let unique: std::collections::HashSet<_> = serials.iter().collect();
+        assert_eq!(unique.len(), serials.len());
     }
 
     // ========== OAuth State Tests ==========

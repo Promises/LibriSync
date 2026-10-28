@@ -706,15 +706,6 @@ impl AudibleClient {
                 .is_some_and(|r| r.eq_ignore_ascii_case("CustomerThrottled"))
         });
 
-        if throttled {
-            return LibationError::LicenseDenied {
-                reason: "Audible is temporarily throttling download licences for this \
-                         account. Wait a while, then try again."
-                    .to_string(),
-                throttled: true,
-            };
-        }
-
         let detail = reasons
             .iter()
             .filter_map(|reason| {
@@ -736,6 +727,18 @@ impl AudibleClient {
             .collect::<Vec<_>>()
             .join("; ");
 
+        // Keep every reason, throttled or not: which validator refused (AYCL for podcasts
+        // and Plus titles, Ownership for purchases) is what tells the cases apart.
+        if throttled {
+            return LibationError::LicenseDenied {
+                reason: format!(
+                    "Audible is temporarily throttling download licences for this account. \
+                     Wait a while, then try again. [{detail}]"
+                ),
+                throttled: true,
+            };
+        }
+
         LibationError::LicenseDenied {
             reason: if detail.is_empty() {
                 "no reason given".to_string()
@@ -743,6 +746,19 @@ impl AudibleClient {
                 detail
             },
             throttled: false,
+        }
+    }
+
+    /// Add why the AAX fallback failed to the licence refusal it was standing in for.
+    /// The refusal stays the headline (and keeps `throttled`, so callers still back off);
+    /// the fallback's reason used to go to stderr, which Android discards.
+    fn with_fallback_failure(error: LibationError, fallback: &LibationError) -> LibationError {
+        match error {
+            LibationError::LicenseDenied { reason, throttled } => LibationError::LicenseDenied {
+                reason: format!("{reason} Legacy AAX download also failed: {fallback}"),
+                throttled,
+            },
+            other => other,
         }
     }
 
@@ -975,11 +991,10 @@ impl AudibleClient {
             // its escape hatch never fires for the current outage.
             Err(error @ LibationError::LicenseDenied { .. }) => {
                 eprintln!("Licence denied ({error}); falling back to the AAX service");
-                return self.aax_download_license(asin).await.map_err(|fallback| {
-                    // Report the original refusal: it is the actionable one.
-                    eprintln!("AAX fallback also failed: {fallback}");
-                    error
-                });
+                return self
+                    .aax_download_license(asin)
+                    .await
+                    .map_err(|fallback| Self::with_fallback_failure(error, &fallback));
             }
             Err(error) => return Err(error),
         };
@@ -1596,5 +1611,194 @@ mod tests {
         println!("   • Use download URL to fetch the audiobook file");
         println!("   • Use decryption keys to decrypt AAX/AAXC file");
         println!("   • Convert to M4B using FFmpeg");
+    }
+
+    // ------------------------------------------------------------------------
+    // Licence refusals: what reaches the user and the log.
+    // Shape from a real refusal (mkb79/Audible#909, 2026-10).
+    // ------------------------------------------------------------------------
+
+    const THROTTLED_DENIAL: &str = r#"{"content_license":{"status_code":"Denied","message":"License not granted to customer [A2HF4ET2OTZN6C] for asin [B0HHYMGNRW]","license_denial_reasons":[{"validationType":"Membership","rejectionReason":"RequesterEligibility","message":"Customer is not part of any plans"},{"validationType":"AYCL","rejectionReason":"CustomerThrottled","message":"Customer id [A2HF4ET2OTZN6C] being throttled"}]}}"#;
+
+    #[test]
+    fn throttled_denial_keeps_every_reason() {
+        let json: serde_json::Value = serde_json::from_str(THROTTLED_DENIAL).unwrap();
+        match AudibleClient::license_denied_error(&json["content_license"]) {
+            LibationError::LicenseDenied { reason, throttled } => {
+                assert!(throttled);
+                assert!(reason.contains("throttling"), "{reason}");
+                assert!(reason.contains("AYCL: CustomerThrottled"), "{reason}");
+                assert!(reason.contains("Membership: RequesterEligibility"), "{reason}");
+                assert!(!reason.contains("A2HF4ET2OTZN6C"), "customer id leaked: {reason}");
+            }
+            other => panic!("expected LicenseDenied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn failed_aax_fallback_is_reported_with_the_refusal() {
+        let refusal = LibationError::LicenseDenied {
+            reason: "throttled".to_string(),
+            throttled: true,
+        };
+        let fallback = LibationError::InvalidApiResponse {
+            message: "B0HHYMGNRW reports no available codecs".to_string(),
+            response_body: None,
+        };
+        match AudibleClient::with_fallback_failure(refusal, &fallback) {
+            LibationError::LicenseDenied { reason, throttled } => {
+                // Still throttled, so the Kotlin side still starts its cooldown.
+                assert!(throttled);
+                assert!(reason.starts_with("throttled"), "{reason}");
+                assert!(reason.contains("reports no available codecs"), "{reason}");
+            }
+            other => panic!("expected LicenseDenied, got {other:?}"),
+        }
+    }
+
+    /// Serve canned JSON on 127.0.0.1 by path prefix; record every raw request.
+    async fn mock_api(
+        routes: &'static [(&'static str, u16, &'static str)],
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 8192];
+                loop {
+                    let n = socket.read(&mut chunk).await.unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    let text = String::from_utf8_lossy(&buf).to_string();
+                    if let Some(end) = text.find("\r\n\r\n") {
+                        let body_len = text[..end]
+                            .lines()
+                            .filter_map(|l| l.split_once(':'))
+                            .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+                            .map(|(_, v)| v.trim().parse::<usize>().unwrap())
+                            .unwrap_or(0);
+                        if buf.len() >= end + 4 + body_len {
+                            break;
+                        }
+                    }
+                }
+                let request = String::from_utf8_lossy(&buf).to_string();
+                let path = request.split_whitespace().nth(1).unwrap_or("").to_string();
+                let (status, body) = routes
+                    .iter()
+                    .find(|(prefix, _, _)| path.starts_with(prefix))
+                    .map(|(_, status, body)| (*status, *body))
+                    .unwrap_or((404, "{}"));
+                log.lock().unwrap().push(request);
+                let response = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        (url, seen)
+    }
+
+    fn signed_in_client(base_url: &str) -> AudibleClient {
+        use crate::api::auth::{AccessToken, Account, CustomerInfo, Identity, Locale};
+        let identity = Identity {
+            access_token: AccessToken {
+                token: "Atna|test".to_string(),
+                expires_at: Utc::now() + chrono::Duration::hours(1),
+            },
+            refresh_token: "Atnr|test".to_string(),
+            device_private_key: String::new(),
+            adp_token: String::new(),
+            cookies: std::collections::HashMap::new(),
+            device_serial_number: "a".repeat(40),
+            device_type: "A2CZJZGLK2JJVM".to_string(),
+            device_name: "test".to_string(),
+            amazon_account_id: "amzn1.account.TEST".to_string(),
+            store_authentication_cookie: String::new(),
+            locale: Locale::us(),
+            customer_info: CustomerInfo::default(),
+        };
+        let account = Account {
+            account_id: "test".to_string(),
+            account_name: "Test".to_string(),
+            library_scan: true,
+            decrypt_key: String::new(),
+            identity: Some(identity),
+        };
+        AudibleClient::new(account).unwrap().with_base_url(base_url)
+    }
+
+    /// The whole refusal path a podcast episode took on 2026-10-28: one licence request,
+    /// refused as throttled, then the AAX fallback, which has nothing to offer.
+    #[tokio::test]
+    async fn throttled_podcast_refusal_reports_both_failures_after_one_request() {
+        static ROUTES: &[(&str, u16, &str)] = &[
+            ("/1.0/content/B0HHYMGNRW/licenserequest", 200, THROTTLED_DENIAL),
+            ("/1.0/library/B0HHYMGNRW", 200, r#"{"item":{"asin":"B0HHYMGNRW","available_codecs":[]}}"#),
+        ];
+        let (url, seen) = mock_api(ROUTES).await;
+        let client = signed_in_client(&url);
+
+        let error = match client
+            .build_download_license("B0HHYMGNRW", DownloadQuality::High, false)
+            .await
+        {
+            Ok(_) => panic!("a refused licence must not succeed"),
+            Err(error) => error,
+        };
+
+        match &error {
+            LibationError::LicenseDenied { reason, throttled } => {
+                assert!(*throttled);
+                assert!(reason.contains("AYCL: CustomerThrottled"), "{reason}");
+                assert!(reason.contains("reports no available codecs"), "{reason}");
+            }
+            other => panic!("expected LicenseDenied, got {other:?}"),
+        }
+
+        let requests = seen.lock().unwrap().clone();
+        let licence_requests: Vec<_> = requests
+            .iter()
+            .filter(|r| r.starts_with("POST /1.0/content/B0HHYMGNRW/licenserequest"))
+            .collect();
+        assert_eq!(licence_requests.len(), 1, "a licence request must never be retried");
+        assert!(
+            licence_requests[0].contains(r#""drm_types":["Adrm","Mpeg"]"#),
+            "podcast episodes need Mpeg offered: {}",
+            licence_requests[0]
+        );
+    }
+
+    /// A granted podcast licence is plain MP3: `drm_type` Mpeg, an offline URL, and no
+    /// voucher or key. It must come back as a keyless download, not an error.
+    #[tokio::test]
+    async fn granted_podcast_licence_is_a_keyless_mp3_download() {
+        static ROUTES: &[(&str, u16, &str)] = &[(
+            "/1.0/content/B0HHYMGNRW/licenserequest",
+            200,
+            r#"{"content_license":{"asin":"B0HHYMGNRW","status_code":"Granted","message":"Ownership: User has Purchase rights","drm_type":"Mpeg","granted_right":"Download","content_metadata":{"content_reference":{"acr":"CR!TEST","asin":"B0HHYMGNRW","codec":"mp42_32_22050_mono","content_format":"MPEG","content_size_in_bytes":28147302},"content_url":{"offline_url":"https://example.invalid/episode.mp3"}}}}"#,
+        )];
+        let (url, seen) = mock_api(ROUTES).await;
+        let client = signed_in_client(&url);
+
+        let license = match client
+            .build_download_license("B0HHYMGNRW", DownloadQuality::High, false)
+            .await
+        {
+            Ok(license) => license,
+            Err(error) => panic!("granted podcast licence failed: {error}"),
+        };
+
+        assert_eq!(license.drm_type, DrmType::Mpeg);
+        assert_eq!(license.download_url, "https://example.invalid/episode.mp3");
+        assert!(license.decryption_keys.is_none());
+        assert_eq!(seen.lock().unwrap().len(), 1, "one request, no fallback");
     }
 }

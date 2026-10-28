@@ -2200,7 +2200,11 @@ class DownloadOrchestrator(
 
                 mapOf("success" to true, "data" to dataMap)
             } else {
-                mapOf("success" to false, "error" to json.getString("error"))
+                mapOf(
+                    "success" to false,
+                    "error" to json.getString("error"),
+                    "error_code" to json.opt("error_code").takeIf { it != JSONObject.NULL }
+                )
             }
         } catch (e: Exception) {
             mapOf("success" to false, "error" to "Parse error: ${e.message}")

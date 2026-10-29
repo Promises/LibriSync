@@ -664,7 +664,7 @@ impl AudibleClient {
     }
 
     /// Strip the customer id Audible embeds in denial messages, e.g.
-    /// "License not granted to customer [A2HF4ET2OTZN6C] for asin [B002VA9SWS]".
+    /// "License not granted to customer [A1TESTCUSTOMER] for asin [B002VA9SWS]".
     /// Upstream does the same before logging. Reference:
     /// AudibleApi/ApiExceptions/ContentLicenseDeniedException.cs:11,33-37
     fn redact_customer_id(message: &str) -> String {
@@ -1287,9 +1287,9 @@ mod tests {
 
     #[test]
     fn denial_messages_do_not_leak_the_customer_id() {
-        let raw = "License not granted to customer [A2HF4ET2OTZN6C] for asin [B002VA9SWS]";
+        let raw = "License not granted to customer [A1TESTCUSTOMER] for asin [B002VA9SWS]";
         let clean = AudibleClient::redact_customer_id(raw);
-        assert!(!clean.contains("A2HF4ET2OTZN6C"), "customer id must not survive: {clean}");
+        assert!(!clean.contains("A1TESTCUSTOMER"), "customer id must not survive: {clean}");
         // The ASIN is not personal and stays: it is what makes the error actionable.
         assert!(clean.contains("[B002VA9SWS]"), "asin should be kept: {clean}");
         assert!(clean.contains("[##############]"));

@@ -436,6 +436,13 @@ impl AudibleClient {
         &self.base_url
     }
 
+    /// Point the client at another host, e.g. a local test server.
+    #[cfg(test)]
+    pub(crate) fn with_base_url(mut self, base_url: &str) -> Self {
+        self.base_url = base_url.to_string();
+        self
+    }
+
     /// Perform a GET request
     ///
     /// # Arguments

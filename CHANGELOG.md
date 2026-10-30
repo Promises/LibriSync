@@ -13,6 +13,12 @@ history (no changelog was kept before v0.0.24), so wording is approximate.
 - **Sign out of your Audible account and sign in again** to apply the fix. Affected
   accounts show a warning on the Library and Accounts tabs, even if you dismissed the
   earlier one. Your library, settings and downloaded books are kept.
+- When Audible temporarily refuses downloads for an account, LibriSync now actually
+  pauses for an hour as intended. Before, retries and auto-download kept asking, which
+  can make the refusal last longer.
+- Download errors now say which check Audible refused the download on, and why the
+  slower fallback download didn't work either, instead of a generic "throttling"
+  message.
 
 ## v0.0.31
 

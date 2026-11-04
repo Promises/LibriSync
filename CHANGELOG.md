@@ -4,6 +4,25 @@ All notable user-facing changes to LibriSync. Entries are phrased for the
 Google Play "What's new" field. Earlier entries were reconstructed from git
 history (no changelog was kept before v0.0.24), so wording is approximate.
 
+## v0.0.33
+
+- Chirp support — sign in with your Chirp email and password, then sync and download
+  your library alongside Audible and Libro.fm. Chirp books are DRM-free.
+- Chirp books download as one file with a chapter per track, or as MP3s split by
+  chapter, following your Download Format setting.
+- Chirp accounts that sign in with Google or another social login (no password) aren't
+  supported yet.
+- Tapping download now tells you what actually happened: started, queued behind
+  another download, already in progress, or the reason the store refused it — instead
+  of always saying "Download Started".
+- The Accounts list shows which store each account belongs to, with an icon for each.
+- Cancelling a book that downloads in parts now stops it, instead of moving on to the
+  next part.
+- A book that downloads in parts no longer shows as "Downloaded" before its last part
+  has finished.
+- Auto-download no longer asks Audible for books from other stores.
+- A book owned by two accounts at the same store now shows under both.
+
 ## v0.0.32
 
 - Audible downloads work again for accounts Audible started refusing around 21 October

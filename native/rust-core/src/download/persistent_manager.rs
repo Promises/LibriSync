@@ -45,6 +45,9 @@ pub enum TaskStatus {
     Copying,
     #[serde(rename = "encoding")]
     Encoding,
+    /// Joining a multi-part download (Chirp's per-track files) into one book.
+    #[serde(rename = "joining")]
+    Joining,
 }
 
 impl TaskStatus {
@@ -60,6 +63,7 @@ impl TaskStatus {
             TaskStatus::Validating => "validating",
             TaskStatus::Copying => "copying",
             TaskStatus::Encoding => "encoding",
+            TaskStatus::Joining => "joining",
         }
     }
 
@@ -75,6 +79,7 @@ impl TaskStatus {
             "validating" => Ok(TaskStatus::Validating),
             "copying" => Ok(TaskStatus::Copying),
             "encoding" => Ok(TaskStatus::Encoding),
+            "joining" => Ok(TaskStatus::Joining),
             _ => Err(LibationError::InvalidInput(format!("Invalid task status: {}", s))),
         }
     }

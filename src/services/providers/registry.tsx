@@ -14,7 +14,7 @@ import type { Ionicons } from '@expo/vector-icons';
 import type { Account, ProviderId } from '../../../modules/expo-rust-bridge';
 import type { ColorScheme } from '../../styles/theme';
 import LoginScreen from '../../screens/LoginScreen';
-import LibroFmLoginScreen from '../../screens/LibroFmLoginScreen';
+import CredentialLoginScreen from '../../screens/CredentialLoginScreen';
 import AudibleAccountDetails from '../../components/AudibleAccountDetails';
 import {
   SELECTED_AUDIBLE_ACCOUNT_KEY,
@@ -26,10 +26,11 @@ import {
   signOutAudible,
 } from './audible';
 import { SELECTED_LIBROFM_ACCOUNT_KEY, signOutLibroFm } from './librofm';
+import { SELECTED_CHIRP_ACCOUNT_KEY, signOutChirp } from './chirp';
 
 type IoniconName = React.ComponentProps<typeof Ionicons>['name'];
 
-/** Both login screens already share this shape — see LoginScreen / LibroFmLoginScreen. */
+/** Every login screen shares this shape — see LoginScreen / CredentialLoginScreen. */
 export interface ProviderLoginProps {
   onLoginSuccess: (account: Account) => void;
   onCancel?: () => void;
@@ -83,6 +84,38 @@ export interface ProviderEntry {
   signOut: (dbPath: string, account: Account) => Promise<void>;
   signOutTitle: string;
   signOutPrompt: (account: Account) => { title: string; message: string };
+
+  /**
+   * Books download through the Rust provider's `DownloadPlan`
+   * (`enqueueProviderDownload`). Audible is the one exception: it still builds its
+   * download in Kotlin (`enqueueDownloadNew`), and flips to true when it moves onto
+   * `enqueueProviderBook`.
+   */
+  downloadsThroughPlan: boolean;
+}
+
+/**
+ * A `Login` for a store that signs in with email + password through its Rust
+ * provider. Created once per store at module load, so the component identity is
+ * stable across renders.
+ */
+function credentialLogin(
+  provider: ProviderId,
+  providerName: string,
+  blurb: string,
+): React.ComponentType<ProviderLoginProps> {
+  function StoreLogin(props: ProviderLoginProps) {
+    return (
+      <CredentialLoginScreen
+        {...props}
+        provider={provider}
+        providerName={providerName}
+        blurb={blurb}
+      />
+    );
+  }
+  StoreLogin.displayName = `${providerName}Login`;
+  return StoreLogin;
 }
 
 const AUDIBLE: ProviderEntry = {
@@ -110,12 +143,21 @@ const AUDIBLE: ProviderEntry = {
     };
   },
   signOut: signOutAudible,
+  downloadsThroughPlan: false,
   signOutTitle: 'Log Out',
   signOutPrompt: () => ({
     title: 'Logout',
     message: 'Are you sure you want to log out?',
   }),
 };
+
+/** The stores' sign-out confirmation: their files stay, only the account goes. */
+function storeSignOutPrompt(account: Account) {
+  return {
+    title: 'Sign Out',
+    message: `Remove ${account.account_name} from LibriSync? Downloaded files are kept.`,
+  };
+}
 
 const LIBROFM: ProviderEntry = {
   id: 'librofm',
@@ -125,18 +167,50 @@ const LIBROFM: ProviderEntry = {
   tint: 'accent',
   selectedAccountKey: SELECTED_LIBROFM_ACCOUNT_KEY,
   formatName: (account) => account.account_name || account.account_id,
-  // LibroFmLoginScreen persists the account itself before calling back.
-  Login: LibroFmLoginScreen,
+  // CredentialLoginScreen persists the account itself before calling back.
+  Login: credentialLogin(
+    'librofm',
+    'Libro.fm',
+    'Sign in to sync and download your Libro.fm audiobooks. DRM-free.',
+  ),
   signOut: signOutLibroFm,
+  downloadsThroughPlan: true,
   signOutTitle: 'Sign Out',
-  signOutPrompt: (account) => ({
-    title: 'Sign Out',
-    message: `Remove ${account.account_name} from LibriSync? Downloaded files are kept.`,
-  }),
+  signOutPrompt: storeSignOutPrompt,
+};
+
+const CHIRP: ProviderEntry = {
+  id: 'chirp',
+  name: 'Chirp',
+  description: 'Sign in to sync and download your Chirp library. DRM-free.',
+  icon: 'pricetag-outline',
+  tint: 'accent',
+  selectedAccountKey: SELECTED_CHIRP_ACCOUNT_KEY,
+  // account_id is `chirp:<user id>`; the email is the readable name.
+  formatName: (account) => account.account_name || account.account_id,
+  Login: credentialLogin(
+    'chirp',
+    'Chirp',
+    'Sign in to sync and download your Chirp audiobooks. DRM-free.',
+  ),
+  signOut: signOutChirp,
+  downloadsThroughPlan: true,
+  signOutTitle: 'Sign Out',
+  signOutPrompt: storeSignOutPrompt,
 };
 
 /** Providers you hold an account with, in the order they appear in the picker. */
-export const ACCOUNT_PROVIDERS: ProviderEntry[] = [AUDIBLE, LIBROFM];
+export const ACCOUNT_PROVIDERS: ProviderEntry[] = [AUDIBLE, LIBROFM, CHIRP];
+
+/**
+ * The provider whose Rust `DownloadPlan` downloads a book from `source`, or null
+ * when that source downloads some other way (Audible, LibriVox).
+ */
+export function planDownloadProvider(source: ProviderId | undefined): ProviderEntry | null {
+  const entry = ACCOUNT_PROVIDERS.find((e) => e.id === source);
+  return entry?.downloadsThroughPlan ? entry : null;
+}
+
 
 /**
  * LibriVox: a catalogue, not an account. Presented as a browse destination.
@@ -148,6 +222,13 @@ export const LIBRIVOX_BROWSE = {
   icon: 'book-outline' as IoniconName,
   tint: 'success' as keyof ColorScheme,
 };
+
+/** Every source a book can come from, with its display name — for library filters. */
+export const BOOK_SOURCES: { id: ProviderId; name: string }[] = [
+  { id: AUDIBLE.id, name: AUDIBLE.name },
+  { id: LIBRIVOX_BROWSE.id, name: LIBRIVOX_BROWSE.name },
+  ...ACCOUNT_PROVIDERS.filter((e) => e.id !== AUDIBLE.id).map(({ id, name }) => ({ id, name })),
+];
 
 /**
  * The entry for an account's provider.

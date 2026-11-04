@@ -257,29 +257,38 @@ impl Provider for LibrofmProvider {
         let mut added = 0i32;
         let mut updated = 0i32;
         for b in &lib.audiobooks {
-            let existed = queries::find_book_by_asin(db.pool(), &b.isbn).await?.is_some();
             let (narrators, duration) = b
                 .audiobook_info
                 .as_ref()
                 .map(|i| (i.narrators.clone(), i.duration))
                 .unwrap_or((Vec::new(), 0));
             let cover = b.cover_url.as_deref().map(absolute_cover_url);
-            queries::insert_libro_book(
+            let (_, inserted) = queries::insert_store_book(
                 db.pool(),
-                &b.isbn,
-                &b.title,
-                &b.authors,
-                &narrators,
-                b.description.as_deref().unwrap_or(""),
-                duration / 60,
-                cover.as_deref(),
-                &account,
+                &queries::StoreBook {
+                    source: ProviderId::Librofm.as_str(),
+                    product_id: &b.isbn,
+                    title: &b.title,
+                    subtitle: None,
+                    authors: &b.authors,
+                    narrators: &narrators,
+                    publisher: None,
+                    description: b.description.as_deref().unwrap_or(""),
+                    length_in_minutes: duration / 60,
+                    cover_url: cover.as_deref(),
+                    language: "english",
+                    date_published: None,
+                    is_abridged: false,
+                    is_downloadable: true,
+                    series: None,
+                    account: &account,
+                },
             )
             .await?;
-            if existed {
-                updated += 1;
-            } else {
+            if inserted {
                 added += 1;
+            } else {
+                updated += 1;
             }
         }
 
@@ -338,6 +347,7 @@ impl Provider for LibrofmProvider {
                     .collect(),
                 embed_metadata: false,
                 chapters: Self::chapters_from(&manifest.tracks),
+                join_parts: false,
             });
         }
 
@@ -363,6 +373,7 @@ impl Provider for LibrofmProvider {
             }],
             embed_metadata: false,
             chapters: Vec::new(),
+            join_parts: false,
         })
     }
 }

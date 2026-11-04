@@ -1664,22 +1664,52 @@ pub async fn clear_library(pool: &SqlitePool) -> Result<()> {
     Ok(())
 }
 
-/// Insert a LibriVox book with all related data in one operation.
-/// Insert a Libro.fm book (source='librofm', DRM-free). Product id = the ISBN.
-/// Owned by [account] (the Libro.fm email). Skips if it already exists.
-pub async fn insert_libro_book(
-    pool: &SqlitePool,
-    isbn: &str,
-    title: &str,
-    authors: &[String],
-    narrators: &[String],
-    description: &str,
-    length_in_minutes: i32,
-    cover_url: Option<&str>,
-    account: &str,
-) -> Result<i64> {
-    if let Some(existing) = find_book_by_asin(pool, isbn).await? {
-        return Ok(existing.book_id);
+/// A book from a DRM-free store (Libro.fm, Chirp, …), as a provider hands it to
+/// [`insert_store_book`]. `product_id` must already be unique across sources — it
+/// shares the `audible_product_id` column with real ASINs, so providers whose ids
+/// could collide prefix them (Chirp: `chirp_<id>`).
+pub struct StoreBook<'a> {
+    /// The `Books.source` value — a [`crate::providers::ProviderId`] string.
+    pub source: &'a str,
+    pub product_id: &'a str,
+    pub title: &'a str,
+    pub subtitle: Option<&'a str>,
+    pub authors: &'a [String],
+    pub narrators: &'a [String],
+    pub publisher: Option<&'a str>,
+    pub description: &'a str,
+    pub length_in_minutes: i32,
+    pub cover_url: Option<&'a str>,
+    /// Lower-case, matching what Audible sync stores ("english").
+    pub language: &'a str,
+    /// ISO 8601 date (YYYY-MM-DD), when the store gives one.
+    pub date_published: Option<&'a str>,
+    pub is_abridged: bool,
+    pub is_downloadable: bool,
+    pub series: Option<StoreSeries<'a>>,
+    /// The owning account's `Accounts.account_id`.
+    pub account: &'a str,
+}
+
+/// A store book's series membership. `series_key` is namespaced by the provider so it
+/// can't collide with an Audible series ASIN in `Series.audible_series_id`.
+pub struct StoreSeries<'a> {
+    pub series_key: &'a str,
+    pub name: &'a str,
+    /// The store's display position ("1", "2.5"), if any.
+    pub order: Option<&'a str>,
+}
+
+/// Insert a store book, or link an existing one to `book.account`.
+///
+/// Returns the book id and whether it was newly inserted. An existing book keeps its
+/// metadata (matching the Libro.fm behaviour this replaced), but is linked to the
+/// account through `BookAccounts`: a second account owning the same title must not be
+/// dropped just because the first one synced it already.
+pub async fn insert_store_book(pool: &SqlitePool, book: &StoreBook<'_>) -> Result<(i64, bool)> {
+    if let Some(existing) = find_book_by_asin(pool, book.product_id).await? {
+        link_book_account(pool, existing.book_id, book.account).await?;
+        return Ok((existing.book_id, false));
     }
 
     let result = sqlx::query(
@@ -1687,19 +1717,24 @@ pub async fn insert_libro_book(
         INSERT INTO Books (
             audible_product_id, title, subtitle, description, length_in_minutes,
             content_type, locale, picture_large, source,
-            is_abridged, is_spatial, language,
+            is_abridged, is_spatial, date_published, language,
             rating_overall, rating_performance, rating_story,
             is_finished, is_downloadable, is_ayce
-        ) VALUES (?, ?, NULL, ?, ?, 1, ?, ?, 'librofm', 0, 0, ?, 0.0, 0.0, 0.0, 0, 1, 0)
+        ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, 0, ?, ?, 0.0, 0.0, 0.0, 0, ?, 0)
         "#,
     )
-    .bind(isbn)
-    .bind(title)
-    .bind(description)
-    .bind(length_in_minutes)
+    .bind(book.product_id)
+    .bind(book.title)
+    .bind(book.subtitle)
+    .bind(book.description)
+    .bind(book.length_in_minutes)
     .bind("us")
-    .bind(cover_url)
-    .bind("english")
+    .bind(book.cover_url)
+    .bind(book.source)
+    .bind(book.is_abridged)
+    .bind(book.date_published)
+    .bind(book.language)
+    .bind(book.is_downloadable)
     .execute(pool)
     .await?;
 
@@ -1709,24 +1744,61 @@ pub async fn insert_libro_book(
         pool,
         &NewLibraryBook {
             book_id,
-            account: account.to_string(),
+            account: book.account.to_string(),
         },
     )
     .await?;
     insert_user_defined_item(pool, &NewUserDefinedItem::new(book_id)).await?;
 
-    for (i, author) in authors.iter().enumerate() {
+    for (i, author) in book.authors.iter().enumerate() {
         let contributor_id = upsert_contributor(pool, &NewContributor::new(author.clone())).await?;
         add_book_contributor(pool, book_id, contributor_id, Role::Author as i32, i as i16).await?;
     }
-    for (i, narrator) in narrators.iter().enumerate() {
+    for (i, narrator) in book.narrators.iter().enumerate() {
         let contributor_id =
             upsert_contributor(pool, &NewContributor::new(narrator.clone())).await?;
         add_book_contributor(pool, book_id, contributor_id, Role::Narrator as i32, i as i16)
             .await?;
     }
+    if let Some(publisher) = book.publisher.filter(|p| !p.trim().is_empty()) {
+        let contributor_id =
+            upsert_contributor(pool, &NewContributor::new(publisher.to_string())).await?;
+        add_book_contributor(pool, book_id, contributor_id, Role::Publisher as i32, 0).await?;
+    }
+    if let Some(series) = &book.series {
+        let series_id = upsert_series(
+            pool,
+            &NewSeries {
+                audible_series_id: series.series_key.to_string(),
+                name: Some(series.name.to_string()),
+            },
+        )
+        .await?;
+        let index = series.order.and_then(|o| o.parse::<f32>().ok()).unwrap_or(0.0);
+        add_book_to_series(pool, series_id, book_id, series.order.map(String::from), index)
+            .await?;
+    }
 
-    Ok(book_id)
+    Ok((book_id, true))
+}
+
+/// Record that `account` owns `book_id` (idempotent). Revives a link a previous scan
+/// marked deleted or absent.
+pub async fn link_book_account(pool: &SqlitePool, book_id: i64, account: &str) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO BookAccounts (book_id, account)
+        VALUES (?, ?)
+        ON CONFLICT(book_id, account) DO UPDATE SET
+            is_deleted = 0,
+            absent_from_last_scan = 0
+        "#,
+    )
+    .bind(book_id)
+    .bind(account)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 ///

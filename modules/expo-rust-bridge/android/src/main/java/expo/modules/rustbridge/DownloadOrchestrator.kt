@@ -119,8 +119,68 @@ class DownloadOrchestrator(
         outputDirectory: String,
     ): String {
         if (plan.parts.isEmpty()) throw Exception("Empty download plan for $asin")
+        if (plan.joinParts && plan.parts.any { it !is DownloadPart.PlainPart }) {
+            throw Exception("A joined download plan must contain only plain parts ($asin)")
+        }
         if (plan.chapters.isNotEmpty()) planChapters[asin] = plan.chapters
         return enqueuePlanPart(asin, title, plan, 0, outputDirectory)
+    }
+
+    /**
+     * Cache paths for every part of a joined plan, in order. Deterministic, so each part's
+     * enqueue derives the same list and the final part can hand all of them to the join.
+     */
+    private fun joinedPartPaths(asin: String, plan: DownloadPlan, audiobooksDir: File): List<String> =
+        plan.parts.mapIndexed { i, part ->
+            val ext = (part as DownloadPart.PlainPart).filename.substringAfterLast('.', "m4a")
+            File(audiobooksDir, "$asin-part${i + 1}.$ext").absolutePath
+        }
+
+    /** The FFmpeg side files a join reads: the concat list and the chapter markers. */
+    private class JoinFiles(val listFile: File, val chaptersFile: File?) {
+        fun delete() {
+            listFile.delete()
+            chaptersFile?.delete()
+        }
+    }
+
+    /**
+     * Write the concat demuxer's input list and, when the plan has chapters, an
+     * FFMETADATA file carrying them. Chapter times are absolute milliseconds from the
+     * start of the book, which is what the provider plan already gives.
+     */
+    private fun writeJoinFiles(asin: String, parts: List<String>, chapters: List<PlanChapter>): JoinFiles {
+        val dir = File(context.cacheDir, "audiobooks")
+        // The concat list quotes each path; a quote inside one is closed, escaped, reopened.
+        val listFile = File(dir, "$asin-join.txt").apply {
+            writeText(parts.joinToString("\n") { "file '${it.replace("'", "'\\''")}'" } + "\n")
+        }
+        val chaptersFile = chapters.takeIf { it.isNotEmpty() }?.let {
+            File(dir, "$asin-chapters.ffmeta").apply {
+                writeText(buildString {
+                    append(";FFMETADATA1\n")
+                    for (chapter in it) {
+                        append("[CHAPTER]\nTIMEBASE=1/1000\n")
+                        append("START=${chapter.startMs}\nEND=${chapter.endMs}\n")
+                        append("title=${escapeFfmetadata(chapter.title)}\n")
+                    }
+                })
+            }
+        }
+        return JoinFiles(listFile, chaptersFile)
+    }
+
+    /** FFMETADATA treats `=`, `;`, `#`, `\` and newlines as syntax; escape them in a value. */
+    private fun escapeFfmetadata(value: String): String =
+        value.replace(Regex("[=;#\\\\\n]")) { "\\${it.value}" }
+
+    /**
+     * The joined book's container: MP3 parts stay MP3 (a stream copy can't put MP3 in an
+     * M4B), everything else becomes an M4B.
+     */
+    private fun joinedOutputPath(asin: String, partPaths: List<String>, audiobooksDir: File): String {
+        val ext = if (partPaths.all { it.endsWith(".mp3", ignoreCase = true) }) "mp3" else "m4b"
+        return File(audiobooksDir, "$asin.$ext").absolutePath
     }
 
     /**
@@ -142,6 +202,8 @@ class DownloadOrchestrator(
         val partPrefix = if (plan.parts.size > 1) "part${index + 1}-" else ""
 
         val audiobooksDir = File(context.cacheDir, "audiobooks").apply { mkdirs() }
+        // A joined plan keeps every part in the cache until the last one lands.
+        val joinedParts = if (plan.joinParts) joinedPartPaths(asin, plan, audiobooksDir) else null
 
         // Resolve cache paths + finalize mode from the part kind.
         val encryptedPath: String
@@ -165,7 +227,13 @@ class DownloadOrchestrator(
                 aaxcKey = part.activationBytes
                 aaxcIv = ""
             }
-            is DownloadPart.PlainPart -> {
+            is DownloadPart.PlainPart -> if (joinedParts != null) {
+                encryptedPath = joinedParts[index]
+                decryptedCachePath = joinedOutputPath(asin, joinedParts, audiobooksDir)
+                plainAudio = true
+                aaxcKey = ""
+                aaxcIv = ""
+            } else {
                 encryptedPath = File(audiobooksDir, "$partPrefix${part.filename}").absolutePath
                 decryptedCachePath = encryptedPath
                 plainAudio = true
@@ -190,7 +258,10 @@ class DownloadOrchestrator(
             put("download_url", part.url)
             put("total_bytes", 0)
             put("download_path", encryptedPath)
-            put("output_path", decryptedCachePath)
+            // A completed task with an output path is what marks a book downloaded, and a
+            // part before the last isn't the book. With a cache path here, a book whose
+            // later parts never finished stayed linked to a file that doesn't exist.
+            put("output_path", if (isLastPart) decryptedCachePath else "")
             put("request_headers", JSONObject(part.headers))
         }
         val parsedEnqueue = parseJsonResponse(ExpoRustBridgeModule.nativeEnqueueDownload(enqueueParams.toString()))
@@ -215,16 +286,55 @@ class DownloadOrchestrator(
             totalBytes = 0,
             plainAudio = plainAudio,
             isFinalPart = isLastPart,
+            joinedParts = joinedParts,
+            partIndex = index,
+            partCount = plan.parts.size,
         )
 
-        // Multi-part: wait for this part to land in the book folder, then start the next.
-        // Chaining here (rather than from inside the monitoring job) keeps a part from
-        // cancelling the very job it is running on.
+        // Multi-part: once this part has landed, start the next. The wait runs in its own
+        // coroutine rather than inline, so enqueuing a book returns as soon as its first
+        // part is under way — inline, the caller (and the "Download Started" reply) waited
+        // for every part but the last to finish downloading. It stays outside the
+        // monitoring job so a part can't cancel the very job it is running on.
         if (!isLastPart) {
-            monitoringJobs[asin]?.join()
-            enqueuePlanPart(asin, title, plan, index + 1, outputDirectory)
+            val partJob = monitoringJobs[asin]
+            scope.launch {
+                partJob?.join()
+                // Only a part that actually completed may chain the next. A cancelled or
+                // failed part used to fall through too, so Cancel on a multi-part book just
+                // skipped to the next part.
+                val status = taskStatus(taskId)
+                if (status != "completed") {
+                    Log.d(TAG, "Stopping plan for $asin after part ${index + 1}/${plan.parts.size}: $status")
+                    // The parts already fetched can't be used without the rest.
+                    joinedParts?.forEach { File(it).delete() }
+                    planChapters.remove(asin)
+                    return@launch
+                }
+                try {
+                    enqueuePlanPart(asin, title, plan, index + 1, outputDirectory)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to enqueue part ${index + 2}/${plan.parts.size} of $asin", e)
+                    joinedParts?.forEach { File(it).delete() }
+                    planChapters.remove(asin)
+                    errorCallback?.invoke(asin, title, e.message ?: "Failed to start the next part")
+                }
+            }
         }
         taskId
+    }
+
+    /** The Rust task's current status, or null if it can't be read. */
+    private fun taskStatus(taskId: String): String? {
+        val params = JSONObject().apply {
+            put("db_path", dbPath)
+            put("task_id", taskId)
+        }
+        val parsed = parseJsonResponse(ExpoRustBridgeModule.nativeGetDownloadTask(params.toString()))
+        if (parsed["success"] != true) return null
+        return (parsed["data"] as? Map<*, *>)?.get("status") as? String
     }
 
     /**
@@ -662,13 +772,25 @@ class DownloadOrchestrator(
         aaxcIv: String,
         totalBytes: Long,
         plainAudio: Boolean = false,
-        isFinalPart: Boolean = true
+        isFinalPart: Boolean = true,
+        // Set for a joined plan: every part's cache path, handed to the join after the last.
+        joinedParts: List<String>? = null,
+        partIndex: Int = 0,
+        partCount: Int = 1,
     ) {
         // Cancel any existing monitoring for this ASIN
         monitoringJobs[asin]?.cancel()
 
-        // Send initial progress notification (0%)
-        progressCallback?.invoke(asin, "downloading", 0.0, 0, totalBytes, 0L)
+        // A joined book is one download to the user, so report progress across all of its
+        // parts rather than restarting at 0% per track. Per-part byte counts would then
+        // contradict that percentage, so they're left out of the notification.
+        val overall = joinedParts != null && partCount > 1
+        fun overallPct(partPct: Double) = (partIndex * 100.0 + partPct) / partCount
+
+        // Send initial progress notification
+        progressCallback?.invoke(
+            asin, "downloading", if (overall) overallPct(0.0) else 0.0, 0, if (overall) 0 else totalBytes, 0L
+        )
 
         val job = scope.launch {
             try {
@@ -702,7 +824,13 @@ class DownloadOrchestrator(
                             "downloading" -> {
                                 // Send progress notification only while downloading
                                 speedEta.update(bytesDownloaded, taskTotalBytes)
-                                progressCallback?.invoke(asin, "downloading", percentage, bytesDownloaded, taskTotalBytes, speedEta.etaSeconds)
+                                if (overall) {
+                                    // bytes_downloaded still feeds the speed readout; the
+                                    // per-part ETA would understate the book's, so it's dropped.
+                                    progressCallback?.invoke(asin, "downloading", overallPct(percentage), bytesDownloaded, 0, 0L)
+                                } else {
+                                    progressCallback?.invoke(asin, "downloading", percentage, bytesDownloaded, taskTotalBytes, speedEta.etaSeconds)
+                                }
                             }
                             "paused" -> {
                                 Log.d(TAG, "Download paused for $asin - will resume monitoring when unpaused")
@@ -718,7 +846,18 @@ class DownloadOrchestrator(
 
                                 // Trigger conversion or plain MP3 copy (cancellable via coroutine scope)
                                 try {
-                                    if (plainAudio) {
+                                    if (joinedParts != null) {
+                                        if (isFinalPart) {
+                                            triggerConversion(
+                                                asin, title, encryptedPath, decryptedCachePath,
+                                                outputDirectory, "", "", taskId, joinInputs = joinedParts
+                                            )
+                                        } else {
+                                            // Stays in the cache for the join; the book isn't
+                                            // done, so no output path and no completion.
+                                            updateTaskStatusInDb(taskId, "completed")
+                                        }
+                                    } else if (plainAudio) {
                                         triggerPlainAudioCopy(asin, title, encryptedPath, outputDirectory, taskId, isFinalPart)
                                     } else {
                                         triggerConversion(
@@ -833,16 +972,33 @@ class DownloadOrchestrator(
         outputDirectory: String,
         aaxcKey: String,
         aaxcIv: String,
-        taskId: String? = null
+        taskId: String? = null,
+        // A joined plan's parts, in order. Set, the "decrypt" step instead stream-copies
+        // them into one file with the plan's chapters as markers; the metadata, cover,
+        // validation and output-format steps that follow are the same as for Audible.
+        joinInputs: List<String>? = null,
     ) = withContext(Dispatchers.IO) {
         // Resolve task ID outside try so it's available in catch
         val resolvedTaskId = taskId ?: findTaskIdForAsin(asin)
+        val stage = if (joinInputs != null) "joining" else "decrypting"
+        var joinFiles: JoinFiles? = null
 
         // Fresh conversion: clear any stale cancel flag from a previous attempt.
         cancelledConversions.remove(asin)
 
         try {
-            Log.d(TAG, "Starting conversion for $asin...")
+            Log.d(TAG, "Starting ${if (joinInputs != null) "join of ${joinInputs.size} parts" else "conversion"} for $asin...")
+
+            if (joinInputs != null) {
+                val missing = joinInputs.filter { File(it).length() <= 0L }
+                if (missing.isNotEmpty()) {
+                    Log.e(TAG, "Join of $asin is missing ${missing.size} part(s): $missing")
+                    resolvedTaskId?.let { updateTaskStatusInDb(it, "cancelled") }
+                    errorCallback?.invoke(asin, title, "Download incomplete — please download again")
+                    return@withContext
+                }
+                joinFiles = writeJoinFiles(asin, joinInputs, planChapters[asin].orEmpty())
+            }
 
             // Guard: a stale "completed" download task (its cache deleted by an earlier failed
             // convert) or a 0-byte download (e.g. an auth-failed response) leaves the encrypted
@@ -851,7 +1007,7 @@ class DownloadOrchestrator(
             // fresh download, and report an honest message. Audiobooks are always far larger than
             // this floor, so it only trips on empty/truncated files.
             val encFile = File(encryptedPath)
-            if (!encFile.exists() || encFile.length() < 64 * 1024L) {
+            if (joinInputs == null && (!encFile.exists() || encFile.length() < 64 * 1024L)) {
                 val len = if (encFile.exists()) encFile.length() else -1L
                 Log.e(TAG, "Encrypted source missing/too small for $asin ($len bytes) — download incomplete; resetting for re-download")
                 resolvedTaskId?.let { updateTaskStatusInDb(it, "cancelled") }
@@ -859,11 +1015,9 @@ class DownloadOrchestrator(
                 return@withContext
             }
 
-            // Persist decrypting stage to DB
-            resolvedTaskId?.let { updateTaskStatusInDb(it, "decrypting") }
-
-            // Notify decrypting stage
-            progressCallback?.invoke(asin, "decrypting", 0.0, 0, 0, 0L)
+            // Persist the decrypt/join stage to DB
+            resolvedTaskId?.let { updateTaskStatusInDb(it, stage) }
+            progressCallback?.invoke(asin, stage, 0.0, 0, 0, 0L)
 
             // Fetch metadata from database
             val metadata = fetchBookMetadata(asin)
@@ -894,26 +1048,55 @@ class DownloadOrchestrator(
             }
 
             // Decrypt using FFmpeg-Kit with metadata and cover art
+            // Input 0 is the audio; a joined book adds its chapter markers as the next input,
+            // so the cover's index depends on both.
+            val join = joinFiles
+            val chapterInput = if (join?.chaptersFile != null) 1 else null
+            val coverInput = (chapterInput ?: 0) + 1
             val command = buildList {
                 add("-y")
-                // Legacy AAX carries per-account activation bytes and no IV; AAXC carries
-                // a per-book key/iv pair. An empty IV is what tells them apart.
-                if (aaxcIv.isBlank()) {
-                    add("-activation_bytes")
-                    add(aaxcKey)
+                if (join != null) {
+                    add("-f")
+                    add("concat")
+                    add("-safe")
+                    add("0")
+                    add("-i")
+                    add(join.listFile.absolutePath)
+                    join.chaptersFile?.let {
+                        add("-i")
+                        add(it.absolutePath)
+                    }
                 } else {
-                    add("-audible_key")
-                    add(aaxcKey)
-                    add("-audible_iv")
-                    add(aaxcIv)
+                    // Legacy AAX carries per-account activation bytes and no IV; AAXC carries
+                    // a per-book key/iv pair. An empty IV is what tells them apart.
+                    if (aaxcIv.isBlank()) {
+                        add("-activation_bytes")
+                        add(aaxcKey)
+                    } else {
+                        add("-audible_key")
+                        add(aaxcKey)
+                        add("-audible_iv")
+                        add(aaxcIv)
+                    }
+                    add("-i")
+                    add(encryptedPath)
                 }
-                add("-i")
-                add(encryptedPath)
 
                 // Add cover art input if available
                 if (coverArtPath != null) {
                     add("-i")
                     add(coverArtPath)
+                }
+
+                // A joined book's global tags start empty (the first part's would otherwise
+                // leak through) and its chapters come from the plan, one per part.
+                if (join != null) {
+                    add("-map_metadata")
+                    add(chapterInput?.toString() ?: "-1")
+                    chapterInput?.let {
+                        add("-map_chapters")
+                        add(it.toString())
+                    }
                 }
 
                 // Add metadata tags if available
@@ -1009,7 +1192,7 @@ class DownloadOrchestrator(
 
                 if (coverArtPath != null) {
                     add("-map")
-                    add("1")    // Cover art from image file
+                    add(coverInput.toString())    // Cover art from image file
                     add("-disposition:v:0")
                     add("attached_pic")
                     add("-c:v")
@@ -1026,9 +1209,15 @@ class DownloadOrchestrator(
 
             // Probe total duration from the encrypted input's (unencrypted) container
             // metadata so decrypt can report real progress + ETA. 0 = unknown -> indeterminate.
-            val totalDurationSec = com.arthenica.ffmpegkit.FFprobeKit
-                .getMediaInformation(encryptedPath)
-                .mediaInformation?.duration?.toDoubleOrNull() ?: 0.0
+            // A joined book's length is the end of its last chapter (probing one part would
+            // only give that part's).
+            val totalDurationSec = if (joinInputs != null) {
+                (planChapters[asin]?.maxOfOrNull { it.endMs } ?: 0L) / 1000.0
+            } else {
+                com.arthenica.ffmpegkit.FFprobeKit
+                    .getMediaInformation(encryptedPath)
+                    .mediaInformation?.duration?.toDoubleOrNull() ?: 0.0
+            }
 
             // FFmpeg statistics stream: time = ms of media processed, speed = realtime multiplier.
             // Throttle to whole-percent steps to avoid hammering the notification.
@@ -1043,7 +1232,7 @@ class DownloadOrchestrator(
                         val etaSec = if (speed > 0.0)
                             ((totalDurationSec - processedSec) / speed).toLong().coerceAtLeast(0L)
                         else 0L
-                        progressCallback?.invoke(asin, "decrypting", pct.toDouble(), 0, 0, etaSec)
+                        progressCallback?.invoke(asin, stage, pct.toDouble(), 0, 0, etaSec)
                     }
                 }
             }
@@ -1138,12 +1327,18 @@ class DownloadOrchestrator(
                 throw kotlinx.coroutines.CancellationException("Conversion cancelled")
             }
             Log.e(TAG, "Conversion failed for $asin", e)
+            // A failed join can't be retried from the cache (the retry path re-decrypts a
+            // single source), so drop its half-made output; the user downloads again.
+            if (joinInputs != null) runCatching { File(decryptedCachePath).delete() }
             // Mark as failed in DB with error
             resolvedTaskId?.let { updateTaskStatusWithError(it, "failed", e.message ?: "Conversion failed") }
             errorCallback?.invoke(asin, title, e.message ?: "Conversion failed")
         } finally {
             cancelledConversions.remove(asin)
             activeFfmpegSessions.remove(asin)
+            // The parts have either become the joined book or are useless on their own.
+            joinInputs?.forEach { File(it).delete() }
+            joinFiles?.delete()
         }
     }
 

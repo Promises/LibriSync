@@ -35,7 +35,7 @@ import {
     copyTextToClipboard,
     ExpoRustBridge,
 } from '../../modules/expo-rust-bridge';
-import type {Book, Account, DownloadTask, EnqueueStatus, StageProgress} from '../../modules/expo-rust-bridge';
+import type {Book, Account, DownloadTask, EnqueueStatus, ProviderId, StageProgress, TaskStatus} from '../../modules/expo-rust-bridge';
 import * as SecureStore from 'expo-secure-store';
 import * as DocumentPicker from 'expo-document-picker';
 import {Directory, Paths} from 'expo-file-system';
@@ -43,6 +43,7 @@ import {getDatabasePath} from '../utils/appPaths';
 import {getBook} from '../services/librivox';
 import LegacyAccountBanner from '../components/LegacyAccountBanner';
 import {hasLegacyAudibleAccounts} from '../services/providers/audible';
+import {BOOK_SOURCES, planDownloadProvider} from '../services/providers/registry';
 import {DEMO_BOOKS, DEMO_SERIES, DEMO_CATEGORIES, DEMO_ACCOUNT} from '../services/demo/demoData';
 import {isDemoAccountId, isDemoBook, filterSortPaginate} from '../services/demo/demoMode';
 import * as demoDownloads from '../services/demo/demoDownloads';
@@ -66,8 +67,14 @@ const PAGE_SIZE = 100;
 type SortField = 'title' | 'release_date' | 'date_added' | 'series' | 'length' | 'downloaded';
 type BookSortField = Exclude<SortField, 'downloaded'>;
 type SortDirection = 'asc' | 'desc';
-type SourceFilter = 'all' | 'audible' | 'librivox' | 'librofm';
+type SourceFilter = 'all' | ProviderId;
 type IoniconName = React.ComponentProps<typeof Ionicons>['name'];
+
+/** Statuses of a download that hasn't reached a terminal state yet. */
+const ACTIVE_TASK_STATUSES: ReadonlySet<TaskStatus> = new Set<TaskStatus>([
+    'queued', 'downloading', 'paused', 'decrypting', 'joining', 'validating', 'copying', 'encoding',
+]);
+const isActiveTask = (task: DownloadTask) => ACTIVE_TASK_STATUSES.has(task.status);
 
 const EXPORT_FORMAT_OPTIONS: Array<{ format: LibraryExportFormat; label: string; icon: IoniconName }> = [
     {format: 'csv', label: 'CSV', icon: 'grid-outline'},
@@ -233,8 +240,15 @@ export default function LibraryScreen() {
                 const tasks = listDownloadTasks(dbPath);
                 const taskMap = new Map<string, DownloadTask>();
 
+                // listDownloadTasks is newest-first, so keep the first task seen per book —
+                // setting every one let the *oldest* win. An in-flight task still beats a
+                // finished one: a multi-part download (Chirp's tracks) leaves a "completed"
+                // row per finished part while the next part runs.
                 tasks.forEach(task => {
-                    taskMap.set(task.asin, task);
+                    const current = taskMap.get(task.asin);
+                    if (!current || (isActiveTask(task) && !isActiveTask(current))) {
+                        taskMap.set(task.asin, task);
+                    }
                 });
 
                 // Merge in-memory demo download tasks (empty unless in demo mode)
@@ -907,6 +921,8 @@ export default function LibraryScreen() {
                     return {text: `⏸ Paused ${percentage}%`, color: colors.warning};
                 case 'decrypting':
                     return {text: `🔓 Decrypting ${stagePct}%${etaSuffix}`, color: colors.info};
+                case 'joining':
+                    return {text: `🔗 Joining ${stagePct}%${etaSuffix}`, color: colors.info};
                 case 'validating':
                     return {text: `🔍 Validating ${stagePct}%${etaSuffix}`, color: colors.info};
                 case 'copying':
@@ -1076,15 +1092,16 @@ export default function LibraryScreen() {
                 return false;
             }
 
-            // Provider-registry books (Libro.fm, …): the Rust provider builds the
+            // Provider-registry books (Libro.fm, Chirp, …): the Rust provider builds the
             // download plan, so nothing here is provider-specific but the account lookup.
-            if (book.source === 'librofm') {
+            const planProvider = planDownloadProvider(book.source);
+            if (planProvider) {
                 const dbPath = getDatabasePath();
                 initializeDatabase(dbPath);
                 const accountId = getBookAccountIds(book)[0];
                 const account = accountId ? await getAccount(dbPath, accountId) : null;
                 if (!account) {
-                    if (!silent) Alert.alert('Not Signed In', 'Sign in to Libro.fm again from the Accounts tab.');
+                    if (!silent) Alert.alert('Not Signed In', `Sign in to ${planProvider.name} again from the Accounts tab.`);
                     return false;
                 }
 
@@ -1111,7 +1128,7 @@ export default function LibraryScreen() {
                 const authorText = (book.authors?.length || 0) > 0 ? book.authors.join(', ') : null;
 
                 const status = await enqueueProviderDownload(
-                    'librofm',
+                    planProvider.id,
                     account,
                     book.audible_product_id,
                     book.title,
@@ -1563,7 +1580,7 @@ export default function LibraryScreen() {
         // status is also set once the download alone finishes (before decrypt/copy), so a
         // cancelled or interrupted book could otherwise look downloaded and block retry.
         const isDownloaded = !!item.file_path;
-        const isProcessing = task?.status === 'decrypting' || task?.status === 'validating' || task?.status === 'copying' || task?.status === 'encoding';
+        const isProcessing = task?.status === 'decrypting' || task?.status === 'joining' || task?.status === 'validating' || task?.status === 'copying' || task?.status === 'encoding';
         const canRetryConversion = task?.status === 'failed' && !!task.aaxc_key;
         const isDownloading = task?.status === 'downloading';
         const isPaused = task?.status === 'paused';
@@ -2305,7 +2322,7 @@ export default function LibraryScreen() {
                         <ScrollView style={styles.filterScroll}>
                             {/* Source Filter */}
                             <Text style={styles.filterSectionTitle}>Source</Text>
-                            {(['all', 'audible', 'librivox', 'librofm'] as SourceFilter[]).map((src) => (
+                            {(['all', ...BOOK_SOURCES.map((source) => source.id)] as SourceFilter[]).map((src) => (
                                 <TouchableOpacity
                                     key={src}
                                     style={[
@@ -2315,7 +2332,7 @@ export default function LibraryScreen() {
                                     onPress={() => setSourceFilter(src)}
                                 >
                                     <Text style={styles.filterOptionText}>
-                                        {src === 'all' ? 'All Sources' : src === 'audible' ? 'Audible' : src === 'librivox' ? 'LibriVox' : 'Libro.fm'}
+                                        {src === 'all' ? 'All Sources' : BOOK_SOURCES.find((source) => source.id === src)?.name ?? src}
                                     </Text>
                                     {sourceFilter === src && <Text style={styles.modalCheck}>✓</Text>}
                                 </TouchableOpacity>

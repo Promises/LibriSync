@@ -715,7 +715,7 @@ class DownloadService : Service() {
                 val tasks = data.getJSONArray("tasks")
 
                 val activeStatuses = setOf(
-                    "queued", "downloading", "decrypting", "validating", "copying", "encoding"
+                    "queued", "downloading", "decrypting", "joining", "validating", "copying", "encoding"
                 )
                 var activeCount = 0
                 for (i in 0 until tasks.length()) {

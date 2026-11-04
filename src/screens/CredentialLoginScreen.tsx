@@ -6,10 +6,16 @@ import { useTheme } from '../styles/theme';
 import type { Theme } from '../hooks/useStyles';
 import Button from '../components/Button';
 import { providerLogin, saveAccount } from '../../modules/expo-rust-bridge';
-import type { Account } from '../../modules/expo-rust-bridge';
+import type { Account, ProviderId } from '../../modules/expo-rust-bridge';
 import { getDatabasePath } from '../utils/appPaths';
 
 interface Props {
+  /** Which Rust provider to sign in with (`providerLogin`). */
+  provider: ProviderId;
+  /** Display name, e.g. "Libro.fm". */
+  providerName: string;
+  /** One line under the title saying what signing in gives you. */
+  blurb: string;
   /** Called with the saved account once sign-in succeeds. */
   onLoginSuccess: (account: Account) => void;
   /** Provided when adding a further account, so the form can be dismissed. */
@@ -18,12 +24,21 @@ interface Props {
 }
 
 /**
- * Libro.fm credential sign-in — this provider's equivalent of `LoginScreen`.
+ * Email + password sign-in for any store whose Rust provider implements `login`
+ * (Libro.fm, Chirp) — their equivalent of Audible's `LoginScreen`. The registry
+ * binds `provider`, `providerName` and `blurb` per store.
  *
  * Saves the account and hands it back; syncing is the account screen's job, the
- * same split Audible uses. Auth is a plain password grant (see providers/librofm.rs).
+ * same split Audible uses.
  */
-export default function LibroFmLoginScreen({ onLoginSuccess, onCancel, title }: Props) {
+export default function CredentialLoginScreen({
+  provider,
+  providerName,
+  blurb,
+  onLoginSuccess,
+  onCancel,
+  title,
+}: Props) {
   const styles = useStyles(createStyles);
   const { colors } = useTheme();
 
@@ -33,7 +48,7 @@ export default function LibroFmLoginScreen({ onLoginSuccess, onCancel, title }: 
 
   const signIn = async () => {
     if (!email.trim() || !password) {
-      Alert.alert('Missing info', 'Enter your Libro.fm email and password.');
+      Alert.alert('Missing info', `Enter your ${providerName} email and password.`);
       return;
     }
     setBusy(true);
@@ -41,13 +56,15 @@ export default function LibroFmLoginScreen({ onLoginSuccess, onCancel, title }: 
       const dbPath = getDatabasePath();
       const identifier = email.trim();
 
-      // Password grant → credential blob { access_token, username }
-      const creds = await providerLogin('librofm', { username: identifier, password });
+      const creds = await providerLogin(provider, { username: identifier, password });
 
+      // A provider may namespace its account id (Chirp: `chirp:<user id>`) so the same
+      // email at two stores doesn't make two accounts collide; otherwise it's the email.
+      const accountId = typeof creds.account_id === 'string' ? creds.account_id : identifier;
       const account: Account = {
-        account_id: identifier,
+        account_id: accountId,
         account_name: identifier,
-        provider: 'librofm',
+        provider,
         identity: creds as unknown as Account['identity'],
       };
       await saveAccount(dbPath, account);
@@ -56,7 +73,7 @@ export default function LibroFmLoginScreen({ onLoginSuccess, onCancel, title }: 
       setPassword('');
       onLoginSuccess(account);
     } catch (e: any) {
-      Alert.alert('Libro.fm sign-in failed', e?.message || 'Unknown error');
+      Alert.alert(`${providerName} sign-in failed`, e?.message || 'Unknown error');
     } finally {
       setBusy(false);
     }
@@ -65,10 +82,8 @@ export default function LibroFmLoginScreen({ onLoginSuccess, onCancel, title }: 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
       <ScrollView contentContainerStyle={styles.content}>
-        <Text style={styles.title}>{title || 'Libro.fm'}</Text>
-        <Text style={styles.subtitle}>
-          Sign in to sync and download your Libro.fm audiobooks. DRM-free.
-        </Text>
+        <Text style={styles.title}>{title || providerName}</Text>
+        <Text style={styles.subtitle}>{blurb}</Text>
 
         <Text style={styles.label}>Email</Text>
         <TextInput

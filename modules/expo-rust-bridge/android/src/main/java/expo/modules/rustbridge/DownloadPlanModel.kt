@@ -11,6 +11,9 @@ import org.json.JSONObject
  *  - [PlainPart]  — copy as-is (LibriVox mp3, Libro.fm packaged m4b)
  *  - [AaxcPart]   — FFmpeg-decrypt with key/iv (Audible)
  *  - [ZipPart]    — a ZIP of audio files, extracted into the book folder
+ *
+ * A plan with [DownloadPlan.joinParts] set is one recording split across plain parts
+ * (Chirp's per-track files): the parts are downloaded, then joined into a single book.
  */
 sealed class DownloadPart {
     abstract val url: String
@@ -63,6 +66,11 @@ data class DownloadPlan(
     val parts: List<DownloadPart>,
     val embedMetadata: Boolean = false,
     val chapters: List<PlanChapter> = emptyList(),
+    /**
+     * The parts are consecutive slices of one recording, not independent files: download
+     * them all, join them (with [chapters] as markers), then apply the output format.
+     */
+    val joinParts: Boolean = false,
 ) {
     companion object {
         /** Parse a plan from the JSON emitted by `nativeProviderGetDownloadPlan`. */
@@ -92,7 +100,12 @@ data class DownloadPlan(
                     else -> {}
                 }
             }
-            return DownloadPlan(parts, json.optBoolean("embed_metadata", false), chaptersOf(json))
+            return DownloadPlan(
+                parts,
+                json.optBoolean("embed_metadata", false),
+                chaptersOf(json),
+                json.optBoolean("join_parts", false),
+            )
         }
 
         /** Parse `chapters[]`; a provider that supplies none yields an empty list. */

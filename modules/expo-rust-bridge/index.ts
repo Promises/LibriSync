@@ -135,12 +135,12 @@ export interface Locale {
  * Which audiobook source an account belongs to. Matches the Rust `ProviderId`
  * and the `Accounts.provider` / `Books.source` column values.
  */
-export type ProviderId = 'audible' | 'librivox' | 'librofm';
+export type ProviderId = 'audible' | 'librivox' | 'librofm' | 'chirp';
 
 /**
  * User account with credentials and identity information.
  *
- * `locale` is Audible-specific; DRM-free providers (Libro.fm) have none, so it is
+ * `locale` is Audible-specific; DRM-free providers (Libro.fm, Chirp) have none, so it is
  * optional. `identity` is the provider's opaque credential blob — an Audible
  * `Identity`, or e.g. `{access_token, username}` for Libro.fm.
  */
@@ -221,7 +221,7 @@ export interface Book {
   file_path?: string;
   created_at: string;
   updated_at: string;
-  source?: 'audible' | 'librivox' | 'librofm';
+  source?: ProviderId;
   account?: string;
 
   // Additional metadata from API
@@ -309,7 +309,7 @@ export interface DownloadDirectoryScanStats {
 /**
  * Download task status enumeration.
  */
-export type TaskStatus = 'queued' | 'downloading' | 'paused' | 'completed' | 'failed' | 'cancelled' | 'decrypting' | 'validating' | 'copying' | 'encoding';
+export type TaskStatus = 'queued' | 'downloading' | 'paused' | 'completed' | 'failed' | 'cancelled' | 'decrypting' | 'joining' | 'validating' | 'copying' | 'encoding';
 
 /**
  * What an enqueue led to. It resolves only once the licence or download plan has been

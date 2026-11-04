@@ -1868,7 +1868,7 @@ class ExpoRustBridgeModule : Module() {
    * re-sync. So completed/failed/cancelled rows are preserved.
    */
   private fun cancelAllPersistentDownloads(dbPath: String): Int {
-    val cancelable = setOf("queued", "downloading", "paused", "decrypting", "validating", "copying", "encoding")
+    val cancelable = setOf("queued", "downloading", "paused", "decrypting", "joining", "validating", "copying", "encoding")
     var cancelled = 0
     val listParsed = parseJsonResponse(nativeListDownloadTasks(JSONObject().apply { put("db_path", dbPath) }.toString()))
     if (listParsed["success"] != true) {

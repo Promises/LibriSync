@@ -401,7 +401,7 @@ export default function AccountsScreen({ navigation }: any) {
             onPress={() => navigation.navigate('LibriVoxBrowse')}
             accessibilityLabel="Browse LibriVox"
           >
-            <Ionicons name={LIBRIVOX_BROWSE.icon} size={18} color={colors[LIBRIVOX_BROWSE.tint]} />
+            <LIBRIVOX_BROWSE.Icon size={18} color={colors[LIBRIVOX_BROWSE.tint]} />
             <Text style={styles.browseButtonText}>Browse LibriVox</Text>
           </TouchableOpacity>
         )}
@@ -437,7 +437,7 @@ export default function AccountsScreen({ navigation }: any) {
                 formatSubtitle={formatAccountSubtitle}
                 formatIcon={(acc) => {
                   const entry = entryFor(acc);
-                  return { name: entry.icon, color: colors[entry.tint] };
+                  return { Icon: entry.Icon, color: colors[entry.tint] };
                 }}
                 rowWarning={(acc) =>
                   isLegacyAudibleRegistration(acc)

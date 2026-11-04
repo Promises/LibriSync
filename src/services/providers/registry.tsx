@@ -10,12 +10,18 @@
  * the account list.
  */
 import React from 'react';
-import type { Ionicons } from '@expo/vector-icons';
 import { accountProvider } from '../../../modules/expo-rust-bridge';
 import type { Account, ProviderId } from '../../../modules/expo-rust-bridge';
 import type { ColorScheme } from '../../styles/theme';
 import LoginScreen from '../../screens/LoginScreen';
 import CredentialLoginScreen from '../../screens/CredentialLoginScreen';
+import {
+  AudibleIcon,
+  ChirpIcon,
+  LibriVoxIcon,
+  LibroFmIcon,
+  type ProviderIcon,
+} from '../../components/ProviderIcons';
 import AudibleAccountDetails from '../../components/AudibleAccountDetails';
 import {
   SELECTED_AUDIBLE_ACCOUNT_KEY,
@@ -28,8 +34,6 @@ import {
 } from './audible';
 import { SELECTED_LIBROFM_ACCOUNT_KEY, signOutLibroFm } from './librofm';
 import { SELECTED_CHIRP_ACCOUNT_KEY, signOutChirp } from './chirp';
-
-type IoniconName = React.ComponentProps<typeof Ionicons>['name'];
 
 /** Every login screen shares this shape — see LoginScreen / CredentialLoginScreen. */
 export interface ProviderLoginProps {
@@ -54,7 +58,8 @@ export interface ProviderEntry {
   id: ProviderId;
   name: string;
   description: string;
-  icon: IoniconName;
+  /** Drawn at the caller's size, in `tint`. */
+  Icon: ProviderIcon;
   tint: keyof ColorScheme;
 
   /**
@@ -123,7 +128,7 @@ const AUDIBLE: ProviderEntry = {
   id: 'audible',
   name: 'Audible',
   description: 'Sign in to sync and download your Audible library.',
-  icon: 'headset-outline',
+  Icon: AudibleIcon,
   tint: 'accent',
   selectedAccountKey: SELECTED_AUDIBLE_ACCOUNT_KEY,
   formatName: formatAudibleAccountName,
@@ -164,7 +169,7 @@ const LIBROFM: ProviderEntry = {
   id: 'librofm',
   name: 'Libro.fm',
   description: 'Sign in to sync and download your Libro.fm library. DRM-free.',
-  icon: 'storefront-outline',
+  Icon: LibroFmIcon,
   tint: 'accent',
   selectedAccountKey: SELECTED_LIBROFM_ACCOUNT_KEY,
   formatName: (account) => account.account_name || account.account_id,
@@ -184,7 +189,7 @@ const CHIRP: ProviderEntry = {
   id: 'chirp',
   name: 'Chirp',
   description: 'Sign in to sync and download your Chirp library. DRM-free.',
-  icon: 'pricetag-outline',
+  Icon: ChirpIcon,
   tint: 'accent',
   selectedAccountKey: SELECTED_CHIRP_ACCOUNT_KEY,
   // account_id is `chirp:<user id>`; the email is the readable name.
@@ -220,7 +225,7 @@ export const LIBRIVOX_BROWSE = {
   id: 'librivox' as ProviderId,
   name: 'LibriVox',
   description: 'Free public domain audiobooks. No account needed.',
-  icon: 'book-outline' as IoniconName,
+  Icon: LibriVoxIcon,
   tint: 'success' as keyof ColorScheme,
 };
 

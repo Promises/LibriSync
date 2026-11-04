@@ -48,7 +48,7 @@ export default function ProviderPickerSheet({ visible, providers, onSelect, onCl
                 onPress={() => onSelect(provider)}
               >
                 <View style={styles.providerIcon}>
-                  <Ionicons name={provider.icon} size={28} color={colors[provider.tint]} />
+                  <provider.Icon size={28} color={colors[provider.tint]} />
                 </View>
                 <View style={styles.providerInfo}>
                   <Text style={styles.providerName}>{provider.name}</Text>

@@ -35,7 +35,7 @@ import {
     copyTextToClipboard,
     ExpoRustBridge,
 } from '../../modules/expo-rust-bridge';
-import type {Book, Account, DownloadTask, StageProgress} from '../../modules/expo-rust-bridge';
+import type {Book, Account, DownloadTask, EnqueueStatus, StageProgress} from '../../modules/expo-rust-bridge';
 import * as SecureStore from 'expo-secure-store';
 import * as DocumentPicker from 'expo-document-picker';
 import {Directory, Paths} from 'expo-file-system';
@@ -104,6 +104,10 @@ export default function LibraryScreen() {
     const [downloadSpeeds, setDownloadSpeeds] = useState<Record<string, number>>({}); // bytes/sec
     const prevBytesRef = useRef<Map<string, {bytes: number; time: number}>>(new Map());
     const progressInterval = useRef<NodeJS.Timeout | null>(null);
+    // Books whose enqueue is waiting on the licence request. The ref guards against a
+    // second tap before the re-render; the state drives the row's spinner.
+    const startingRef = useRef<Set<string>>(new Set());
+    const [startingDownloads, setStartingDownloads] = useState<Set<string>>(new Set());
 
     // Search, filter, and sort state
     const [searchQuery, setSearchQuery] = useState('');
@@ -636,6 +640,7 @@ export default function LibraryScreen() {
             }
 
             let queued = 0;
+            const failures: string[] = [];
             for (const episode of episodesToDownload) {
                 try {
                     const author = (episode.authors?.length || 0) > 0 ? episode.authors.join(', ') : undefined;
@@ -650,12 +655,16 @@ export default function LibraryScreen() {
                     queued++;
                 } catch (episodeError: any) {
                     console.error('[LibraryScreen] Failed to enqueue episode:', episode.title, episodeError);
+                    failures.push(episodeError?.message || 'Unknown error');
                 }
             }
 
+            const failedText = failures.length > 0
+                ? `\n\n${failures.length} could not start: ${failures[0]}`
+                : '';
             Alert.alert(
-                'Downloads Started',
-                `${queued} episode${queued === 1 ? '' : 's'} added to the download queue.`
+                queued > 0 ? 'Downloads Started' : 'Downloads Failed',
+                `${queued} episode${queued === 1 ? '' : 's'} added to the download queue.${failedText}`
             );
         } catch (error: any) {
             console.error('[LibraryScreen] Download all error:', error);
@@ -972,7 +981,37 @@ export default function LibraryScreen() {
 
     // Returns true when a download was actually started/enqueued, false on any refusal or
     // failure — the batch mode uses this for an honest "Started X of N" summary.
+    /** Tell the user what tapping download did, now that the service has answered. */
+    const showEnqueueAlert = (title: string, status: EnqueueStatus) => {
+        switch (status) {
+            case 'queued':
+                Alert.alert('Download Queued', `"${title}" will start when the current download finishes.`);
+                break;
+            case 'already_active':
+                Alert.alert('Already in Progress', `"${title}" is already downloading or queued.`);
+                break;
+            default:
+                Alert.alert(
+                    'Download Started',
+                    `"${title}" is downloading. Monitor progress here or in the notification — you can leave the app.`
+                );
+        }
+    };
+
     const handleDownload = async (book: Book, silent = false): Promise<boolean> => {
+        const asin = book.audible_product_id;
+        if (startingRef.current.has(asin)) return false;
+        startingRef.current.add(asin);
+        setStartingDownloads(new Set(startingRef.current));
+        try {
+            return await startDownload(book, silent);
+        } finally {
+            startingRef.current.delete(asin);
+            setStartingDownloads(new Set(startingRef.current));
+        }
+    };
+
+    const startDownload = async (book: Book, silent: boolean): Promise<boolean> => {
         // Guard against re-selecting a book that is already downloading or queued.
         const existingStage = stageProgress[book.audible_product_id];
         const existingTask = downloadTasks.get(book.audible_product_id);
@@ -1071,7 +1110,7 @@ export default function LibraryScreen() {
                 const format = (formatResult?.success && (formatResult.data as any)?.format) || 'm4b';
                 const authorText = (book.authors?.length || 0) > 0 ? book.authors.join(', ') : null;
 
-                await enqueueProviderDownload(
+                const status = await enqueueProviderDownload(
                     'librofm',
                     account,
                     book.audible_product_id,
@@ -1080,11 +1119,8 @@ export default function LibraryScreen() {
                     downloadDir,
                     { format }
                 );
-                if (!silent) Alert.alert(
-                    'Download Started',
-                    `"${book.title}" is downloading. Monitor progress here or in the notification — you can leave the app.`
-                );
-                return true;
+                if (!silent) showEnqueueAlert(book.title, status);
+                return status !== 'already_active';
             }
 
             // Audible books: existing DRM download flow
@@ -1163,7 +1199,7 @@ export default function LibraryScreen() {
 
             const author = (book.authors?.length || 0) > 0 ? book.authors.join(', ') : undefined;
 
-            await enqueueDownloadNew(
+            const status = await enqueueDownloadNew(
                 book.audible_product_id,
                 book.title,
                 author,
@@ -1172,13 +1208,10 @@ export default function LibraryScreen() {
                 'High'
             );
 
-            console.log('[LibraryScreen] Download enqueued successfully');
+            console.log('[LibraryScreen] Download enqueue status:', status);
 
-            if (!silent) Alert.alert(
-                'Download Started',
-                `"${book.title}" is downloading. Monitor progress here or in the notification — you can leave the app.`
-            );
-            return true;
+            if (!silent) showEnqueueAlert(book.title, status);
+            return status !== 'already_active';
 
         } catch (error: any) {
             console.error('[LibraryScreen] Download error:', error);
@@ -1535,6 +1568,7 @@ export default function LibraryScreen() {
         const isDownloading = task?.status === 'downloading';
         const isPaused = task?.status === 'paused';
         const isQueued = task?.status === 'queued' || isSpQueued;
+        const isStarting = startingDownloads.has(item.audible_product_id);
         const isActive = isDownloading || isPaused || isQueued || isProcessing;
         // Retriable whenever it is not actually downloaded and nothing is actively running:
         // covers cancelled, failed, interrupted, and a stale "completed" with no saved file.
@@ -1611,7 +1645,7 @@ export default function LibraryScreen() {
                         </View>
                     </View>
 
-                    {!batchMode && !isDownloaded && !isProcessing && canDownload && (
+                    {!batchMode && !isDownloaded && !isProcessing && canDownload && !isStarting && (
                         <TouchableOpacity
                             style={styles.downloadButton}
                             onPress={() => handleDownload(item)}
@@ -1629,7 +1663,7 @@ export default function LibraryScreen() {
                         </TouchableOpacity>
                     )}
 
-                    {isProcessing && (
+                    {(isProcessing || isStarting) && (
                         <View style={styles.downloadButton}>
                             <ActivityIndicator size="small" color={colors.info} />
                         </View>

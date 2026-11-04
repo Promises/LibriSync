@@ -237,6 +237,10 @@ class AutoDownloadWorker(
                     put("limit", PAGE_SIZE)
                     put("sort_field", "title")
                     put("sort_direction", "asc")
+                    // Auto-download enqueues through the Audible licence path with the
+                    // Audible account, so it must only ever see Audible books. Unscoped, it
+                    // asked Audible for licences on Libro.fm ISBNs and Chirp ids too.
+                    put("source", "audible")
                 }
                 val resultObj = JSONObject(ExpoRustBridgeModule.nativeGetBooksWithFilters(params.toString()))
                 if (!resultObj.optBoolean("success")) {

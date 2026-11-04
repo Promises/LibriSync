@@ -1,6 +1,6 @@
 //! Multi-provider abstraction.
 //!
-//! LibriSync supports several audiobook sources (Audible, LibriVox, Libro.fm, …).
+//! LibriSync supports several audiobook sources (Audible, LibriVox, Libro.fm, Chirp, …).
 //! Rather than branching on the provider throughout the codebase, each provider
 //! implements the [`Provider`] trait and is reached through the [`AnyProvider`]
 //! enum-dispatch registry keyed by [`ProviderId`].
@@ -20,6 +20,7 @@ use crate::storage::Database;
 use crate::{LibationError, Result};
 
 pub mod audible;
+pub mod chirp;
 pub mod http;
 pub mod librofm;
 
@@ -31,6 +32,7 @@ pub enum ProviderId {
     Audible,
     Librivox,
     Librofm,
+    Chirp,
 }
 
 impl ProviderId {
@@ -40,6 +42,7 @@ impl ProviderId {
             ProviderId::Audible => "audible",
             ProviderId::Librivox => "librivox",
             ProviderId::Librofm => "librofm",
+            ProviderId::Chirp => "chirp",
         }
     }
 
@@ -50,6 +53,7 @@ impl ProviderId {
             "audible" => Ok(ProviderId::Audible),
             "librivox" => Ok(ProviderId::Librivox),
             "librofm" => Ok(ProviderId::Librofm),
+            "chirp" => Ok(ProviderId::Chirp),
             other => Err(LibationError::InvalidInput(format!(
                 "Unknown provider id: {other}"
             ))),
@@ -138,6 +142,12 @@ pub struct DownloadPlan {
     /// Chapter markers, when the provider supplies them.
     #[serde(default)]
     pub chapters: Vec<PlanChapter>,
+    /// The parts are consecutive slices of one recording (Chirp's per-track files), not
+    /// independent files. The engine downloads all of them, then joins them into a
+    /// single book before applying the user's output format, using `chapters` as the
+    /// joined file's markers. Every part must then be [`DownloadPart::Plain`].
+    #[serde(default)]
+    pub join_parts: bool,
 }
 
 /// The behaviour every audiobook provider implements. Not object-safe (async
@@ -179,6 +189,7 @@ pub trait Provider: Send + Sync {
 pub enum AnyProvider {
     Audible(audible::AudibleProvider),
     Librofm(librofm::LibrofmProvider),
+    Chirp(chirp::ChirpProvider),
     // Librivox is folded in during Phase 5 cleanup.
 }
 
@@ -189,6 +200,7 @@ impl AnyProvider {
         match id {
             ProviderId::Audible => Ok(AnyProvider::Audible(audible::AudibleProvider)),
             ProviderId::Librofm => Ok(AnyProvider::Librofm(librofm::LibrofmProvider)),
+            ProviderId::Chirp => Ok(AnyProvider::Chirp(chirp::ChirpProvider)),
             other => Err(LibationError::InvalidInput(format!(
                 "Provider not yet implemented: {}",
                 other.as_str()
@@ -202,6 +214,7 @@ impl AnyProvider {
         match self {
             AnyProvider::Audible(p) => p,
             AnyProvider::Librofm(p) => p,
+            AnyProvider::Chirp(p) => p,
         }
     }
 }
@@ -212,7 +225,12 @@ mod tests {
 
     #[test]
     fn provider_id_string_roundtrip() {
-        for id in [ProviderId::Audible, ProviderId::Librivox, ProviderId::Librofm] {
+        for id in [
+            ProviderId::Audible,
+            ProviderId::Librivox,
+            ProviderId::Librofm,
+            ProviderId::Chirp,
+        ] {
             assert_eq!(ProviderId::from_str(id.as_str()).unwrap(), id);
         }
         assert!(ProviderId::from_str("nope").is_err());
@@ -245,6 +263,7 @@ mod tests {
     fn registry_resolves_implemented_and_rejects_unimplemented() {
         assert!(AnyProvider::get(ProviderId::Audible).is_ok());
         assert!(AnyProvider::get(ProviderId::Librofm).is_ok());
+        assert!(AnyProvider::get(ProviderId::Chirp).is_ok());
         // Librivox is folded in during Phase 5 cleanup.
         assert!(AnyProvider::get(ProviderId::Librivox).is_err());
         assert_eq!(

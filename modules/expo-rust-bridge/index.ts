@@ -135,12 +135,12 @@ export interface Locale {
  * Which audiobook source an account belongs to. Matches the Rust `ProviderId`
  * and the `Accounts.provider` / `Books.source` column values.
  */
-export type ProviderId = 'audible' | 'librivox' | 'librofm';
+export type ProviderId = 'audible' | 'librivox' | 'librofm' | 'chirp';
 
 /**
  * User account with credentials and identity information.
  *
- * `locale` is Audible-specific; DRM-free providers (Libro.fm) have none, so it is
+ * `locale` is Audible-specific; DRM-free providers (Libro.fm, Chirp) have none, so it is
  * optional. `identity` is the provider's opaque credential blob — an Audible
  * `Identity`, or e.g. `{access_token, username}` for Libro.fm.
  */
@@ -221,7 +221,7 @@ export interface Book {
   file_path?: string;
   created_at: string;
   updated_at: string;
-  source?: 'audible' | 'librivox' | 'librofm';
+  source?: ProviderId;
   account?: string;
 
   // Additional metadata from API
@@ -309,7 +309,14 @@ export interface DownloadDirectoryScanStats {
 /**
  * Download task status enumeration.
  */
-export type TaskStatus = 'queued' | 'downloading' | 'paused' | 'completed' | 'failed' | 'cancelled' | 'decrypting' | 'validating' | 'copying' | 'encoding';
+export type TaskStatus = 'queued' | 'downloading' | 'paused' | 'completed' | 'failed' | 'cancelled' | 'decrypting' | 'joining' | 'validating' | 'copying' | 'encoding';
+
+/**
+ * What an enqueue led to. It resolves only once the licence or download plan has been
+ * granted (`started`), the book is held behind another download (`queued`), or it was
+ * already running (`already_active`). A refused book rejects with Audible's reason.
+ */
+export type EnqueueStatus = 'started' | 'queued' | 'already_active';
 
 /**
  * Download task representing a book download.
@@ -801,7 +808,7 @@ export interface ExpoRustBridgeModule {
     accountJson: string,
     outputDirectory: string,
     quality: string
-  ): Promise<RustResponse<{ message: string }>>;
+  ): Promise<RustResponse<{ status: EnqueueStatus }>>;
 
   /**
    * Schedule an immediate library sync through WorkManager.
@@ -1141,7 +1148,7 @@ export interface ExpoRustBridgeModule {
     author: string | null,
     outputDirectory: string,
     optionsJson: string
-  ): Promise<RustResponse<{ message: string }>>;
+  ): Promise<RustResponse<{ status: EnqueueStatus }>>;
 }
 
 // ============================================================================
@@ -2044,6 +2051,7 @@ function stopBackgroundService(): void {
  * @param account - Account with authentication
  * @param outputDirectory - Output directory (SAF URI)
  * @param quality - Download quality
+ * @throws {RustBridgeError} If the download could not start (e.g. a refused licence)
  */
 async function enqueueDownloadNew(
   asin: string,
@@ -2052,7 +2060,7 @@ async function enqueueDownloadNew(
   account: Account,
   outputDirectory: string,
   quality: string = 'High'
-): Promise<void> {
+): Promise<EnqueueStatus> {
   const accountJson = JSON.stringify(account);
 
   const response = await NativeModule!.enqueueDownloadNew(
@@ -2067,6 +2075,7 @@ async function enqueueDownloadNew(
   if (!response.success) {
     throw new RustBridgeError(response.error || 'Failed to enqueue download');
   }
+  return unwrapResult(response).status;
 }
 
 /**
@@ -2512,7 +2521,7 @@ async function enqueueProviderDownload(
   author: string | null,
   outputDirectory: string,
   options: Record<string, unknown> = {},
-): Promise<void> {
+): Promise<EnqueueStatus> {
   const response = await NativeModule!.enqueueProviderDownload(
     provider,
     JSON.stringify(account),
@@ -2522,7 +2531,7 @@ async function enqueueProviderDownload(
     outputDirectory,
     JSON.stringify(options),
   );
-  unwrapResult(response);
+  return unwrapResult(response).status;
 }
 
 // ============================================================================

@@ -5,6 +5,7 @@ import Button from './Button';
 import { useStyles } from '../hooks/useStyles';
 import type { Theme } from '../hooks/useStyles';
 import type { Account } from '../../modules/expo-rust-bridge';
+import type { ProviderIcon } from './ProviderIcons';
 
 interface Props {
   /** Card heading, e.g. "Audible Accounts" or just "Accounts" when mixed. */
@@ -16,10 +17,10 @@ interface Props {
   onAddAccount?: () => void;
   /** Row title, e.g. "Henning Berge (US)". */
   formatName: (account: Account) => string;
-  /** Row subtitle — region for Audible, email for a credential provider. */
+  /** Row subtitle — in a mixed list, the service name plus any provider detail. */
   formatSubtitle?: (account: Account) => string | null;
   /** Leading badge per row. Needed once the list mixes providers. */
-  formatIcon?: (account: Account) => { name: React.ComponentProps<typeof Ionicons>['name']; color: string };
+  formatIcon?: (account: Account) => { Icon: ProviderIcon; color: string };
   /**
    * Optional trailing warning badge for a row (e.g. a legacy Audible registration).
    * Return null for rows with no warning. `onPress` fires without selecting the row.
@@ -68,7 +69,7 @@ export default function AccountsCard({
           >
             {!!icon && (
               <View style={styles.accountIcon}>
-                <Ionicons name={icon.name} size={20} color={icon.color} />
+                <icon.Icon size={20} color={icon.color} />
               </View>
             )}
             <View style={styles.accountText}>

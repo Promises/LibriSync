@@ -163,6 +163,7 @@ impl Provider for AudibleProvider {
                     }],
                     embed_metadata: true,
                     chapters,
+                    join_parts: false,
                 });
             }
             if kd.key_part_1.len() != 16 {
@@ -192,6 +193,7 @@ impl Provider for AudibleProvider {
             parts: vec![part],
             embed_metadata: true,
             chapters,
+            join_parts: false,
         })
     }
 }

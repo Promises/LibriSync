@@ -3,6 +3,7 @@ package expo.modules.rustbridge
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import expo.modules.kotlin.Promise
+import expo.modules.kotlin.functions.Coroutine
 import org.json.JSONObject
 import org.json.JSONArray
 import android.content.ClipData
@@ -829,24 +830,25 @@ class ExpoRustBridgeModule : Module() {
      * @param accountJson Complete account JSON
      * @param outputDirectory Output directory (SAF URI)
      * @param quality Download quality
-     * @return Map with task_id
+     * @return Map with the enqueue status, or the reason the download could not start
      */
-    AsyncFunction("enqueueDownloadNew") { asin: String, title: String, author: String?, accountJson: String, outputDirectory: String, quality: String ->
+    AsyncFunction("enqueueDownloadNew") Coroutine { asin: String, title: String, author: String?, accountJson: String, outputDirectory: String, quality: String ->
       try {
         val context = appContext.reactContext ?: throw Exception("Context not available")
         val dbPath = AppPaths.databasePath(context)
 
-        // Use DownloadService for downloads
-        DownloadService.enqueueBook(
-          context = context,
-          dbPath = dbPath,
-          accountJson = accountJson,
-          asin = asin,
-          title = title,
-          outputDirectory = outputDirectory,
-          quality = quality
-        )
-        mapOf("success" to true, "data" to mapOf("message" to "Download enqueued"))
+        val outcome = DownloadService.awaitEnqueue(asin) {
+          DownloadService.enqueueBook(
+            context = context,
+            dbPath = dbPath,
+            accountJson = accountJson,
+            asin = asin,
+            title = title,
+            outputDirectory = outputDirectory,
+            quality = quality
+          )
+        }
+        enqueueResponse(outcome)
       } catch (e: Exception) {
         mapOf("success" to false, "error" to e.message)
       }
@@ -1479,25 +1481,23 @@ class ExpoRustBridgeModule : Module() {
 
     // Generic download entry point: the Rust provider produces the plan, so any provider
     // in the registry downloads through this one function.
-    AsyncFunction("enqueueProviderDownload") { provider: String, accountJson: String, itemRef: String, title: String, author: String?, outputDirectory: String, optionsJson: String? ->
+    AsyncFunction("enqueueProviderDownload") Coroutine { provider: String, accountJson: String, itemRef: String, title: String, author: String?, outputDirectory: String, optionsJson: String? ->
       try {
         val context = appContext.reactContext ?: throw Exception("Context not available")
 
-        DownloadService.enqueueProviderBook(
-          context = context,
-          provider = provider,
-          accountJson = accountJson,
-          itemRef = itemRef,
-          title = title,
-          author = author ?: "",
-          outputDirectory = outputDirectory,
-          optionsJson = optionsJson ?: "{}"
-        )
-
-        mapOf(
-          "success" to true,
-          "data" to mapOf("message" to "$provider download enqueued")
-        )
+        val outcome = DownloadService.awaitEnqueue(itemRef) {
+          DownloadService.enqueueProviderBook(
+            context = context,
+            provider = provider,
+            accountJson = accountJson,
+            itemRef = itemRef,
+            title = title,
+            author = author ?: "",
+            outputDirectory = outputDirectory,
+            optionsJson = optionsJson ?: "{}"
+          )
+        }
+        enqueueResponse(outcome)
       } catch (e: Exception) {
         mapOf("success" to false, "error" to e.message)
       }
@@ -1832,6 +1832,23 @@ class ExpoRustBridgeModule : Module() {
   // ============================================================================
 
   /**
+   * The bridge envelope for an awaited enqueue. A refusal becomes a failure the UI can
+   * show; `status` tells JS whether the book started, is queued, or was already running.
+   * No answer within the timeout means the service is still working on it, so report it
+   * as started, as every enqueue was reported before outcomes were awaited.
+   */
+  private fun enqueueResponse(outcome: DownloadService.EnqueueOutcome?): Map<String, Any?> {
+    val status = when (outcome) {
+      is DownloadService.EnqueueOutcome.Failed ->
+        return mapOf("success" to false, "error" to outcome.message)
+      DownloadService.EnqueueOutcome.Queued -> "queued"
+      DownloadService.EnqueueOutcome.AlreadyActive -> "already_active"
+      DownloadService.EnqueueOutcome.Started, null -> "started"
+    }
+    return mapOf("success" to true, "data" to mapOf("status" to status))
+  }
+
+  /**
    * Escape metadata value for FFmpeg command line.
    * Wraps in double quotes and escapes special characters.
    */
@@ -1851,7 +1868,7 @@ class ExpoRustBridgeModule : Module() {
    * re-sync. So completed/failed/cancelled rows are preserved.
    */
   private fun cancelAllPersistentDownloads(dbPath: String): Int {
-    val cancelable = setOf("queued", "downloading", "paused", "decrypting", "validating", "copying", "encoding")
+    val cancelable = setOf("queued", "downloading", "paused", "decrypting", "joining", "validating", "copying", "encoding")
     var cancelled = 0
     val listParsed = parseJsonResponse(nativeListDownloadTasks(JSONObject().apply { put("db_path", dbPath) }.toString()))
     if (listParsed["success"] != true) {

@@ -33,6 +33,8 @@ yarn-error.*
 # IDEs
 .idea/
 .vscode/
+*.swp
+*.swo
 
 # local env files
 .env

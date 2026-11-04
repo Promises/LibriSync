@@ -21,6 +21,14 @@ import kotlinx.coroutines.*
  * - Handles lifecycle events and cleanup
  */
 class DownloadService : Service() {
+    /** What a user-initiated enqueue led to, reported back to the caller awaiting it. */
+    sealed class EnqueueOutcome {
+        object Started : EnqueueOutcome()
+        object Queued : EnqueueOutcome()
+        object AlreadyActive : EnqueueOutcome()
+        data class Failed(val message: String) : EnqueueOutcome()
+    }
+
     companion object {
         private const val TAG = "DownloadService"
         private const val NOTIFICATION_CHANNEL_ID = "audiobook_downloads"
@@ -49,6 +57,35 @@ class DownloadService : Service() {
         private const val EXTRA_WIFI_ONLY = "wifi_only"
         private const val EXTRA_PROVIDER = "provider"
         private const val EXTRA_OPTIONS_JSON = "options_json"
+
+        /** How long a user-initiated enqueue waits to learn whether the download started. */
+        private const val ENQUEUE_TIMEOUT_MS = 30_000L
+
+        private val enqueueOutcomes = java.util.concurrent.ConcurrentHashMap<String, CompletableDeferred<EnqueueOutcome>>()
+
+        /** Tell whoever is awaiting [itemRef]'s enqueue how it went; a no-op if nobody is. */
+        private fun reportEnqueue(itemRef: String, outcome: EnqueueOutcome) {
+            enqueueOutcomes.remove(itemRef)?.complete(outcome)
+        }
+
+        /**
+         * Run [enqueue] and wait until the service knows whether the download really started.
+         *
+         * Enqueueing only sends an intent; the licence or download-plan request that can be
+         * refused happens later, inside the service. Without waiting, the UI announced
+         * "Download Started" for books Audible had refused, and the only trace of the
+         * refusal was a notification. Returns null if no answer came within the timeout.
+         */
+        suspend fun awaitEnqueue(itemRef: String, enqueue: () -> Unit): EnqueueOutcome? {
+            val outcome = CompletableDeferred<EnqueueOutcome>()
+            enqueueOutcomes[itemRef] = outcome
+            return try {
+                enqueue()
+                withTimeoutOrNull(ENQUEUE_TIMEOUT_MS) { outcome.await() }
+            } finally {
+                enqueueOutcomes.remove(itemRef, outcome)
+            }
+        }
 
         private fun startUserInitiatedService(context: Context, intent: Intent) {
             try {
@@ -371,6 +408,7 @@ class DownloadService : Service() {
             StageProgressStore.update(asin, "queued", 0, 0)
             Log.d(TAG, "Sequential mode: holding $asin (${pendingDownloads.size} pending)")
             refreshSummary()
+            reportEnqueue(asin, EnqueueOutcome.Queued)
         } else {
             start()
         }
@@ -453,6 +491,7 @@ class DownloadService : Service() {
         // Rust rows racing over the same cache file.
         if (activeDownloads.containsKey(asin) || pendingDownloads.any { it.asin == asin }) {
             Log.d(TAG, "Download already active or pending for $asin; ignoring duplicate enqueue")
+            reportEnqueue(asin, EnqueueOutcome.AlreadyActive)
             return
         }
 
@@ -468,8 +507,10 @@ class DownloadService : Service() {
             try {
                 orchestrator.enqueueBook(accountJson, asin, title, outputDir, quality)
                 Log.d(TAG, "Book enqueued successfully: $asin")
+                reportEnqueue(asin, EnqueueOutcome.Started)
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to enqueue book", e)
+                reportEnqueue(asin, EnqueueOutcome.Failed(e.message ?: "Unknown error"))
                 val download = activeDownloads.remove(asin)
                 notificationManager.showError(asin, download?.title ?: title, download?.author, e.message ?: "Unknown error")
                 onActiveDownloadsChanged()
@@ -582,6 +623,7 @@ class DownloadService : Service() {
         // two Rust rows racing over the same cache file.
         if (activeDownloads.containsKey(itemRef) || pendingDownloads.any { it.asin == itemRef }) {
             Log.d(TAG, "Download already active or pending for $itemRef; ignoring duplicate enqueue")
+            reportEnqueue(itemRef, EnqueueOutcome.AlreadyActive)
             return
         }
 
@@ -595,8 +637,10 @@ class DownloadService : Service() {
                 try {
                     orchestrator.enqueueProviderBook(provider, accountJson, itemRef, title, outputDir, optionsJson)
                     Log.d(TAG, "$provider book enqueued successfully: $itemRef")
+                    reportEnqueue(itemRef, EnqueueOutcome.Started)
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to enqueue $provider book", e)
+                    reportEnqueue(itemRef, EnqueueOutcome.Failed(e.message ?: "Unknown error"))
                     val download = activeDownloads.remove(itemRef)
                     notificationManager.showError(itemRef, download?.title ?: title, download?.author, e.message ?: "Unknown error")
                     onActiveDownloadsChanged()
@@ -671,7 +715,7 @@ class DownloadService : Service() {
                 val tasks = data.getJSONArray("tasks")
 
                 val activeStatuses = setOf(
-                    "queued", "downloading", "decrypting", "validating", "copying", "encoding"
+                    "queued", "downloading", "decrypting", "joining", "validating", "copying", "encoding"
                 )
                 var activeCount = 0
                 for (i in 0 until tasks.length()) {

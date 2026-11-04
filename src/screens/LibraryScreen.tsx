@@ -35,7 +35,7 @@ import {
     copyTextToClipboard,
     ExpoRustBridge,
 } from '../../modules/expo-rust-bridge';
-import type {Book, Account, DownloadTask, StageProgress} from '../../modules/expo-rust-bridge';
+import type {Book, Account, DownloadTask, EnqueueStatus, ProviderId, StageProgress, TaskStatus} from '../../modules/expo-rust-bridge';
 import * as SecureStore from 'expo-secure-store';
 import * as DocumentPicker from 'expo-document-picker';
 import {Directory, Paths} from 'expo-file-system';
@@ -43,6 +43,7 @@ import {getDatabasePath} from '../utils/appPaths';
 import {getBook} from '../services/librivox';
 import LegacyAccountBanner from '../components/LegacyAccountBanner';
 import {hasLegacyAudibleAccounts} from '../services/providers/audible';
+import {BOOK_SOURCES, planDownloadProvider} from '../services/providers/registry';
 import {DEMO_BOOKS, DEMO_SERIES, DEMO_CATEGORIES, DEMO_ACCOUNT} from '../services/demo/demoData';
 import {isDemoAccountId, isDemoBook, filterSortPaginate} from '../services/demo/demoMode';
 import * as demoDownloads from '../services/demo/demoDownloads';
@@ -66,8 +67,14 @@ const PAGE_SIZE = 100;
 type SortField = 'title' | 'release_date' | 'date_added' | 'series' | 'length' | 'downloaded';
 type BookSortField = Exclude<SortField, 'downloaded'>;
 type SortDirection = 'asc' | 'desc';
-type SourceFilter = 'all' | 'audible' | 'librivox' | 'librofm';
+type SourceFilter = 'all' | ProviderId;
 type IoniconName = React.ComponentProps<typeof Ionicons>['name'];
+
+/** Statuses of a download that hasn't reached a terminal state yet. */
+const ACTIVE_TASK_STATUSES: ReadonlySet<TaskStatus> = new Set<TaskStatus>([
+    'queued', 'downloading', 'paused', 'decrypting', 'joining', 'validating', 'copying', 'encoding',
+]);
+const isActiveTask = (task: DownloadTask) => ACTIVE_TASK_STATUSES.has(task.status);
 
 const EXPORT_FORMAT_OPTIONS: Array<{ format: LibraryExportFormat; label: string; icon: IoniconName }> = [
     {format: 'csv', label: 'CSV', icon: 'grid-outline'},
@@ -104,6 +111,10 @@ export default function LibraryScreen() {
     const [downloadSpeeds, setDownloadSpeeds] = useState<Record<string, number>>({}); // bytes/sec
     const prevBytesRef = useRef<Map<string, {bytes: number; time: number}>>(new Map());
     const progressInterval = useRef<NodeJS.Timeout | null>(null);
+    // Books whose enqueue is waiting on the licence request. The ref guards against a
+    // second tap before the re-render; the state drives the row's spinner.
+    const startingRef = useRef<Set<string>>(new Set());
+    const [startingDownloads, setStartingDownloads] = useState<Set<string>>(new Set());
 
     // Search, filter, and sort state
     const [searchQuery, setSearchQuery] = useState('');
@@ -229,8 +240,15 @@ export default function LibraryScreen() {
                 const tasks = listDownloadTasks(dbPath);
                 const taskMap = new Map<string, DownloadTask>();
 
+                // listDownloadTasks is newest-first, so keep the first task seen per book —
+                // setting every one let the *oldest* win. An in-flight task still beats a
+                // finished one: a multi-part download (Chirp's tracks) leaves a "completed"
+                // row per finished part while the next part runs.
                 tasks.forEach(task => {
-                    taskMap.set(task.asin, task);
+                    const current = taskMap.get(task.asin);
+                    if (!current || (isActiveTask(task) && !isActiveTask(current))) {
+                        taskMap.set(task.asin, task);
+                    }
                 });
 
                 // Merge in-memory demo download tasks (empty unless in demo mode)
@@ -636,6 +654,7 @@ export default function LibraryScreen() {
             }
 
             let queued = 0;
+            const failures: string[] = [];
             for (const episode of episodesToDownload) {
                 try {
                     const author = (episode.authors?.length || 0) > 0 ? episode.authors.join(', ') : undefined;
@@ -650,12 +669,16 @@ export default function LibraryScreen() {
                     queued++;
                 } catch (episodeError: any) {
                     console.error('[LibraryScreen] Failed to enqueue episode:', episode.title, episodeError);
+                    failures.push(episodeError?.message || 'Unknown error');
                 }
             }
 
+            const failedText = failures.length > 0
+                ? `\n\n${failures.length} could not start: ${failures[0]}`
+                : '';
             Alert.alert(
-                'Downloads Started',
-                `${queued} episode${queued === 1 ? '' : 's'} added to the download queue.`
+                queued > 0 ? 'Downloads Started' : 'Downloads Failed',
+                `${queued} episode${queued === 1 ? '' : 's'} added to the download queue.${failedText}`
             );
         } catch (error: any) {
             console.error('[LibraryScreen] Download all error:', error);
@@ -898,6 +921,8 @@ export default function LibraryScreen() {
                     return {text: `⏸ Paused ${percentage}%`, color: colors.warning};
                 case 'decrypting':
                     return {text: `🔓 Decrypting ${stagePct}%${etaSuffix}`, color: colors.info};
+                case 'joining':
+                    return {text: `🔗 Joining ${stagePct}%${etaSuffix}`, color: colors.info};
                 case 'validating':
                     return {text: `🔍 Validating ${stagePct}%${etaSuffix}`, color: colors.info};
                 case 'copying':
@@ -972,7 +997,37 @@ export default function LibraryScreen() {
 
     // Returns true when a download was actually started/enqueued, false on any refusal or
     // failure — the batch mode uses this for an honest "Started X of N" summary.
+    /** Tell the user what tapping download did, now that the service has answered. */
+    const showEnqueueAlert = (title: string, status: EnqueueStatus) => {
+        switch (status) {
+            case 'queued':
+                Alert.alert('Download Queued', `"${title}" will start when the current download finishes.`);
+                break;
+            case 'already_active':
+                Alert.alert('Already in Progress', `"${title}" is already downloading or queued.`);
+                break;
+            default:
+                Alert.alert(
+                    'Download Started',
+                    `"${title}" is downloading. Monitor progress here or in the notification — you can leave the app.`
+                );
+        }
+    };
+
     const handleDownload = async (book: Book, silent = false): Promise<boolean> => {
+        const asin = book.audible_product_id;
+        if (startingRef.current.has(asin)) return false;
+        startingRef.current.add(asin);
+        setStartingDownloads(new Set(startingRef.current));
+        try {
+            return await startDownload(book, silent);
+        } finally {
+            startingRef.current.delete(asin);
+            setStartingDownloads(new Set(startingRef.current));
+        }
+    };
+
+    const startDownload = async (book: Book, silent: boolean): Promise<boolean> => {
         // Guard against re-selecting a book that is already downloading or queued.
         const existingStage = stageProgress[book.audible_product_id];
         const existingTask = downloadTasks.get(book.audible_product_id);
@@ -1037,15 +1092,16 @@ export default function LibraryScreen() {
                 return false;
             }
 
-            // Provider-registry books (Libro.fm, …): the Rust provider builds the
+            // Provider-registry books (Libro.fm, Chirp, …): the Rust provider builds the
             // download plan, so nothing here is provider-specific but the account lookup.
-            if (book.source === 'librofm') {
+            const planProvider = planDownloadProvider(book.source);
+            if (planProvider) {
                 const dbPath = getDatabasePath();
                 initializeDatabase(dbPath);
                 const accountId = getBookAccountIds(book)[0];
                 const account = accountId ? await getAccount(dbPath, accountId) : null;
                 if (!account) {
-                    if (!silent) Alert.alert('Not Signed In', 'Sign in to Libro.fm again from the Accounts tab.');
+                    if (!silent) Alert.alert('Not Signed In', `Sign in to ${planProvider.name} again from the Accounts tab.`);
                     return false;
                 }
 
@@ -1071,8 +1127,8 @@ export default function LibraryScreen() {
                 const format = (formatResult?.success && (formatResult.data as any)?.format) || 'm4b';
                 const authorText = (book.authors?.length || 0) > 0 ? book.authors.join(', ') : null;
 
-                await enqueueProviderDownload(
-                    'librofm',
+                const status = await enqueueProviderDownload(
+                    planProvider.id,
                     account,
                     book.audible_product_id,
                     book.title,
@@ -1080,11 +1136,8 @@ export default function LibraryScreen() {
                     downloadDir,
                     { format }
                 );
-                if (!silent) Alert.alert(
-                    'Download Started',
-                    `"${book.title}" is downloading. Monitor progress here or in the notification — you can leave the app.`
-                );
-                return true;
+                if (!silent) showEnqueueAlert(book.title, status);
+                return status !== 'already_active';
             }
 
             // Audible books: existing DRM download flow
@@ -1163,7 +1216,7 @@ export default function LibraryScreen() {
 
             const author = (book.authors?.length || 0) > 0 ? book.authors.join(', ') : undefined;
 
-            await enqueueDownloadNew(
+            const status = await enqueueDownloadNew(
                 book.audible_product_id,
                 book.title,
                 author,
@@ -1172,13 +1225,10 @@ export default function LibraryScreen() {
                 'High'
             );
 
-            console.log('[LibraryScreen] Download enqueued successfully');
+            console.log('[LibraryScreen] Download enqueue status:', status);
 
-            if (!silent) Alert.alert(
-                'Download Started',
-                `"${book.title}" is downloading. Monitor progress here or in the notification — you can leave the app.`
-            );
-            return true;
+            if (!silent) showEnqueueAlert(book.title, status);
+            return status !== 'already_active';
 
         } catch (error: any) {
             console.error('[LibraryScreen] Download error:', error);
@@ -1530,11 +1580,12 @@ export default function LibraryScreen() {
         // status is also set once the download alone finishes (before decrypt/copy), so a
         // cancelled or interrupted book could otherwise look downloaded and block retry.
         const isDownloaded = !!item.file_path;
-        const isProcessing = task?.status === 'decrypting' || task?.status === 'validating' || task?.status === 'copying' || task?.status === 'encoding';
+        const isProcessing = task?.status === 'decrypting' || task?.status === 'joining' || task?.status === 'validating' || task?.status === 'copying' || task?.status === 'encoding';
         const canRetryConversion = task?.status === 'failed' && !!task.aaxc_key;
         const isDownloading = task?.status === 'downloading';
         const isPaused = task?.status === 'paused';
         const isQueued = task?.status === 'queued' || isSpQueued;
+        const isStarting = startingDownloads.has(item.audible_product_id);
         const isActive = isDownloading || isPaused || isQueued || isProcessing;
         // Retriable whenever it is not actually downloaded and nothing is actively running:
         // covers cancelled, failed, interrupted, and a stale "completed" with no saved file.
@@ -1611,7 +1662,7 @@ export default function LibraryScreen() {
                         </View>
                     </View>
 
-                    {!batchMode && !isDownloaded && !isProcessing && canDownload && (
+                    {!batchMode && !isDownloaded && !isProcessing && canDownload && !isStarting && (
                         <TouchableOpacity
                             style={styles.downloadButton}
                             onPress={() => handleDownload(item)}
@@ -1629,7 +1680,7 @@ export default function LibraryScreen() {
                         </TouchableOpacity>
                     )}
 
-                    {isProcessing && (
+                    {(isProcessing || isStarting) && (
                         <View style={styles.downloadButton}>
                             <ActivityIndicator size="small" color={colors.info} />
                         </View>
@@ -2271,7 +2322,7 @@ export default function LibraryScreen() {
                         <ScrollView style={styles.filterScroll}>
                             {/* Source Filter */}
                             <Text style={styles.filterSectionTitle}>Source</Text>
-                            {(['all', 'audible', 'librivox', 'librofm'] as SourceFilter[]).map((src) => (
+                            {(['all', ...BOOK_SOURCES.map((source) => source.id)] as SourceFilter[]).map((src) => (
                                 <TouchableOpacity
                                     key={src}
                                     style={[
@@ -2281,7 +2332,7 @@ export default function LibraryScreen() {
                                     onPress={() => setSourceFilter(src)}
                                 >
                                     <Text style={styles.filterOptionText}>
-                                        {src === 'all' ? 'All Sources' : src === 'audible' ? 'Audible' : src === 'librivox' ? 'LibriVox' : 'Libro.fm'}
+                                        {src === 'all' ? 'All Sources' : BOOK_SOURCES.find((source) => source.id === src)?.name ?? src}
                                     </Text>
                                     {sourceFilter === src && <Text style={styles.modalCheck}>✓</Text>}
                                 </TouchableOpacity>

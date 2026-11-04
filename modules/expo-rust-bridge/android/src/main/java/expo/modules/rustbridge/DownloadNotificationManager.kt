@@ -44,6 +44,7 @@ class DownloadNotificationManager(private val context: Context) {
         const val STAGE_DECRYPTING = "decrypting"
         const val STAGE_COPYING = "copying"
         const val STAGE_ENCODING = "encoding"
+        const val STAGE_JOINING = "joining"
         const val STAGE_COMPLETED = "completed"
         const val STAGE_FAILED = "failed"
     }
@@ -106,6 +107,7 @@ class DownloadNotificationManager(private val context: Context) {
             STAGE_DECRYPTING -> "Decrypting"
             STAGE_COPYING -> "Saving to library"
             STAGE_ENCODING -> "Converting to MP3"
+            STAGE_JOINING -> "Joining tracks"
             else -> "Processing"
         }
 

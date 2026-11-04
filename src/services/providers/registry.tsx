@@ -11,6 +11,7 @@
  */
 import React from 'react';
 import type { Ionicons } from '@expo/vector-icons';
+import { accountProvider } from '../../../modules/expo-rust-bridge';
 import type { Account, ProviderId } from '../../../modules/expo-rust-bridge';
 import type { ColorScheme } from '../../styles/theme';
 import LoginScreen from '../../screens/LoginScreen';
@@ -238,4 +239,15 @@ export const BOOK_SOURCES: { id: ProviderId; name: string }[] = [
  */
 export function providerEntry(id: ProviderId): ProviderEntry {
   return ACCOUNT_PROVIDERS.find((entry) => entry.id === id) ?? AUDIBLE;
+}
+
+/**
+ * The line under an account's name in a mixed-provider list: which service it is,
+ * then that provider's own detail when it has one ("Audible · United States (US)").
+ * The name alone doesn't say — Libro.fm and Chirp accounts are both just an email.
+ */
+export function formatAccountSubtitle(account: Account): string {
+  const entry = providerEntry(accountProvider(account));
+  const detail = entry.formatSubtitle?.(account);
+  return detail ? `${entry.name} · ${detail}` : entry.name;
 }

@@ -35,6 +35,7 @@ import {
 import {
   ACCOUNT_PROVIDERS,
   LIBRIVOX_BROWSE,
+  formatAccountSubtitle,
   providerEntry,
   type ProviderEntry,
 } from '../services/providers/registry';
@@ -433,7 +434,7 @@ export default function AccountsScreen({ navigation }: any) {
                 selectedAccountId={selected?.account_id ?? null}
                 onSelect={handleSelect}
                 formatName={(acc) => entryFor(acc).formatName(acc)}
-                formatSubtitle={(acc) => entryFor(acc).formatSubtitle?.(acc) ?? null}
+                formatSubtitle={formatAccountSubtitle}
                 formatIcon={(acc) => {
                   const entry = entryFor(acc);
                   return { name: entry.icon, color: colors[entry.tint] };

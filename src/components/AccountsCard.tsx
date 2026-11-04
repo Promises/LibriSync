@@ -16,7 +16,7 @@ interface Props {
   onAddAccount?: () => void;
   /** Row title, e.g. "Henning Berge (US)". */
   formatName: (account: Account) => string;
-  /** Row subtitle — region for Audible, email for a credential provider. */
+  /** Row subtitle — in a mixed list, the service name plus any provider detail. */
   formatSubtitle?: (account: Account) => string | null;
   /** Leading badge per row. Needed once the list mixes providers. */
   formatIcon?: (account: Account) => { name: React.ComponentProps<typeof Ionicons>['name']; color: string };

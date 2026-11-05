@@ -902,9 +902,13 @@ export default function LibraryScreen() {
         const task = downloadTasks.get(book.audible_product_id);
 
         if (task) {
-            const percentage = task.total_bytes > 0
-                ? ((task.bytes_downloaded / task.total_bytes) * 100).toFixed(1)
-                : '0.0';
+            // A book in parts reports the whole book's progress through the stage store;
+            // the task's own bytes only cover the part being fetched.
+            const percentage = sp && sp.stage === 'downloading'
+                ? sp.percentage.toFixed(1)
+                : task.total_bytes > 0
+                    ? ((task.bytes_downloaded / task.total_bytes) * 100).toFixed(1)
+                    : '0.0';
 
             const etaText = sp ? formatEtaShort(sp.eta_seconds) : '';
             const etaSuffix = etaText ? ` · ${etaText}` : '';
@@ -930,7 +934,16 @@ export default function LibraryScreen() {
                 case 'encoding':
                     return {text: `🎵 Converting ${stagePct}%${etaSuffix}`, color: colors.info};
                 case 'completed':
-                    return {text: '✓ Downloaded', color: colors.success};
+                    if (task.output_path) {
+                        return {text: '✓ Downloaded', color: colors.success};
+                    }
+                    // No saved file yet: one part of a book still downloading, or the
+                    // download done and processing about to start. With no live stage the
+                    // book was interrupted, so fall through to the book's own state.
+                    if (sp) {
+                        return {text: `⬇ ${percentage}%${etaSuffix}`, color: colors.info};
+                    }
+                    break;
                 case 'failed':
                     return {text: '✗ Failed', color: colors.error};
                 default:
@@ -1576,11 +1589,17 @@ export default function LibraryScreen() {
         const task = downloadTasks.get(item.audible_product_id);
         // Sequential-mode queued books have no DB task; they are queued only in the store.
         const isSpQueued = stageProgress[item.audible_product_id]?.stage === 'queued';
-        // Only a saved final file means "downloaded". The download-task "completed"
-        // status is also set once the download alone finishes (before decrypt/copy), so a
-        // cancelled or interrupted book could otherwise look downloaded and block retry.
-        const isDownloaded = !!item.file_path;
-        const isProcessing = task?.status === 'decrypting' || task?.status === 'joining' || task?.status === 'validating' || task?.status === 'copying' || task?.status === 'encoding';
+        // Only a saved final file means "downloaded". A download task is also "completed"
+        // once its bytes are in, before join/decrypt/copy, but only gets an output path
+        // when the book is saved — so "completed" alone must not count. The book list
+        // only reloads on focus or a filter change, so a book finishing while the screen
+        // is open has no file_path yet; its polled task already has the final path.
+        const isDownloaded = !!item.file_path || (task?.status === 'completed' && !!task.output_path);
+        // A "completed" task with no saved file is a finished part of a book that is still
+        // in progress — as long as the service is working on it (live stage progress).
+        const isBetweenParts = task?.status === 'completed' && !task.output_path
+            && !!stageProgress[item.audible_product_id];
+        const isProcessing = task?.status === 'decrypting' || task?.status === 'joining' || task?.status === 'validating' || task?.status === 'copying' || task?.status === 'encoding' || isBetweenParts;
         const canRetryConversion = task?.status === 'failed' && !!task.aaxc_key;
         const isDownloading = task?.status === 'downloading';
         const isPaused = task?.status === 'paused';

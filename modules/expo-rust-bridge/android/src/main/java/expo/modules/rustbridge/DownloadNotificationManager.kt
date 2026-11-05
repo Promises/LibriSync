@@ -6,6 +6,7 @@ import android.content.Intent
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import android.util.Log
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Rich notification manager for audiobook downloads
@@ -32,6 +33,15 @@ class DownloadNotificationManager(private val context: Context) {
          * anchor (1001) and its neighbours.
          */
         fun notificationIdFor(asin: String): Int = 100_000 + asin.hashCode().mod(800_000)
+
+        /**
+         * When each book's progress notification first appeared. Android orders
+         * same-priority notifications by their timestamp, which defaults to "now" on every
+         * update, so concurrent downloads kept swapping places as they reported progress.
+         * Pinning it per book keeps the order stable. Shared across manager instances.
+         */
+        private val shownSince = ConcurrentHashMap<String, Long>()
+        @Volatile private var summaryShownSince = 0L
 
         // Action request codes
         private const val ACTION_PAUSE = "expo.modules.rustbridge.PAUSE_DOWNLOAD"
@@ -152,6 +162,9 @@ class DownloadNotificationManager(private val context: Context) {
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setStyle(NotificationCompat.BigTextStyle().bigText(bigText))
             .setOnlyAlertOnce(true) // Don't make sound/vibration on updates
+            .setWhen(shownSince.getOrPut(progress.asin) { System.currentTimeMillis() })
+            .setShowWhen(false)
+            .setContentIntent(openAppIntent())
 
         // Per-ASIN request codes: a constant code + FLAG_UPDATE_CURRENT makes every
         // notification's button share one PendingIntent, so its extras (asin) get
@@ -219,7 +232,9 @@ class DownloadNotificationManager(private val context: Context) {
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setStyle(NotificationCompat.BigTextStyle().bigText(bigText))
+            .setContentIntent(openAppIntent())
             .build()
+        shownSince.remove(asin)
 
         // Replace this book's ongoing progress notification in place.
         notificationManager.notify(notificationIdFor(asin), notification)
@@ -261,7 +276,9 @@ class DownloadNotificationManager(private val context: Context) {
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setStyle(NotificationCompat.BigTextStyle().bigText(bigText))
             .addAction(android.R.drawable.ic_menu_rotate, "Retry", retryPendingIntent)
+            .setContentIntent(openAppIntent())
             .build()
+        shownSince.remove(asin)
 
         // Replace this book's ongoing progress notification in place.
         notificationManager.notify(notificationIdFor(asin), notification)
@@ -295,6 +312,7 @@ class DownloadNotificationManager(private val context: Context) {
             .setAutoCancel(false)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setStyle(NotificationCompat.BigTextStyle().bigText(bigText))
+            .setContentIntent(openAppIntent())
 
         // Resume button
         val resumeIntent = Intent(ACTION_RESUME).apply {
@@ -341,6 +359,7 @@ class DownloadNotificationManager(private val context: Context) {
     /** Cancel just one book's notification (per-book cancel from its own action button). */
     fun cancelForAsin(asin: String) {
         notificationManager.cancel(notificationIdFor(asin))
+        shownSince.remove(asin)
         Log.d(TAG, "Cancelled notification for $asin")
     }
 
@@ -376,6 +395,9 @@ class DownloadNotificationManager(private val context: Context) {
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setOnlyAlertOnce(true)
             .setStyle(NotificationCompat.BigTextStyle().bigText(bigText))
+            .setWhen(summaryWhen())
+            .setShowWhen(false)
+            .setContentIntent(openAppIntent())
             .build()
         notificationManager.notify(NOTIFICATION_ID, notification)
     }
@@ -388,6 +410,7 @@ class DownloadNotificationManager(private val context: Context) {
      */
     fun cancelSummary() {
         notificationManager.cancel(NOTIFICATION_ID)
+        summaryShownSince = 0L
         Log.d(TAG, "Cancelled download summary notification")
     }
 
@@ -402,6 +425,30 @@ class DownloadNotificationManager(private val context: Context) {
             .setProgress(0, 0, true)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setContentIntent(openAppIntent())
             .build()
+    }
+
+    /** The summary keeps one timestamp while downloads run, for the same reason as books. */
+    private fun summaryWhen(): Long {
+        if (summaryShownSince == 0L) summaryShownSince = System.currentTimeMillis()
+        return summaryShownSince
+    }
+
+    /**
+     * Tapping any download notification opens the app, where the book's progress or error
+     * is shown. Built from the launcher intent so it resumes the running app rather than
+     * stacking a new activity.
+     */
+    private fun openAppIntent(): PendingIntent? {
+        val launch = context.packageManager.getLaunchIntentForPackage(context.packageName)
+            ?: return null
+        launch.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
+        return PendingIntent.getActivity(
+            context,
+            0,
+            launch,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
     }
 }

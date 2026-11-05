@@ -4,6 +4,21 @@ All notable user-facing changes to LibriSync. Entries are phrased for the
 Google Play "What's new" field. Earlier entries were reconstructed from git
 history (no changelog was kept before v0.0.24), so wording is approximate.
 
+## v0.0.34
+
+- New Downloads screen (Settings → Downloads): every book downloading, with its stage,
+  progress and speed, pause and cancel, plus what finished or failed in the past week
+  and why.
+- Tapping a download notification now opens the Downloads screen.
+- Books no longer show as "Downloaded" before they've finished processing, and library
+  rows no longer flip between "Downloaded" and the pause/cancel buttons.
+- Download speed now shows correctly for books that download in parts (Chirp), instead
+  of 0 KB/s.
+- Download notifications stay in place instead of swapping positions as they update.
+- If there isn't enough storage to finish a book, LibriSync now says so before starting,
+  instead of failing later with a "corruption" error.
+- Settings → Providers now has a switch for every store, including Libro.fm and Chirp.
+
 ## v0.0.33
 
 - Chirp support — sign in with your Chirp email and password, then sync and download

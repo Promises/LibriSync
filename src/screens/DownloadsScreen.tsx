@@ -129,7 +129,7 @@ function formatAgo(time: number | null): string {
  * stage, progress, speed and controls, then what finished or failed in the last week.
  * The Library shows the same state per row, which is hard to follow in a big library.
  */
-export default function DownloadsScreen() {
+export default function DownloadsScreen({ navigation }: any) {
   const styles = useStyles(createStyles);
   const { colors } = useTheme();
   const [active, setActive] = useState<ActiveItem[]>([]);
@@ -291,7 +291,19 @@ export default function DownloadsScreen() {
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
       <View style={styles.header}>
-        <Text style={styles.headerTitle}>Downloads</Text>
+        <View style={styles.headerTitleRow}>
+          {/* Pushed from Settings, so it needs its own way back. */}
+          {navigation.canGoBack() && (
+            <TouchableOpacity
+              onPress={() => navigation.goBack()}
+              style={styles.backButton}
+              accessibilityLabel="Back"
+            >
+              <Ionicons name="chevron-back" size={24} color={colors.textPrimary} />
+            </TouchableOpacity>
+          )}
+          <Text style={styles.headerTitle}>Downloads</Text>
+        </View>
         {active.length > 0 && (
           <TouchableOpacity style={styles.headerButton} onPress={confirmStopAll}>
             <Ionicons name="stop-circle-outline" size={18} color={colors.error} />
@@ -340,6 +352,15 @@ const createStyles = (theme: Theme) => ({
     padding: theme.spacing.lg,
     borderBottomWidth: 1,
     borderBottomColor: theme.colors.border,
+  },
+  headerTitleRow: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+  },
+  backButton: {
+    marginRight: theme.spacing.sm,
+    marginLeft: -theme.spacing.sm,
+    padding: theme.spacing.xs,
   },
   headerTitle: {
     ...theme.typography.title,

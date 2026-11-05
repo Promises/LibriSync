@@ -11,7 +11,6 @@ import { checkForUpdate, isGithubReleaseBuild } from '../utils/versionCheck';
 
 import LibraryScreen from '../screens/LibraryScreen';
 import DownloadsScreen from '../screens/DownloadsScreen';
-import { useActiveDownloadCount } from '../hooks/useActiveDownloadCount';
 import AccountsScreen from '../screens/AccountsScreen';
 import LibriVoxBrowseScreen from '../screens/LibriVoxBrowseScreen';
 import SettingsScreen from '../screens/SettingsScreen';
@@ -19,6 +18,7 @@ import TaskDebugScreen from '../screens/TaskDebugScreen';
 
 const Tab = createBottomTabNavigator();
 const AccountsStack = createNativeStackNavigator();
+const SettingsStack = createNativeStackNavigator();
 const DEBUG_MODE_KEY = 'debug_mode_enabled';
 
 /**
@@ -36,9 +36,20 @@ function AccountsStackScreen() {
   );
 }
 
+/**
+ * Settings, with Downloads pushed from its top row. Both screens draw their own headers.
+ */
+function SettingsStackScreen() {
+  return (
+    <SettingsStack.Navigator screenOptions={{ headerShown: false }}>
+      <SettingsStack.Screen name="SettingsMain" component={SettingsScreen} />
+      <SettingsStack.Screen name="Downloads" component={DownloadsScreen} />
+    </SettingsStack.Navigator>
+  );
+}
+
 export default function AppNavigator() {
   const { colors } = useTheme();
-  const activeDownloads = useActiveDownloadCount();
   const [enableDebugScreen, setEnableDebugScreen] = useState<boolean>(
     Constants.expoConfig?.extra?.enableDebugScreen ?? __DEV__
   );
@@ -117,19 +128,6 @@ export default function AppNavigator() {
           }}
         />
         <Tab.Screen
-          name="Downloads"
-          component={DownloadsScreen}
-          options={{
-            tabBarLabel: 'Downloads',
-            headerShown: false,
-            tabBarBadge: activeDownloads > 0 ? activeDownloads : undefined,
-            tabBarBadgeStyle: { backgroundColor: colors.accent, color: colors.background },
-            tabBarIcon: ({ color, size }) => (
-              <Ionicons name="arrow-down-circle" size={size} color={color} />
-            ),
-          }}
-        />
-        <Tab.Screen
           name="Accounts"
           component={AccountsStackScreen}
           options={{
@@ -142,7 +140,7 @@ export default function AppNavigator() {
         />
         <Tab.Screen
           name="Settings"
-          component={SettingsScreen}
+          component={SettingsStackScreen}
           options={{
             tabBarLabel: 'Settings',
             headerShown: false,

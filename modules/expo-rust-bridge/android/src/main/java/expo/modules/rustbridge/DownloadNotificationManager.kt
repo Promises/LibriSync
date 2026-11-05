@@ -3,6 +3,7 @@ package expo.modules.rustbridge
 import android.app.*
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import android.util.Log
@@ -41,6 +42,9 @@ class DownloadNotificationManager(private val context: Context) {
          * Pinning it per book keeps the order stable. Shared across manager instances.
          */
         private val shownSince = ConcurrentHashMap<String, Long>()
+
+        /** Opens Settings → Downloads; see `linking` in AppNavigator.tsx. */
+        private const val DOWNLOADS_LINK = "librisync://downloads"
         @Volatile private var summaryShownSince = 0L
 
         // Action request codes
@@ -436,14 +440,20 @@ class DownloadNotificationManager(private val context: Context) {
     }
 
     /**
-     * Tapping any download notification opens the app, where the book's progress or error
-     * is shown. Built from the launcher intent so it resumes the running app rather than
-     * stacking a new activity.
+     * Tapping any download notification opens the Downloads screen (Settings → Downloads),
+     * where every book's progress or error is listed. It's a deep link handled by the app's
+     * navigator (scheme declared in app.config.js), pinned to this package so the debug
+     * and release apps don't both claim it. Falls back to plain launch if nothing handles it.
      */
     private fun openAppIntent(): PendingIntent? {
-        val launch = context.packageManager.getLaunchIntentForPackage(context.packageName)
-            ?: return null
-        launch.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
+        val downloads = Intent(Intent.ACTION_VIEW, Uri.parse(DOWNLOADS_LINK))
+            .setPackage(context.packageName)
+        val launch = if (downloads.resolveActivity(context.packageManager) != null) {
+            downloads
+        } else {
+            context.packageManager.getLaunchIntentForPackage(context.packageName) ?: return null
+        }
+        launch.flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
         return PendingIntent.getActivity(
             context,
             0,

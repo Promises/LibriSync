@@ -1,6 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { Alert, Linking } from 'react-native';
-import { NavigationContainer } from '@react-navigation/native';
+import {
+  NavigationContainer,
+  type LinkingOptions,
+  type NavigatorScreenParams,
+} from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { Ionicons } from '@expo/vector-icons';
@@ -20,6 +24,34 @@ const Tab = createBottomTabNavigator();
 const AccountsStack = createNativeStackNavigator();
 const SettingsStack = createNativeStackNavigator();
 const DEBUG_MODE_KEY = 'debug_mode_enabled';
+
+/**
+ * In-app links. `librisync://downloads` — what tapping a download notification opens —
+ * lands on Settings → Downloads with Settings underneath, so Back still leads somewhere.
+ * The scheme is declared in app.config.js.
+ */
+type SettingsStackParamList = { SettingsMain: undefined; Downloads: undefined };
+type RootTabParamList = {
+  Library: undefined;
+  Accounts: undefined;
+  Settings: NavigatorScreenParams<SettingsStackParamList>;
+  Debug: undefined;
+};
+
+const linking: LinkingOptions<RootTabParamList> = {
+  prefixes: ['librisync://'],
+  config: {
+    screens: {
+      Settings: {
+        initialRouteName: 'SettingsMain',
+        screens: {
+          SettingsMain: 'settings',
+          Downloads: 'downloads',
+        },
+      },
+    },
+  },
+};
 
 /**
  * One unified Accounts screen for every provider, with LibriVox — which needs no
@@ -95,7 +127,7 @@ export default function AppNavigator() {
   }, []);
 
   return (
-    <NavigationContainer>
+    <NavigationContainer linking={linking}>
       <Tab.Navigator
         screenOptions={{
           tabBarStyle: {

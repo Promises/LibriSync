@@ -10,6 +10,8 @@ import { useTheme } from '../styles/theme';
 import { checkForUpdate, isGithubReleaseBuild } from '../utils/versionCheck';
 
 import LibraryScreen from '../screens/LibraryScreen';
+import DownloadsScreen from '../screens/DownloadsScreen';
+import { useActiveDownloadCount } from '../hooks/useActiveDownloadCount';
 import AccountsScreen from '../screens/AccountsScreen';
 import LibriVoxBrowseScreen from '../screens/LibriVoxBrowseScreen';
 import SettingsScreen from '../screens/SettingsScreen';
@@ -36,6 +38,7 @@ function AccountsStackScreen() {
 
 export default function AppNavigator() {
   const { colors } = useTheme();
+  const activeDownloads = useActiveDownloadCount();
   const [enableDebugScreen, setEnableDebugScreen] = useState<boolean>(
     Constants.expoConfig?.extra?.enableDebugScreen ?? __DEV__
   );
@@ -110,6 +113,19 @@ export default function AppNavigator() {
             headerShown: false,
             tabBarIcon: ({ color, size }) => (
               <Ionicons name="library" size={size} color={color} />
+            ),
+          }}
+        />
+        <Tab.Screen
+          name="Downloads"
+          component={DownloadsScreen}
+          options={{
+            tabBarLabel: 'Downloads',
+            headerShown: false,
+            tabBarBadge: activeDownloads > 0 ? activeDownloads : undefined,
+            tabBarBadgeStyle: { backgroundColor: colors.accent, color: colors.background },
+            tabBarIcon: ({ color, size }) => (
+              <Ionicons name="arrow-down-circle" size={size} color={color} />
             ),
           }}
         />

@@ -365,6 +365,10 @@ export interface StageProgress {
   stage: TaskStatus;
   percentage: number;   // 0..100
   eta_seconds: number;  // 0 = unknown
+  /** The book's title, when the service knows it (always, for its own downloads). */
+  title?: string;
+  /** Download speed as the notification shows it ("2.5 MB/s"), while downloading. */
+  speed?: string;
 }
 
 // ============================================================================

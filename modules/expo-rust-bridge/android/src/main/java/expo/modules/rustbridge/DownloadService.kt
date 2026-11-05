@@ -285,9 +285,12 @@ class DownloadService : Service() {
 
         // Set up orchestrator callbacks
         orchestrator.setProgressCallback { asin, stage, percentage, bytesDownloaded, totalBytes, etaSeconds ->
-            // Expose stage percentage + ETA to the JS UI (LibraryScreen polls this).
-            StageProgressStore.update(asin, stage, percentage.toInt(), etaSeconds)
             val speedStr = if (stage == "downloading") computeDownloadSpeed(asin, bytesDownloaded) else null
+            // Expose stage percentage, ETA, title and speed to the JS UI (Library and
+            // Downloads screens poll this).
+            StageProgressStore.update(
+                asin, stage, percentage.toInt(), etaSeconds, activeDownloads[asin]?.title, speedStr
+            )
             activeDownloads[asin]?.let { download ->
                 val progress = DownloadNotificationManager.DownloadProgress(
                     asin = asin,
@@ -405,7 +408,7 @@ class DownloadService : Service() {
         if (downloadMode() == "sequential" && activeDownloads.isNotEmpty()) {
             pendingDownloads.add(Pending(asin, title, start))
             // Surface the queued book to the UI so it can't be re-selected.
-            StageProgressStore.update(asin, "queued", 0, 0)
+            StageProgressStore.update(asin, "queued", 0, 0, title)
             Log.d(TAG, "Sequential mode: holding $asin (${pendingDownloads.size} pending)")
             refreshSummary()
             reportEnqueue(asin, EnqueueOutcome.Queued)

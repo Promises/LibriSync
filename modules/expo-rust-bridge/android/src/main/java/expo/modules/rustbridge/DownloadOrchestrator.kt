@@ -46,6 +46,10 @@ class DownloadOrchestrator(
         // record the refusal and stop asking until this much time has passed.
         private const val PREF_LICENSE_THROTTLED_UNTIL = "license_throttled_until"
         private const val LICENSE_THROTTLE_COOLDOWN_MS = 60 * 60 * 1000L
+        // Headroom on top of a book's own size before decrypting or joining it: FFmpeg's
+        // output overshoots the input slightly (cover art, chapter track), and a phone at
+        // its last few MB misbehaves in other ways too.
+        private const val STORAGE_HEADROOM_BYTES = 100L * 1024 * 1024
     }
 
     private val prefs: SharedPreferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -135,6 +139,50 @@ class DownloadOrchestrator(
             val ext = (part as DownloadPart.PlainPart).filename.substringAfterLast('.', "m4a")
             File(audiobooksDir, "$asin-part${i + 1}.$ext").absolutePath
         }
+
+    /** Thrown when the device lacks room to finish a book; its message is user-facing. */
+    private class InsufficientStorageException(message: String) : Exception(message)
+
+    /**
+     * Fail early, with a message the user can act on, if [dir]'s volume can't hold another
+     * [bytes] (plus headroom).
+     */
+    private fun requireFreeSpace(dir: File, bytes: Long) {
+        val needed = bytes + STORAGE_HEADROOM_BYTES
+        val free = dir.usableSpace
+        if (free < needed) {
+            throw InsufficientStorageException(
+                "Not enough storage: this book needs about ${formatMb(needed)} free, " +
+                    "${formatMb(free)} available. Free up some space and download again."
+            )
+        }
+    }
+
+    private fun formatMb(bytes: Long): String = "${bytes / (1024 * 1024)} MB"
+
+    /**
+     * The message to show for a failed finalize step. Storage problems arrive as raw
+     * I/O errors — ENOSPC, or ENOENT when Android cleared the app's cache to free space
+     * mid-book — or as a half-written file that fails validation; say what actually
+     * happened instead.
+     */
+    private fun explainFailure(e: Exception, fallback: String): String {
+        val raw = e.message ?: fallback
+        if (e is InsufficientStorageException) return raw
+        val free = context.cacheDir.usableSpace
+        return when {
+            raw.contains("ENOSPC") || raw.contains("No space left", ignoreCase = true) ->
+                "Ran out of storage while saving the book (${formatMb(free)} free). " +
+                    "Free up some space and download again."
+            raw.contains("ENOENT") && raw.contains(context.cacheDir.absolutePath) ->
+                "A temporary file was deleted before the book was finished. Android clears " +
+                    "app cache when storage runs low (${formatMb(free)} free now). " +
+                    "Free up some space and download again."
+            free < STORAGE_HEADROOM_BYTES ->
+                "$raw. Storage is nearly full (${formatMb(free)} free), which is the likely cause."
+            else -> raw
+        }
+    }
 
     /** The FFmpeg side files a join reads: the concat list and the chapter markers. */
     private class JoinFiles(val listFile: File, val chaptersFile: File?) {
@@ -258,10 +306,13 @@ class DownloadOrchestrator(
             put("download_url", part.url)
             put("total_bytes", 0)
             put("download_path", encryptedPath)
-            // A completed task with an output path is what marks a book downloaded, and a
-            // part before the last isn't the book. With a cache path here, a book whose
-            // later parts never finished stayed linked to a file that doesn't exist.
-            put("output_path", if (isLastPart) decryptedCachePath else "")
+            // A completed task with an output path is what marks a book downloaded, and the
+            // raw download isn't the book: it still has to be joined/decrypted, validated
+            // and copied. Rust marks the task completed as soon as the bytes are in, so a
+            // cache path here showed the book as downloaded before any of that ran (and
+            // left it linked to a cache file if the app died). The finalize step writes
+            // the real path when the book is actually done.
+            put("output_path", "")
             put("request_headers", JSONObject(part.headers))
         }
         val parsedEnqueue = parseJsonResponse(ExpoRustBridgeModule.nativeEnqueueDownload(enqueueParams.toString()))
@@ -786,10 +837,17 @@ class DownloadOrchestrator(
         // contradict that percentage, so they're left out of the notification.
         val overall = joinedParts != null && partCount > 1
         fun overallPct(partPct: Double) = (partIndex * 100.0 + partPct) / partCount
+        // Bytes are reported for the whole book too, so download speed is measured across
+        // parts. Per part, a short track finished between two 2 s polls: every report was
+        // a fresh part at 0 bytes, and the notification showed 0 KB/s throughout.
+        val bytesBefore = if (overall) {
+            joinedParts!!.take(partIndex).sumOf { File(it).length() }
+        } else 0L
 
         // Send initial progress notification
         progressCallback?.invoke(
-            asin, "downloading", if (overall) overallPct(0.0) else 0.0, 0, if (overall) 0 else totalBytes, 0L
+            asin, "downloading", if (overall) overallPct(0.0) else 0.0,
+            bytesBefore, if (overall) 0 else totalBytes, 0L
         )
 
         val job = scope.launch {
@@ -825,9 +883,9 @@ class DownloadOrchestrator(
                                 // Send progress notification only while downloading
                                 speedEta.update(bytesDownloaded, taskTotalBytes)
                                 if (overall) {
-                                    // bytes_downloaded still feeds the speed readout; the
-                                    // per-part ETA would understate the book's, so it's dropped.
-                                    progressCallback?.invoke(asin, "downloading", overallPct(percentage), bytesDownloaded, 0, 0L)
+                                    // Book-wide bytes feed the speed readout; with no book
+                                    // total there's no byte count or ETA to show.
+                                    progressCallback?.invoke(asin, "downloading", overallPct(percentage), bytesBefore + bytesDownloaded, 0, 0L)
                                 } else {
                                     progressCallback?.invoke(asin, "downloading", percentage, bytesDownloaded, taskTotalBytes, speedEta.etaSeconds)
                                 }
@@ -956,8 +1014,9 @@ class DownloadOrchestrator(
             completionCallback?.invoke(asin, title, finalPath)
         } catch (e: Exception) {
             Log.e(TAG, "Plain audio copy failed for $asin", e)
-            updateTaskStatusWithError(taskId, "failed", e.message ?: "Copy failed")
-            errorCallback?.invoke(asin, title, e.message ?: "Copy failed")
+            val message = explainFailure(e, "Copy failed")
+            updateTaskStatusWithError(taskId, "failed", message)
+            errorCallback?.invoke(asin, title, message)
         }
     }
 
@@ -1014,6 +1073,13 @@ class DownloadOrchestrator(
                 errorCallback?.invoke(asin, title, "Download incomplete — please download again")
                 return@withContext
             }
+
+            // The joined/decrypted book is written next to its source (the parts, or the
+            // encrypted file), so it needs about the source's size free again. Checked up
+            // front: a full disk otherwise surfaced as a half-written file that "failed
+            // validation", or as a cache file Android had already deleted to free space.
+            val sourceBytes = joinInputs?.sumOf { File(it).length() } ?: encFile.length()
+            requireFreeSpace(File(decryptedCachePath).parentFile ?: context.cacheDir, sourceBytes)
 
             // Persist the decrypt/join stage to DB
             resolvedTaskId?.let { updateTaskStatusInDb(it, stage) }
@@ -1266,6 +1332,10 @@ class DownloadOrchestrator(
 
             Log.d(TAG, "Conversion complete for $asin (with metadata + cover art)")
 
+            // The parts are the joined book now; free their space before validating and
+            // copying, rather than holding two copies of the book until the very end.
+            joinInputs?.forEach { File(it).delete() }
+
             // CRITICAL: Validate audio file for corruption
             Log.d(TAG, "Validating audio file integrity for $asin...")
             resolvedTaskId?.let { updateTaskStatusInDb(it, "validating") }
@@ -1331,8 +1401,9 @@ class DownloadOrchestrator(
             // single source), so drop its half-made output; the user downloads again.
             if (joinInputs != null) runCatching { File(decryptedCachePath).delete() }
             // Mark as failed in DB with error
-            resolvedTaskId?.let { updateTaskStatusWithError(it, "failed", e.message ?: "Conversion failed") }
-            errorCallback?.invoke(asin, title, e.message ?: "Conversion failed")
+            val message = explainFailure(e, "Conversion failed")
+            resolvedTaskId?.let { updateTaskStatusWithError(it, "failed", message) }
+            errorCallback?.invoke(asin, title, message)
         } finally {
             cancelledConversions.remove(asin)
             activeFfmpegSessions.remove(asin)

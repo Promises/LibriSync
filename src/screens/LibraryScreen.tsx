@@ -35,7 +35,7 @@ import {
     copyTextToClipboard,
     ExpoRustBridge,
 } from '../../modules/expo-rust-bridge';
-import type {Book, Account, DownloadTask, EnqueueStatus, ProviderId, StageProgress, TaskStatus} from '../../modules/expo-rust-bridge';
+import type {Book, Account, DownloadTask, EnqueueStatus, ProviderId, StageProgress} from '../../modules/expo-rust-bridge';
 import * as SecureStore from 'expo-secure-store';
 import * as DocumentPicker from 'expo-document-picker';
 import {Directory, Paths} from 'expo-file-system';
@@ -44,6 +44,7 @@ import {getBook} from '../services/librivox';
 import LegacyAccountBanner from '../components/LegacyAccountBanner';
 import {hasLegacyAudibleAccounts} from '../services/providers/audible';
 import {BOOK_SOURCES, planDownloadProvider} from '../services/providers/registry';
+import {formatEtaShort, isBetweenParts, isSavedTask, taskPerBook} from '../services/downloadTasks';
 import {DEMO_BOOKS, DEMO_SERIES, DEMO_CATEGORIES, DEMO_ACCOUNT} from '../services/demo/demoData';
 import {isDemoAccountId, isDemoBook, filterSortPaginate} from '../services/demo/demoMode';
 import * as demoDownloads from '../services/demo/demoDownloads';
@@ -69,12 +70,6 @@ type BookSortField = Exclude<SortField, 'downloaded'>;
 type SortDirection = 'asc' | 'desc';
 type SourceFilter = 'all' | ProviderId;
 type IoniconName = React.ComponentProps<typeof Ionicons>['name'];
-
-/** Statuses of a download that hasn't reached a terminal state yet. */
-const ACTIVE_TASK_STATUSES: ReadonlySet<TaskStatus> = new Set<TaskStatus>([
-    'queued', 'downloading', 'paused', 'decrypting', 'joining', 'validating', 'copying', 'encoding',
-]);
-const isActiveTask = (task: DownloadTask) => ACTIVE_TASK_STATUSES.has(task.status);
 
 const EXPORT_FORMAT_OPTIONS: Array<{ format: LibraryExportFormat; label: string; icon: IoniconName }> = [
     {format: 'csv', label: 'CSV', icon: 'grid-outline'},
@@ -238,18 +233,7 @@ export default function LibraryScreen() {
                 const dbPath = getDatabasePath();
 
                 const tasks = listDownloadTasks(dbPath);
-                const taskMap = new Map<string, DownloadTask>();
-
-                // listDownloadTasks is newest-first, so keep the first task seen per book —
-                // setting every one let the *oldest* win. An in-flight task still beats a
-                // finished one: a multi-part download (Chirp's tracks) leaves a "completed"
-                // row per finished part while the next part runs.
-                tasks.forEach(task => {
-                    const current = taskMap.get(task.asin);
-                    if (!current || (isActiveTask(task) && !isActiveTask(current))) {
-                        taskMap.set(task.asin, task);
-                    }
-                });
+                const taskMap = taskPerBook(tasks);
 
                 // Merge in-memory demo download tasks (empty unless in demo mode)
                 demoDownloads.getTasks().forEach((task, asin) => {
@@ -871,16 +855,6 @@ export default function LibraryScreen() {
         return book.cover_url.replace(/_SL\d+_/, '_SL150_');
     };
 
-    const formatEtaShort = (sec: number): string => {
-        if (!sec || sec <= 0) return '';
-        const h = Math.floor(sec / 3600);
-        const m = Math.floor((sec % 3600) / 60);
-        const s = Math.floor(sec % 60);
-        if (h > 0) return `~${h}h ${m}m`;
-        if (m > 0) return `~${m}m ${s}s`;
-        return `~${s}s`;
-    };
-
     const formatSpeed = (bytesPerSec: number): string => {
         if (!bytesPerSec || bytesPerSec <= 0) return '';
         const mb = bytesPerSec / (1024 * 1024);
@@ -902,9 +876,13 @@ export default function LibraryScreen() {
         const task = downloadTasks.get(book.audible_product_id);
 
         if (task) {
-            const percentage = task.total_bytes > 0
-                ? ((task.bytes_downloaded / task.total_bytes) * 100).toFixed(1)
-                : '0.0';
+            // A book in parts reports the whole book's progress through the stage store;
+            // the task's own bytes only cover the part being fetched.
+            const percentage = sp && sp.stage === 'downloading'
+                ? sp.percentage.toFixed(1)
+                : task.total_bytes > 0
+                    ? ((task.bytes_downloaded / task.total_bytes) * 100).toFixed(1)
+                    : '0.0';
 
             const etaText = sp ? formatEtaShort(sp.eta_seconds) : '';
             const etaSuffix = etaText ? ` · ${etaText}` : '';
@@ -930,7 +908,16 @@ export default function LibraryScreen() {
                 case 'encoding':
                     return {text: `🎵 Converting ${stagePct}%${etaSuffix}`, color: colors.info};
                 case 'completed':
-                    return {text: '✓ Downloaded', color: colors.success};
+                    if (task.output_path) {
+                        return {text: '✓ Downloaded', color: colors.success};
+                    }
+                    // No saved file yet: one part of a book still downloading, or the
+                    // download done and processing about to start. With no live stage the
+                    // book was interrupted, so fall through to the book's own state.
+                    if (sp) {
+                        return {text: `⬇ ${percentage}%${etaSuffix}`, color: colors.info};
+                    }
+                    break;
                 case 'failed':
                     return {text: '✗ Failed', color: colors.error};
                 default:
@@ -1576,11 +1563,14 @@ export default function LibraryScreen() {
         const task = downloadTasks.get(item.audible_product_id);
         // Sequential-mode queued books have no DB task; they are queued only in the store.
         const isSpQueued = stageProgress[item.audible_product_id]?.stage === 'queued';
-        // Only a saved final file means "downloaded". The download-task "completed"
-        // status is also set once the download alone finishes (before decrypt/copy), so a
-        // cancelled or interrupted book could otherwise look downloaded and block retry.
-        const isDownloaded = !!item.file_path;
-        const isProcessing = task?.status === 'decrypting' || task?.status === 'joining' || task?.status === 'validating' || task?.status === 'copying' || task?.status === 'encoding';
+        // Only a saved final file means "downloaded". A download task is also "completed"
+        // once its bytes are in, before join/decrypt/copy, but only gets an output path
+        // when the book is saved — so "completed" alone must not count. The book list
+        // only reloads on focus or a filter change, so a book finishing while the screen
+        // is open has no file_path yet; its polled task already has the final path.
+        const isDownloaded = !!item.file_path || isSavedTask(task);
+        const isProcessing = task?.status === 'decrypting' || task?.status === 'joining' || task?.status === 'validating' || task?.status === 'copying' || task?.status === 'encoding'
+            || isBetweenParts(task, stageProgress[item.audible_product_id]);
         const canRetryConversion = task?.status === 'failed' && !!task.aaxc_key;
         const isDownloading = task?.status === 'downloading';
         const isPaused = task?.status === 'paused';

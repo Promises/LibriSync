@@ -1,6 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { Alert, Linking } from 'react-native';
-import { NavigationContainer } from '@react-navigation/native';
+import {
+  NavigationContainer,
+  type LinkingOptions,
+  type NavigatorScreenParams,
+} from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { Ionicons } from '@expo/vector-icons';
@@ -10,6 +14,7 @@ import { useTheme } from '../styles/theme';
 import { checkForUpdate, isGithubReleaseBuild } from '../utils/versionCheck';
 
 import LibraryScreen from '../screens/LibraryScreen';
+import DownloadsScreen from '../screens/DownloadsScreen';
 import AccountsScreen from '../screens/AccountsScreen';
 import LibriVoxBrowseScreen from '../screens/LibriVoxBrowseScreen';
 import SettingsScreen from '../screens/SettingsScreen';
@@ -17,7 +22,36 @@ import TaskDebugScreen from '../screens/TaskDebugScreen';
 
 const Tab = createBottomTabNavigator();
 const AccountsStack = createNativeStackNavigator();
+const SettingsStack = createNativeStackNavigator();
 const DEBUG_MODE_KEY = 'debug_mode_enabled';
+
+/**
+ * In-app links. `librisync://downloads` — what tapping a download notification opens —
+ * lands on Settings → Downloads with Settings underneath, so Back still leads somewhere.
+ * The scheme is declared in app.config.js.
+ */
+type SettingsStackParamList = { SettingsMain: undefined; Downloads: undefined };
+type RootTabParamList = {
+  Library: undefined;
+  Accounts: undefined;
+  Settings: NavigatorScreenParams<SettingsStackParamList>;
+  Debug: undefined;
+};
+
+const linking: LinkingOptions<RootTabParamList> = {
+  prefixes: ['librisync://'],
+  config: {
+    screens: {
+      Settings: {
+        initialRouteName: 'SettingsMain',
+        screens: {
+          SettingsMain: 'settings',
+          Downloads: 'downloads',
+        },
+      },
+    },
+  },
+};
 
 /**
  * One unified Accounts screen for every provider, with LibriVox — which needs no
@@ -31,6 +65,18 @@ function AccountsStackScreen() {
       <AccountsStack.Screen name="AccountsList" component={AccountsScreen} />
       <AccountsStack.Screen name="LibriVoxBrowse" component={LibriVoxBrowseScreen} />
     </AccountsStack.Navigator>
+  );
+}
+
+/**
+ * Settings, with Downloads pushed from its top row. Both screens draw their own headers.
+ */
+function SettingsStackScreen() {
+  return (
+    <SettingsStack.Navigator screenOptions={{ headerShown: false }}>
+      <SettingsStack.Screen name="SettingsMain" component={SettingsScreen} />
+      <SettingsStack.Screen name="Downloads" component={DownloadsScreen} />
+    </SettingsStack.Navigator>
   );
 }
 
@@ -81,7 +127,7 @@ export default function AppNavigator() {
   }, []);
 
   return (
-    <NavigationContainer>
+    <NavigationContainer linking={linking}>
       <Tab.Navigator
         screenOptions={{
           tabBarStyle: {
@@ -126,7 +172,7 @@ export default function AppNavigator() {
         />
         <Tab.Screen
           name="Settings"
-          component={SettingsScreen}
+          component={SettingsStackScreen}
           options={{
             tabBarLabel: 'Settings',
             headerShown: false,

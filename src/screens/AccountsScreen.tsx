@@ -92,10 +92,8 @@ export default function AccountsScreen({ navigation }: any) {
 
   const entryFor = (account: Account) => providerEntry(accountProvider(account));
 
-  /** Providers offerable in the picker — Audible can be switched off in Settings. */
-  const availableProviders = ACCOUNT_PROVIDERS.filter(
-    (entry) => entry.id !== 'audible' || enabledProviders.audible,
-  );
+  /** Stores offerable in the picker — each can be switched off in Settings. */
+  const availableProviders = ACCOUNT_PROVIDERS.filter((entry) => enabledProviders[entry.id]);
 
   const loadLibraryCount = useCallback((dbPath: string, account: Account) => {
     if (isDemoAccount(account)) {

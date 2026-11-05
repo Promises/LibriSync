@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { View, Text, TouchableOpacity, ScrollView, Switch, Alert, Platform, Linking } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { Ionicons } from '@expo/vector-icons';
 import * as Updates from 'expo-updates';
 import Constants from 'expo-constants';
 import { useStyles } from '../hooks/useStyles';
@@ -25,6 +26,8 @@ import {
 } from '../../modules/expo-rust-bridge';
 import { getDatabaseFiles, getDatabasePath } from '../utils/appPaths';
 import { useProviders } from '../contexts/ProvidersContext';
+import { BOOK_SOURCES } from '../services/providers/registry';
+import { useActiveDownloadCount } from '../hooks/useActiveDownloadCount';
 import { getLastSyncReport } from '../services/diagnostics';
 import { checkForUpdate, isGithubReleaseBuild, type UpdateInfo } from '../utils/versionCheck';
 
@@ -44,10 +47,11 @@ type PodcastNamingPattern = 'podcast_episode_folder' | 'podcast_flat_file';
 type DownloadMode = 'parallel' | 'sequential';
 type DownloadFormat = 'm4b' | 'mp3';
 
-export default function SettingsScreen() {
+export default function SettingsScreen({ navigation }: any) {
   const styles = useStyles(createStyles);
   const { colors } = useTheme();
   const { providers, setProvider } = useProviders();
+  const activeDownloads = useActiveDownloadCount();
   const [downloadPath, setDownloadPath] = useState<string | null>(null);
   const [namingPattern, setNamingPattern] = useState<NamingPattern>('author_series_book');
   const [podcastNamingPattern, setPodcastNamingPattern] = useState<PodcastNamingPattern>('podcast_episode_folder');
@@ -719,6 +723,22 @@ export default function SettingsScreen() {
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Storage</Text>
 
+          <TouchableOpacity
+            style={styles.settingItem}
+            onPress={() => navigation.navigate('Downloads')}
+            accessibilityRole="button"
+          >
+            <View style={styles.settingInfo}>
+              <Text style={styles.settingLabel}>Downloads</Text>
+              <Text style={styles.settingDescription}>
+                {activeDownloads > 0
+                  ? `${activeDownloads} in progress`
+                  : 'Progress, and what downloaded or failed this week'}
+              </Text>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color={colors.textSecondary} />
+          </TouchableOpacity>
+
           <View style={styles.settingItem}>
             <View style={styles.settingInfo}>
               <Text style={styles.settingLabel}>Download Directory</Text>
@@ -937,36 +957,25 @@ export default function SettingsScreen() {
 
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Providers</Text>
+          <Text style={styles.settingDescription}>
+            Turn off a store to hide it from Add Account (LibriVox: the Browse button).
+            Accounts you've added and books you've downloaded are kept.
+          </Text>
 
-          <View style={styles.settingItem}>
-            <View style={styles.settingInfo}>
-              <Text style={styles.settingLabel}>LibriVox</Text>
-              <Text style={styles.settingDescription}>
-                Free public domain audiobooks
-              </Text>
+          {BOOK_SOURCES.map((source) => (
+            <View key={source.id} style={styles.settingItem}>
+              <View style={styles.settingInfo}>
+                <Text style={styles.settingLabel}>{source.name}</Text>
+                <Text style={styles.settingDescription}>{source.description}</Text>
+              </View>
+              <Switch
+                value={providers[source.id]}
+                onValueChange={(value) => setProvider(source.id, value)}
+                trackColor={{ false: colors.border, true: colors.accentDim }}
+                thumbColor={providers[source.id] ? colors.accent : colors.textSecondary}
+              />
             </View>
-            <Switch
-              value={providers.librivox}
-              onValueChange={(value) => setProvider('librivox', value)}
-              trackColor={{ false: colors.border, true: colors.accentDim }}
-              thumbColor={providers.librivox ? colors.accent : colors.textSecondary}
-            />
-          </View>
-
-          <View style={styles.settingItem}>
-            <View style={styles.settingInfo}>
-              <Text style={styles.settingLabel}>Audible</Text>
-              <Text style={styles.settingDescription}>
-                Sync and download your Audible library
-              </Text>
-            </View>
-            <Switch
-              value={providers.audible}
-              onValueChange={(value) => setProvider('audible', value)}
-              trackColor={{ false: colors.border, true: colors.accentDim }}
-              thumbColor={providers.audible ? colors.accent : colors.textSecondary}
-            />
-          </View>
+          ))}
         </View>
 
         <View style={styles.section}>

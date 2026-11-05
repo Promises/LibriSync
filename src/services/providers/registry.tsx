@@ -229,12 +229,15 @@ export const LIBRIVOX_BROWSE = {
   tint: 'success' as keyof ColorScheme,
 };
 
-/** Every source a book can come from, with its display name — for library filters. */
-export const BOOK_SOURCES: { id: ProviderId; name: string }[] = [
-  { id: AUDIBLE.id, name: AUDIBLE.name },
-  { id: LIBRIVOX_BROWSE.id, name: LIBRIVOX_BROWSE.name },
-  ...ACCOUNT_PROVIDERS.filter((e) => e.id !== AUDIBLE.id).map(({ id, name }) => ({ id, name })),
-];
+/**
+ * Every source a book can come from — for the library's source filter and the Settings
+ * switches that turn a store on or off.
+ */
+export const BOOK_SOURCES: { id: ProviderId; name: string; description: string }[] = [
+  AUDIBLE,
+  LIBRIVOX_BROWSE,
+  ...ACCOUNT_PROVIDERS.filter((e) => e.id !== AUDIBLE.id),
+].map(({ id, name, description }) => ({ id, name, description }));
 
 /**
  * The entry for an account's provider.

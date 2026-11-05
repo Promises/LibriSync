@@ -9,6 +9,8 @@ export default {
   expo: {
     name: "LibriSync",
     slug: "librisync",
+    // librisync://downloads opens Settings → Downloads (download notifications use it).
+    scheme: "librisync",
     version: version,
     orientation: "portrait",
     icon: "./assets/icon.png",

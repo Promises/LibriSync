@@ -25,6 +25,7 @@ import {
 } from '../../modules/expo-rust-bridge';
 import { getDatabaseFiles, getDatabasePath } from '../utils/appPaths';
 import { useProviders } from '../contexts/ProvidersContext';
+import { BOOK_SOURCES } from '../services/providers/registry';
 import { getLastSyncReport } from '../services/diagnostics';
 import { checkForUpdate, isGithubReleaseBuild, type UpdateInfo } from '../utils/versionCheck';
 
@@ -937,36 +938,25 @@ export default function SettingsScreen() {
 
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Providers</Text>
+          <Text style={styles.settingDescription}>
+            Turn off a store to hide it from Add Account (LibriVox: the Browse button).
+            Accounts you've added and books you've downloaded are kept.
+          </Text>
 
-          <View style={styles.settingItem}>
-            <View style={styles.settingInfo}>
-              <Text style={styles.settingLabel}>LibriVox</Text>
-              <Text style={styles.settingDescription}>
-                Free public domain audiobooks
-              </Text>
+          {BOOK_SOURCES.map((source) => (
+            <View key={source.id} style={styles.settingItem}>
+              <View style={styles.settingInfo}>
+                <Text style={styles.settingLabel}>{source.name}</Text>
+                <Text style={styles.settingDescription}>{source.description}</Text>
+              </View>
+              <Switch
+                value={providers[source.id]}
+                onValueChange={(value) => setProvider(source.id, value)}
+                trackColor={{ false: colors.border, true: colors.accentDim }}
+                thumbColor={providers[source.id] ? colors.accent : colors.textSecondary}
+              />
             </View>
-            <Switch
-              value={providers.librivox}
-              onValueChange={(value) => setProvider('librivox', value)}
-              trackColor={{ false: colors.border, true: colors.accentDim }}
-              thumbColor={providers.librivox ? colors.accent : colors.textSecondary}
-            />
-          </View>
-
-          <View style={styles.settingItem}>
-            <View style={styles.settingInfo}>
-              <Text style={styles.settingLabel}>Audible</Text>
-              <Text style={styles.settingDescription}>
-                Sync and download your Audible library
-              </Text>
-            </View>
-            <Switch
-              value={providers.audible}
-              onValueChange={(value) => setProvider('audible', value)}
-              trackColor={{ false: colors.border, true: colors.accentDim }}
-              thumbColor={providers.audible ? colors.accent : colors.textSecondary}
-            />
-          </View>
+          ))}
         </View>
 
         <View style={styles.section}>

@@ -14,6 +14,8 @@ use crate::api::library::SyncStats;
 use crate::storage::{queries, Database};
 use crate::{LibationError, Result};
 
+use crate::client_profiles;
+
 use super::http;
 use super::{
     CredentialBlob, DownloadPart, DownloadPlan, LoginInput, PlanChapter, PlanOptions, Provider,
@@ -21,13 +23,6 @@ use super::{
 };
 
 const BASE: &str = "https://libro.fm";
-
-/// Libro.fm's edge rejects anything that doesn't look like their own mobile app:
-/// a browser User-Agent gets a bodyless `401` straight from the load balancer,
-/// indistinguishable from bad credentials. These two headers are what the app
-/// sends; bump them if the store starts rejecting this version.
-const APP_UA: &str = "okhttp/5.3.2";
-const APP_VERSION: &str = "7.34.8";
 
 pub struct LibrofmProvider;
 
@@ -115,11 +110,19 @@ struct ManifestTrack {
 }
 
 impl LibrofmProvider {
-    /// A client that impersonates the Libro.fm mobile app (see [`APP_UA`]).
+    /// A client that impersonates the Libro.fm mobile app.
+    ///
+    /// Libro.fm's edge rejects anything that doesn't look like its own app: a browser
+    /// User-Agent gets a bodyless `401` straight from the load balancer,
+    /// indistinguishable from bad credentials. The User-Agent and app version come
+    /// from [`client_profiles`] so they can be bumped without a release.
     fn client() -> Result<Client> {
+        let profile = client_profiles::current();
         let mut headers = HeaderMap::new();
-        headers.insert("X-LibroFm-AppVer", HeaderValue::from_static(APP_VERSION));
-        http::build(http::builder(APP_UA).default_headers(headers))
+        let app_version = HeaderValue::from_str(&profile.librofm_app_version)
+            .map_err(|e| LibationError::InvalidInput(format!("Libro.fm app version: {e}")))?;
+        headers.insert("X-LibroFm-AppVer", app_version);
+        http::build(http::builder(&profile.librofm_user_agent).default_headers(headers))
     }
 
     /// Look up the bearer token whether `creds` is the raw credential blob

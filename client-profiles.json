@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "issued": "2026-11-21",
+  "chirp": {
+    "user_agent": "Chirp/android/5.23.2"
+  },
+  "librofm": {
+    "user_agent": "okhttp/5.3.2",
+    "app_version": "7.34.8"
+  },
+  "audible": {
+    "api_user_agent": "Dalvik/2.1.0 (Linux; U; Android 14) com.audible.application 26.34.07 b:2090263407",
+    "download_user_agent": "Audible/671 CFNetwork/1240.0.4 Darwin/20.6.0"
+  }
+}

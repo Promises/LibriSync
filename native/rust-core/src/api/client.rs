@@ -223,16 +223,6 @@ pub struct ClientConfig {
     pub enable_cookies: bool,
 }
 
-/// How we identify to `api.audible.com`.
-///
-/// These come from a capture of the official Android app (com.audible.application
-/// 26.34.07) on 2026-09-03, which is the only client Audible is currently serving
-/// without complaint. The licence response carries `vary: User-Agent`, so Audible does
-/// vary behaviour on it — announcing ourselves as "Libation/… (rust-core)" was, at best,
-/// unwise while Libation users are being throttled.
-const DEFAULT_USER_AGENT: &str =
-    "Dalvik/2.1.0 (Linux; U; Android 14) com.audible.application 26.34.07 b:2090263407";
-
 /// `x-device-type-id`: the device type we register as (see api::auth). The official app
 /// presents it on every request; we registered with it and then never mentioned it again.
 const DEVICE_TYPE_ID: &str = "A10KISP2GWF0E4";
@@ -246,7 +236,13 @@ impl Default for ClientConfig {
             domain: AudibleDomain::Us,
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             max_retries: MAX_RETRY_ATTEMPTS,
-            user_agent: DEFAULT_USER_AGENT.to_string(),
+            // How we identify to `api.audible.com` (`client_profiles`, so it can change
+            // without a release). The compiled value is a capture of the official
+            // Android app (com.audible.application 26.34.07) on 2026-09-03. The licence
+            // response carries `vary: User-Agent`, so Audible does vary behaviour on it —
+            // announcing ourselves as "Libation/… (rust-core)" was, at best, unwise
+            // while Libation users were being throttled.
+            user_agent: crate::client_profiles::current().audible_api_user_agent,
             // The official app sends no cookies on any api.audible.com request
             // (verified by capture), and a cookie jar is one more way to look unlike it.
             enable_cookies: false,

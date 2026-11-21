@@ -28,6 +28,7 @@ use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
 
 use crate::api::library::SyncStats;
+use crate::client_profiles;
 use crate::storage::{queries, Database};
 use crate::{LibationError, Result};
 
@@ -39,13 +40,6 @@ use super::{
 
 const GRAPHQL_URL: &str = "https://api.chirpbooks.com/api/graphql";
 
-/// The Android app's User-Agent (`MockingjayApolloClientKt.USER_AGENT` in 5.23.2).
-///
-/// Load-bearing: since 2026-11 the server returns every track's `mediaUrl` as `null`
-/// unless the User-Agent has the app's `Chirp/<platform>/<version>` shape. Nothing
-/// else changes, so sign-in and sync keep working and only downloads fail. Any version
-/// is accepted today; keep it at a real release anyway.
-const APP_UA: &str = "Chirp/android/5.23.2";
 
 /// Prefix for Chirp ids in `Books.audible_product_id`. Chirp ids are short integers
 /// ("224712") and that column also holds ASINs, ISBNs and LibriVox ids, so an
@@ -186,8 +180,11 @@ struct Track {
 }
 
 impl ChirpProvider {
+    /// The User-Agent is load-bearing: since 2026-11 Chirp returns every `mediaUrl` as
+    /// null unless it has the app's `Chirp/<platform>/<version>` shape. It comes from
+    /// [`client_profiles`] so it can be changed without a release.
     fn client() -> Result<Client> {
-        http::client(APP_UA)
+        http::client(&client_profiles::current().chirp_user_agent)
     }
 
     /// POST one GraphQL operation and return its `data` object.
@@ -319,6 +316,25 @@ impl ChirpProvider {
         names
     }
 
+    /// A book's tracks, as the app's `AndroidSingleAudiobook` query returns them.
+    async fn fetch_tracks(token: &str, chirp_id: &str) -> Result<Vec<Track>> {
+        let data = Self::graphql(
+            "AndroidSingleAudiobook",
+            SINGLE_AUDIOBOOK,
+            json!({ "id": chirp_id }),
+            Some(token),
+        )
+        .await?;
+        match data.get("audiobook") {
+            Some(v) if !v.is_null() => Ok(serde_json::from_value::<BookTracks>(v.clone())?.tracks),
+            _ => Err(LibationError::ApiRequestFailed {
+                message: format!("Chirp book {chirp_id} not found"),
+                status_code: None,
+                endpoint: Some("AndroidSingleAudiobook".into()),
+            }),
+        }
+    }
+
     /// The tracks in playback order, as plan parts plus one chapter each.
     ///
     /// Ordered by `offsetFromBookStartMs` rather than trusting response order. A track
@@ -332,7 +348,7 @@ impl ChirpProvider {
                 endpoint: Some("AndroidSingleAudiobook".into()),
             });
         }
-        // No URL on *any* track is the server refusing this client (see `APP_UA`),
+        // No URL on *any* track is the server refusing this client (see `client()`),
         // not a damaged book — say so, rather than blaming one track.
         if tracks.iter().all(|t| t.media_url.is_none()) {
             return Err(LibationError::ApiRequestFailed {
@@ -565,7 +581,7 @@ impl Provider for ChirpProvider {
 
     async fn download_plan(
         &self,
-        _db: &Database,
+        db: &Database,
         creds: &CredentialBlob,
         item_ref: &str,
         _options: &PlanOptions,
@@ -575,24 +591,20 @@ impl Provider for ChirpProvider {
         let token = Self::token_of(creds)?;
         let chirp_id = item_ref.strip_prefix(PRODUCT_PREFIX).unwrap_or(item_ref);
 
-        let data = Self::graphql(
-            "AndroidSingleAudiobook",
-            SINGLE_AUDIOBOOK,
-            json!({ "id": chirp_id }),
-            Some(&token),
-        )
-        .await?;
-        let book: BookTracks = match data.get("audiobook") {
-            Some(v) if !v.is_null() => serde_json::from_value(v.clone())?,
-            _ => {
-                return Err(LibationError::ApiRequestFailed {
-                    message: format!("Chirp book {chirp_id} not found"),
-                    status_code: None,
-                    endpoint: Some("AndroidSingleAudiobook".into()),
-                })
+        let mut tracks = Self::fetch_tracks(&token, chirp_id).await?;
+        if !tracks.is_empty() && tracks.iter().all(|t| t.media_url.is_none()) {
+            // Chirp withholding every URL is how it rejects our User-Agent. A newer
+            // published profile may already carry the fix: fetch it and retry once.
+            let before = client_profiles::current().chirp_user_agent;
+            // A failed refresh falls through to the plan error below, which already says
+            // what went wrong.
+            if let Ok(outcome) = client_profiles::refresh(db, client_profiles::ON_REJECTION).await {
+                if outcome.profiles.chirp_user_agent != before {
+                    tracks = Self::fetch_tracks(&token, chirp_id).await?;
+                }
             }
-        };
-        Self::plan_from_tracks(chirp_id, book.tracks)
+        }
+        Self::plan_from_tracks(chirp_id, tracks)
     }
 }
 

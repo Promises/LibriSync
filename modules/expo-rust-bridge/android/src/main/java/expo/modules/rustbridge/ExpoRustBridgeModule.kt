@@ -298,6 +298,16 @@ class ExpoRustBridgeModule : Module() {
       }
     }
 
+    // Check for newer store User-Agents etc. (client-profiles.json); at most daily.
+    AsyncFunction("refreshClientProfiles") { dbPath: String ->
+      try {
+        val params = JSONObject().apply { put("db_path", dbPath) }
+        parseJsonResponse(nativeRefreshClientProfiles(params.toString()))
+      } catch (e: Exception) {
+        mapOf("success" to false, "error" to "Client profiles error: ${e.message}")
+      }
+    }
+
     AsyncFunction("providerSyncLibraryPage") { provider: String, dbPath: String, accountJson: String, page: Int ->
       try {
         val params = JSONObject().apply {
@@ -2737,6 +2747,7 @@ class ExpoRustBridgeModule : Module() {
     // Multi-provider generic dispatchers (crate::providers)
     @JvmStatic external fun nativeProviderLogin(paramsJson: String): String
     @JvmStatic external fun nativeProviderSyncLibraryPage(paramsJson: String): String
+    @JvmStatic external fun nativeRefreshClientProfiles(paramsJson: String): String
     @JvmStatic external fun nativeProviderGetDownloadPlan(paramsJson: String): String
     @JvmStatic external fun nativeSyncPodcastEpisodes(paramsJson: String): String
     @JvmStatic external fun nativeGetBooks(paramsJson: String): String

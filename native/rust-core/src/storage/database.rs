@@ -114,6 +114,10 @@ impl Database {
         };
         db.migrate().await?;
 
+        // Adopt the stored client profiles (User-Agents etc.) once per process, so
+        // background workers that open the DB without JS use them too.
+        crate::client_profiles::load_once(&db).await;
+
         Ok(db)
     }
 

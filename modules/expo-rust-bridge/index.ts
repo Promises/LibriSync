@@ -608,6 +608,7 @@ export interface ExpoRustBridgeModule {
   providerLogin(provider: string, fieldsJson: string): Promise<RustResponse<Record<string, unknown>>>;
   providerSyncLibraryPage(provider: string, dbPath: string, accountJson: string, page: number): Promise<RustResponse<SyncStats>>;
   providerGetDownloadPlan(provider: string, dbPath: string, accountJson: string, itemRef: string, optionsJson: string): Promise<RustResponse<DownloadPlan>>;
+  refreshClientProfiles(dbPath: string): Promise<RustResponse<ClientProfilesRefresh>>;
 
   /**
    * Synchronize one page of podcast or periodical episodes from Audible.
@@ -1810,6 +1811,36 @@ async function providerLogin(provider: string, fields: Record<string, string>): 
   return unwrapResult(response);
 }
 
+/**
+ * The store identity strings (User-Agents, app versions) in effect, from the
+ * published `client-profiles.json` or the values built into the app.
+ */
+export interface ClientProfiles {
+  issued: string;
+  remote: boolean;
+  chirp_user_agent: string;
+  librofm_user_agent: string;
+  librofm_app_version: string;
+  audible_api_user_agent: string;
+  audible_download_user_agent: string;
+}
+
+export interface ClientProfilesRefresh {
+  fetched: boolean;
+  changed: boolean;
+  profiles: ClientProfiles;
+}
+
+/**
+ * Check for newer store User-Agents (`client-profiles.json` in the repo) so a store
+ * changing what it accepts can be fixed without an app release. Rust fetches at most
+ * daily and keeps the last copy in the DB; a failed check keeps what's in use.
+ */
+async function refreshClientProfiles(dbPath: string): Promise<ClientProfilesRefresh> {
+  const response = await NativeModule!.refreshClientProfiles(dbPath);
+  return unwrapResult(response);
+}
+
 /** Sync one page of a provider's owned library. Generic over provider id. */
 async function providerSyncLibraryPage(provider: string, dbPath: string, account: Account, page: number): Promise<SyncStats> {
   const response = await NativeModule!.providerSyncLibraryPage(provider, dbPath, JSON.stringify(account), page);
@@ -2730,6 +2761,7 @@ export {
   providerLogin,
   providerSyncLibraryPage,
   providerGetDownloadPlan,
+  refreshClientProfiles,
   providerSyncLibrary,
   syncPodcastEpisodes,
   setDownloadDirectory,

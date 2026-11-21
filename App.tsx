@@ -4,7 +4,8 @@ import { useEffect } from 'react';
 import AppNavigator from './src/navigation/AppNavigator';
 import ErrorBoundary from './src/components/ErrorBoundary';
 import { ProvidersProvider } from './src/contexts/ProvidersContext';
-import { startBackgroundService } from './modules/expo-rust-bridge';
+import { refreshClientProfiles, startBackgroundService } from './modules/expo-rust-bridge';
+import { getDatabasePath } from './src/utils/appPaths';
 
 export default function App() {
   const colorScheme = useColorScheme();
@@ -18,6 +19,18 @@ export default function App() {
     } catch (error) {
       console.error('[App] Failed to start background service:', error);
     }
+  }, []);
+
+  // Pick up store User-Agent changes published since this build (at most daily).
+  // Best effort: offline or a bad file leaves the current values in place.
+  useEffect(() => {
+    refreshClientProfiles(getDatabasePath())
+      .then(({ fetched, changed, profiles }) => {
+        if (fetched) {
+          console.log(`[App] Client profiles ${changed ? 'updated' : 'unchanged'} (issued ${profiles.issued})`);
+        }
+      })
+      .catch((error) => console.warn('[App] Client profiles check failed:', error));
   }, []);
 
   return (

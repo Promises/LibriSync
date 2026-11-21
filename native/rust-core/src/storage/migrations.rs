@@ -55,6 +55,7 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<()> {
     run_migration(pool, 5, "add_source_column", add_source_column(pool)).await?;
     run_migration(pool, 6, "book_accounts", create_book_accounts_table(pool)).await?;
     run_migration(pool, 7, "add_provider_column", add_provider_column(pool)).await?;
+    run_migration(pool, 8, "client_profiles", create_client_profiles_table(pool)).await?;
 
     Ok(())
 }
@@ -378,6 +379,7 @@ mod tests {
             "Books",
             "Categories",
             "CategoryLadders",
+            "ClientProfiles",
             "Contributors",
             "DownloadTasks",
             "LibraryBooks",
@@ -622,6 +624,24 @@ FROM LibraryBooks;
 CREATE INDEX IF NOT EXISTS idx_book_accounts_account ON BookAccounts(account);
 CREATE INDEX IF NOT EXISTS idx_book_accounts_book ON BookAccounts(book_id);
 CREATE INDEX IF NOT EXISTS idx_book_accounts_absent ON BookAccounts(account, absent_from_last_scan);
+        "#,
+    )
+    .await?;
+
+    Ok(())
+}
+
+/// One row holding the last fetched `client-profiles.json` (see `crate::client_profiles`).
+/// The raw body is stored rather than parsed columns, so each app version re-validates
+/// it with its own rules and a new key needs no migration.
+async fn create_client_profiles_table(pool: &SqlitePool) -> Result<()> {
+    pool.execute(
+        r#"
+CREATE TABLE IF NOT EXISTS ClientProfiles (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    body TEXT NOT NULL,
+    fetched_at TEXT NOT NULL
+);
         "#,
     )
     .await?;

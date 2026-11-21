@@ -977,6 +977,41 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeProvid
         .into_raw()
 }
 
+/// Check for newer client profiles (store User-Agents etc.; see `client_profiles`).
+/// Params: `{ "db_path": .. }`. Fetches at most daily; returns a `RefreshOutcome`.
+#[no_mangle]
+pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeRefreshClientProfiles(
+    mut env: JNIEnv,
+    _class: JClass,
+    params_json: JString,
+) -> jstring {
+    let params_str_result = jstring_to_string(&mut env, params_json);
+
+    let response = catch_panic(move || {
+        #[derive(Deserialize)]
+        struct Params {
+            db_path: String,
+        }
+
+        match (move || -> crate::Result<String> {
+            let params: Params = serde_json::from_str(&params_str_result?)
+                .map_err(|e| crate::LibationError::InvalidInput(format!("Invalid JSON: {}", e)))?;
+            let outcome = RUNTIME.block_on(async {
+                let db = crate::storage::Database::new(&params.db_path).await?;
+                crate::client_profiles::refresh(&db, crate::client_profiles::DAILY).await
+            })?;
+            Ok(success_response(outcome))
+        })() {
+            Ok(result) => result,
+            Err(e) => error_response(&e.to_string()),
+        }
+    });
+
+    env.new_string(response)
+        .expect("Failed to create Java string")
+        .into_raw()
+}
+
 /// Sync one page of a provider's owned library into the DB.
 /// Params: `{ "provider": .., "db_path": .., "account_json": .., "page": 1 }`
 /// Returns `SyncStats` (carries `has_more`). Generalizes nativeSyncLibraryPage.
@@ -2492,7 +2527,7 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeDownlo
                 };
 
                 // Download with reqwest
-                let user_agent = "Audible/671 CFNetwork/1240.0.4 Darwin/20.6.0";
+                let user_agent = crate::client_profiles::current().audible_download_user_agent;
                 let http_client = reqwest::Client::new();
                 let response = http_client
                     .get(&license.download_url)
@@ -2779,17 +2814,16 @@ pub extern "C" fn Java_expo_modules_rustbridge_ExpoRustBridgeModule_nativeGetDow
                 };
 
                 // Build request headers
+                let download_user_agent =
+                    crate::client_profiles::current().audible_download_user_agent;
                 let mut request_headers = std::collections::HashMap::new();
-                request_headers.insert(
-                    "User-Agent".to_string(),
-                    "Audible/671 CFNetwork/1240.0.4 Darwin/20.6.0".to_string(),
-                );
+                request_headers.insert("User-Agent".to_string(), download_user_agent.clone());
 
                 // Get file size from HTTP HEAD request
                 let http_client = reqwest::Client::new();
                 let head_response = http_client
                     .head(&license.download_url)
-                    .header("User-Agent", "Audible/671 CFNetwork/1240.0.4 Darwin/20.6.0")
+                    .header("User-Agent", &download_user_agent)
                     .send()
                     .await;
 

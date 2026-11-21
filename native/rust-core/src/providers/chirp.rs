@@ -3,7 +3,7 @@
 //! Chirp's Android app talks to one GraphQL endpoint. Sign-in is a `signIn`
 //! mutation that returns a JWT (≈1 year lifetime, no refresh token); the library is
 //! the paginated `currentUserAudiobooks` query; a book's audio is a list of `tracks`,
-//! each a plain AAC `.m4a` behind a CloudFront-signed `mediaUrl` that needs no headers.
+//! each a plain AAC `.m4a` behind a signed `mediaUrl` that needs no headers.
 //!
 //! The API surface was found by Bookclerk's reverse-engineering of the Android APK
 //! (github.com/Bookclerk/bookclerk, `source-chirp`). No code is taken from it — it is
@@ -39,9 +39,13 @@ use super::{
 
 const GRAPHQL_URL: &str = "https://api.chirpbooks.com/api/graphql";
 
-/// The OkHttp version the Android app ships. The endpoint accepted it during
-/// verification; bump it if the edge starts rejecting this client.
-const APP_UA: &str = "okhttp/4.10.0";
+/// The Android app's User-Agent (`MockingjayApolloClientKt.USER_AGENT` in 5.23.2).
+///
+/// Load-bearing: since 2026-11 the server returns every track's `mediaUrl` as `null`
+/// unless the User-Agent has the app's `Chirp/<platform>/<version>` shape. Nothing
+/// else changes, so sign-in and sync keep working and only downloads fail. Any version
+/// is accepted today; keep it at a real release anyway.
+const APP_UA: &str = "Chirp/android/5.23.2";
 
 /// Prefix for Chirp ids in `Books.audible_product_id`. Chirp ids are short integers
 /// ("224712") and that column also holds ASINs, ISBNs and LibriVox ids, so an
@@ -324,6 +328,19 @@ impl ChirpProvider {
         if tracks.is_empty() {
             return Err(LibationError::ApiRequestFailed {
                 message: format!("Chirp returned no audio tracks for book {chirp_id}"),
+                status_code: None,
+                endpoint: Some("AndroidSingleAudiobook".into()),
+            });
+        }
+        // No URL on *any* track is the server refusing this client (see `APP_UA`),
+        // not a damaged book — say so, rather than blaming one track.
+        if tracks.iter().all(|t| t.media_url.is_none()) {
+            return Err(LibationError::ApiRequestFailed {
+                message: format!(
+                    "Chirp did not provide download links for book {chirp_id}. \
+                     Chirp may have changed how its app fetches audio; \
+                     a LibriSync update is likely needed."
+                ),
                 status_code: None,
                 endpoint: Some("AndroidSingleAudiobook".into()),
             });
@@ -633,8 +650,23 @@ mod tests {
         let mut missing = track("b", 1_000, 500, None);
         missing.media_url = None;
         let err = ChirpProvider::plan_from_tracks("1", vec![track("a", 0, 1_000, None), missing]);
-        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("track b of book 1 has no audio URL"));
         assert!(ChirpProvider::plan_from_tracks("1", Vec::new()).is_err());
+    }
+
+    #[test]
+    fn plan_blames_the_client_when_no_track_has_audio() {
+        let tracks: Vec<Track> = ["a", "b"]
+            .iter()
+            .enumerate()
+            .map(|(i, id)| {
+                let mut t = track(id, i as u64 * 1_000, 1_000, None);
+                t.media_url = None;
+                t
+            })
+            .collect();
+        let err = ChirpProvider::plan_from_tracks("1", tracks).unwrap_err().to_string();
+        assert!(err.contains("did not provide download links"), "{err}");
     }
 
     #[test]

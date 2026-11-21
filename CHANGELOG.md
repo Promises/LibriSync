@@ -4,6 +4,15 @@ All notable user-facing changes to LibriSync. Entries are phrased for the
 Google Play "What's new" field. Earlier entries were reconstructed from git
 history (no changelog was kept before v0.0.24), so wording is approximate.
 
+## v0.0.35
+
+- Fixed Chirp downloads failing with "track … has no audio URL". Chirp changed what
+  it requires from apps, and every Chirp download stopped working.
+- LibriSync can now adapt to changes like this without an app update: it checks once
+  a day for updated store settings and uses them for Chirp, Libro.fm and Audible.
+- If a store stops providing download links altogether, the error now says so,
+  instead of blaming a single track.
+
 ## v0.0.34
 
 - New Downloads screen (Settings → Downloads): every book downloading, with its stage,

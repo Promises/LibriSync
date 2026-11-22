@@ -4,6 +4,14 @@ All notable user-facing changes to LibriSync. Entries are phrased for the
 Google Play "What's new" field. Earlier entries were reconstructed from git
 history (no changelog was kept before v0.0.24), so wording is approximate.
 
+## v0.0.36
+
+- LibriSync can now be installed on devices without a portrait screen, such as some
+  Chromebooks. Phones still stay in portrait.
+- The app's code is now optimised and compacted for release, as Google Play requires.
+- Native components are built with newer Android tools, for better compatibility with
+  upcoming phones that use 16 KB memory pages.
+
 ## v0.0.35
 
 - Fixed Chirp downloads failing with "track … has no audio URL". Chirp changed what

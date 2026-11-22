@@ -48,7 +48,28 @@ export default {
         "expo-build-properties",
         {
           android: {
-            extraMavenRepos: []
+            extraMavenRepos: [],
+            // R8 in release builds: Google Play's "DEX code optimization" vital
+            // flags apps under 25% obfuscation (deadline Feb 2027). Without it
+            // v0.0.35 scored 1%; with it ~88% of classes are renamed and the DEX
+            // drops to ~5.7 MB. Two things are deliberately left off:
+            // - Resource shrinking: React Native looks up bundled images by name
+            //   at runtime, which the shrinker can't see.
+            // - The optimising profile (proguard-android-optimize.txt): tested on
+            //   a Pixel 6, it broke Expo's reflection-built records
+            //   (SecureStore: "cannot be cast to SecureStoreOptions").
+            enableMinifyInReleaseBuilds: true,
+            extraProguardRules: [
+              // Our task enums' names reach JS (`task.status.name`). R8 keeps
+              // name() strings intact anyway; this is a backstop, and our module
+              // is a sliver of the DEX.
+              "-keepclassmembers enum expo.modules.rustbridge.** { *; }",
+              // Expo's ReactActivityDelegateWrapper looks these up by name
+              // (isEdgeToEdgeFeatureFlagOn, enableEdgeToEdge). Neither Expo nor
+              // React Native ships a rule, so under R8 edge-to-edge silently
+              // stopped being applied (NoSuchMethodException at launch).
+              "-keep class com.facebook.react.views.view.WindowUtilKt { *; }",
+            ].join("\n")
           }
         }
       ],
@@ -58,7 +79,8 @@ export default {
       "./plugins/withFFmpegKit",
       "./plugins/withReleaseSigning",
       "./plugins/withAbiSplits",
-      "./plugins/withOptionalPortraitScreen"
+      "./plugins/withOptionalPortraitScreen",
+      "./plugins/withNdkVersion"
     ],
     extra: {
       eas: {

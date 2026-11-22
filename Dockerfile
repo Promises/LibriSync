@@ -54,12 +54,12 @@ RUN $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --sdk_root=$ANDROID_SD
     "platform-tools" \
     "platforms;android-34" \
     "build-tools;34.0.0" \
-    "ndk;29.0.14033849" \
+    "ndk;29.0.14206865" \
     "cmake;3.22.1" || (cat /root/.android/logs/*.log && exit 1)
 
 # Set NDK environment variable
-ENV ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/29.0.14033849
-ENV ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/29.0.14033849
+ENV ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/29.0.14206865
+ENV ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/29.0.14206865
 ENV PATH=$PATH:$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin
 
 # Install Rust Android targets

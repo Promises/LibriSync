@@ -78,7 +78,7 @@ The Rust core (`native/rust-core/`) is a 1:1 translation of Libation's C# source
 
 ```bash
 # Android NDK
-export ANDROID_NDK_HOME=$HOME/Library/Android/sdk/ndk/29.0.14033849
+export ANDROID_NDK_HOME=$HOME/Library/Android/sdk/ndk/29.0.14206865
 
 # Rust targets
 rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android  # Android

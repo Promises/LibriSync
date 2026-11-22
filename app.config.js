@@ -57,7 +57,8 @@ export default {
       "./plugins/withDownloadService",
       "./plugins/withFFmpegKit",
       "./plugins/withReleaseSigning",
-      "./plugins/withAbiSplits"
+      "./plugins/withAbiSplits",
+      "./plugins/withOptionalPortraitScreen"
     ],
     extra: {
       eas: {

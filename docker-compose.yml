@@ -25,7 +25,7 @@ services:
     environment:
       - ANDROID_SDK_ROOT=/opt/android-sdk
       - ANDROID_HOME=/opt/android-sdk
-      - ANDROID_NDK_HOME=/opt/android-sdk/ndk/29.0.14033849
+      - ANDROID_NDK_HOME=/opt/android-sdk/ndk/29.0.14206865
       - JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
     # Override command if needed
     # command: ["bash", "-c", "echo 'Custom build command'"]
@@ -47,7 +47,7 @@ services:
     environment:
       - ANDROID_SDK_ROOT=/opt/android-sdk
       - ANDROID_HOME=/opt/android-sdk
-      - ANDROID_NDK_HOME=/opt/android-sdk/ndk/29.0.14033849
+      - ANDROID_NDK_HOME=/opt/android-sdk/ndk/29.0.14206865
       - JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
     working_dir: /app
     command: ["bash"]

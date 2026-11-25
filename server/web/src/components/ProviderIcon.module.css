@@ -1,0 +1,70 @@
+.wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+}
+
+.sm {
+  width: 20px;
+  height: 20px;
+}
+
+.md {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-md);
+}
+
+.lg {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-md);
+}
+
+.audible {
+  background: var(--color-warning-bg);
+  color: var(--color-warning-fg);
+}
+
+.librofm {
+  background: var(--color-info-bg);
+  color: var(--color-info-fg);
+}
+
+.chirp {
+  background: var(--color-special-bg);
+  color: var(--color-special-fg);
+}
+
+.letter {
+  font-family: var(--font-serif);
+  font-style: italic;
+  font-weight: var(--weight-bold);
+  font-size: 1.05em;
+  line-height: 1;
+}
+
+.sm .letter {
+  font-size: 13px;
+}
+
+.md .letter {
+  font-size: 18px;
+}
+
+.lg .letter {
+  font-size: 26px;
+}
+
+.label {
+  font-size: var(--text-sm);
+}

@@ -1,0 +1,12 @@
+.center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100dvh;
+  padding: var(--space-3);
+  color: var(--color-accent);
+}
+
+.narrow {
+  width: min(480px, 100%);
+}

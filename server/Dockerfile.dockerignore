@@ -7,4 +7,5 @@ native/rust-core/target-*/
 server/target/
 server/web/node_modules/
 server/web/dist/
+server/docs/
 **/.DS_Store

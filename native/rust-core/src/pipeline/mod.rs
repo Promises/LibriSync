@@ -99,12 +99,16 @@ pub struct PipelineJob {
     pub plan: DownloadPlan,
     pub meta: BookMeta,
     pub format: OutputFormat,
-    /// Scratch directory for this book. Partial downloads left here by an earlier,
-    /// interrupted run are resumed when the part file names match. Removed on success.
+    /// Scratch directory for this book, unique to the job and the same across its
+    /// retries. Partial downloads left here by an earlier, interrupted run are resumed
+    /// when the part file names match. Removed on success. Its name also marks the job's
+    /// temp files in `dest_dir`, so a run only ever cleans up its own.
     pub work_dir: PathBuf,
     /// The finished book's folder (absolute). Created if missing. Audio files are written
     /// to a temp name inside it and renamed into place, so a crash never leaves a
-    /// truncated file under the final name.
+    /// truncated file under the final name. **Must hold this one book only**: on
+    /// success, earlier outputs (`{file_stem}.<audio>` and every `NN - *.mp3`) not
+    /// rewritten by this run are deleted.
     pub dest_dir: PathBuf,
     /// File name (without extension) for single-file output, e.g. the sanitised title.
     pub file_stem: String,

@@ -41,7 +41,7 @@ use super::args::{
 use super::chapters::{self, Chapter};
 use super::download::{fetch_part, Fetched, PartRequest};
 use super::fsutil::{
-    file_size, io_error, link_or_copy, remove_stale_outputs, remove_stale_temps,
+    file_size, io_error, job_token, link_or_copy, remove_stale_outputs, remove_stale_temps,
     require_free_space, sanitize_file_name, Staging,
 };
 use super::progress::Reporter;
@@ -151,6 +151,8 @@ struct Executor<'a> {
     audio: Staging,
     /// Sidecars, committed before the audio so a scanner sees them with the book.
     sidecars: Staging,
+    /// Marks this job's temp files in `dest_dir` (see `fsutil::job_token`).
+    temp_token: String,
     /// Intermediate files in the work dir, removed on failure.
     scratch: Vec<PathBuf>,
     file_stem: String,
@@ -173,7 +175,8 @@ pub(crate) async fn execute(
             .await
             .map_err(|e| io_error(format_args!("creating {}", dir.display()), e))?;
     }
-    remove_stale_temps(&job.dest_dir).await;
+    let temp_token = job_token(&job.work_dir);
+    remove_stale_temps(&job.dest_dir, &temp_token).await;
 
     let title_stem = sanitize_file_name(&job.meta.title, &job.meta.product_id);
     let mut exec = Executor {
@@ -182,8 +185,9 @@ pub(crate) async fn execute(
         http,
         reporter: Arc::new(Reporter::new(on_progress, job.plan.parts.len())),
         cancel: &cancel,
-        audio: Staging::default(),
-        sidecars: Staging::default(),
+        audio: Staging::new(&temp_token),
+        sidecars: Staging::new(&temp_token),
+        temp_token: temp_token.clone(),
         scratch: Vec::new(),
         file_stem: sanitize_file_name(&job.file_stem, &title_stem),
         cover: None,
@@ -807,8 +811,9 @@ impl Executor<'_> {
                     let reporter = Arc::clone(&self.reporter);
                     let cancel = self.cancel.clone();
                     let mut names = std::mem::take(&mut taken);
+                    let token = self.temp_token.clone();
                     let result = tokio::task::spawn_blocking(move || {
-                        let r = extract::extract_audio(&zip_path, &dest, &mut names, &reporter, &cancel);
+                        let r = extract::extract_audio(&zip_path, &dest, &token, &mut names, &reporter, &cancel);
                         (r, names)
                     })
                     .await
@@ -901,7 +906,7 @@ mod tests {
     }
 
     fn plan(parts: Vec<DownloadPart>, join: bool) -> DownloadPlan {
-        DownloadPlan { parts, embed_metadata: true, chapters: Vec::<PlanChapter>::new(), join_parts: join }
+        DownloadPlan { parts, embed_metadata: true, chapters: Vec::<PlanChapter>::new(), join_parts: join, licence_throttled: false }
     }
 
     #[test]

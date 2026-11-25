@@ -134,13 +134,37 @@ pub(crate) fn sanitize_file_name(name: &str, fallback: &str) -> String {
     }
 }
 
+/// The token that marks one job's temp files in `dest_dir`: the work dir's name, which
+/// is unique per job (the server uses the queue row id) and stable across retries, so a
+/// retry finds — and only it removes — what its own interrupted run left behind.
+pub(crate) fn job_token(work_dir: &Path) -> String {
+    let token: String = work_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        .take(40)
+        .collect();
+    if token.is_empty() {
+        "job".to_string()
+    } else {
+        token
+    }
+}
+
+/// The name prefix of every temp file the job with `token` writes into `dest_dir`.
+fn temp_prefix(token: &str) -> String {
+    format!("{TEMP_PREFIX}{token}.")
+}
+
 /// The temp path a final output file is written to before [`Staging::commit`].
-pub(crate) fn temp_path_for(final_path: &Path) -> PathBuf {
+pub(crate) fn temp_path_for(final_path: &Path, token: &str) -> PathBuf {
     let name = final_path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    final_path.with_file_name(format!("{TEMP_PREFIX}{name}"))
+    final_path.with_file_name(format!("{}{name}", temp_prefix(token)))
 }
 
 /// Output files written under temp names in `dest_dir`, renamed into place together
@@ -148,14 +172,20 @@ pub(crate) fn temp_path_for(final_path: &Path) -> PathBuf {
 /// [`Staging::discard`] on failure.
 #[derive(Debug, Default)]
 pub(crate) struct Staging {
+    /// [`job_token`] of the job staging these files.
+    token: String,
     /// `(temp, final)` pairs in commit order.
     files: Vec<(PathBuf, PathBuf)>,
 }
 
 impl Staging {
+    pub(crate) fn new(token: &str) -> Self {
+        Staging { token: token.to_string(), files: Vec::new() }
+    }
+
     /// Reserve `final_path` and return the temp path to write it to.
     pub(crate) fn stage(&mut self, final_path: PathBuf) -> PathBuf {
-        let temp = temp_path_for(&final_path);
+        let temp = temp_path_for(&final_path, &self.token);
         self.files.push((temp.clone(), final_path));
         temp
     }
@@ -213,9 +243,13 @@ pub(crate) fn is_chapter_file_name(name: &str) -> bool {
 }
 
 /// Delete audio files a previous run of this book left in `dest_dir` that this run did
-/// not rewrite: `{file_stem}.<audio ext>` and `NN - *.mp3` chapter files. Deliberately
-/// narrow — files the pipeline would never have written are left alone, so two books
-/// sharing a folder by accident don't wipe each other's unrelated files.
+/// not rewrite: `{file_stem}.<audio ext>` and `NN - *.mp3` chapter files.
+///
+/// **`dest_dir` must belong to this one book.** Chapter files carry no book identity,
+/// so any `NN - *.mp3` in the folder is taken to be a previous output of this book —
+/// another book's chapter files in the same folder would be deleted. Callers must
+/// guarantee one book per folder (the server's folder template does). Files the
+/// pipeline would never have written are left alone either way.
 pub(crate) async fn remove_stale_outputs(
     dest_dir: &Path,
     file_stem: &str,
@@ -249,13 +283,16 @@ pub(crate) async fn remove_stale_outputs(
     Ok(())
 }
 
-/// Remove temp files an interrupted earlier run left in `dest_dir`.
-pub(crate) async fn remove_stale_temps(dest_dir: &Path) {
+/// Remove temp files an interrupted earlier run of the same job (same [`job_token`])
+/// left in `dest_dir`. Another job's temps — which may belong to a run still in
+/// progress — are never touched.
+pub(crate) async fn remove_stale_temps(dest_dir: &Path, token: &str) {
     let Ok(mut entries) = tokio::fs::read_dir(dest_dir).await else {
         return;
     };
+    let prefix = temp_prefix(token);
     while let Ok(Some(entry)) = entries.next_entry().await {
-        if entry.file_name().to_string_lossy().starts_with(TEMP_PREFIX) {
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
             let _ = tokio::fs::remove_file(entry.path()).await;
         }
     }
@@ -329,8 +366,30 @@ mod tests {
 
     #[test]
     fn temp_paths_keep_the_extension_and_hide_the_file() {
-        let temp = temp_path_for(Path::new("/books/A/Title.m4b"));
-        assert_eq!(temp, Path::new("/books/A/.librisync-tmp.Title.m4b"));
+        let temp = temp_path_for(Path::new("/books/A/Title.m4b"), "42");
+        assert_eq!(temp, Path::new("/books/A/.librisync-tmp.42.Title.m4b"));
+    }
+
+    #[test]
+    fn job_tokens_come_from_the_work_dir_name() {
+        assert_eq!(job_token(Path::new("/work/1234")), "1234");
+        assert_eq!(job_token(Path::new("/work/a b/../c.d")), "cd");
+        assert_eq!(job_token(Path::new("/")), "job");
+    }
+
+    #[tokio::test]
+    async fn stale_temps_of_other_jobs_are_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let mine = temp_path_for(&dir.path().join("Book.m4b"), "7");
+        let theirs = temp_path_for(&dir.path().join("Book.m4b"), "8");
+        let unrelated = dir.path().join("Book.m4b");
+        for path in [&mine, &theirs, &unrelated] {
+            std::fs::write(path, b"x").unwrap();
+        }
+        remove_stale_temps(dir.path(), "7").await;
+        assert!(!mine.exists());
+        assert!(theirs.exists(), "another job's temp survives");
+        assert!(unrelated.exists());
     }
 
     #[test]

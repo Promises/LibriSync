@@ -427,11 +427,26 @@ fn parse_out_time(line: &str) -> Option<f64> {
     value.trim().parse::<i64>().ok().filter(|v| *v >= 0).map(|us| us as f64 / 1_000_000.0)
 }
 
+/// ffmpeg flags whose value is a decryption secret (see `args::drm_input_args`).
+const SECRET_FLAGS: [&str; 3] = ["-audible_key", "-audible_iv", "-activation_bytes"];
+
+/// An argv for logs and error messages: quoted where it has spaces, and with the value
+/// after every [`SECRET_FLAGS`] flag replaced by `***`, so DRM keys never reach a log
+/// file, a queue error or a webhook.
 fn display_args(args: &[OsString]) -> String {
+    let mut redact_next = false;
     args.iter()
         .map(|a| {
             let s = a.to_string_lossy();
-            if s.contains(' ') { format!("'{s}'") } else { s.into_owned() }
+            let shown = if redact_next {
+                "***".to_string()
+            } else if s.contains(' ') {
+                format!("'{s}'")
+            } else {
+                s.to_string()
+            };
+            redact_next = SECRET_FLAGS.contains(&s.as_ref());
+            shown
         })
         .collect::<Vec<_>>()
         .join(" ")
@@ -483,6 +498,29 @@ pub(crate) fn name_of(path: &Path) -> &OsStr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn logged_args_hide_drm_secrets() {
+        use crate::pipeline::args::{drm_input_args, Drm};
+        let mut args = drm_input_args(Drm::Aaxc {
+            key: "00112233445566778899aabbccddeeff",
+            iv: "ffeeddccbbaa99887766554433221100",
+        });
+        args.extend(drm_input_args(Drm::Aax { activation_bytes: "1a2b3c4d" }));
+        args.extend(["-i".into(), "/tmp/my book.aaxc".into()]);
+        let shown = display_args(&args);
+        assert_eq!(
+            shown,
+            "-audible_key *** -audible_iv *** -activation_bytes *** -i '/tmp/my book.aaxc'"
+        );
+        for secret in [
+            "00112233445566778899aabbccddeeff",
+            "ffeeddccbbaa99887766554433221100",
+            "1a2b3c4d",
+        ] {
+            assert!(!shown.contains(secret), "{secret} leaked: {shown}");
+        }
+    }
 
     #[test]
     fn out_time_parsing() {

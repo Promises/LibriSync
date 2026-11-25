@@ -59,14 +59,14 @@ pub(crate) async fn fetch_cover(
             .timeout(COVER_TIMEOUT)
             .send()
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.without_url().to_string())?;
         if !response.status().is_success() {
             return Err(format!("HTTP {}", response.status()));
         }
         let mut bytes = Vec::new();
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| e.to_string())?;
+            let chunk = chunk.map_err(|e| e.without_url().to_string())?;
             if bytes.len() + chunk.len() > MAX_COVER_BYTES {
                 return Err("image larger than 20 MB".to_string());
             }

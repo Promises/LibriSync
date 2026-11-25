@@ -401,6 +401,7 @@ impl ChirpProvider {
             embed_metadata: true,
             chapters,
             join_parts: true,
+            licence_throttled: false,
         })
     }
 

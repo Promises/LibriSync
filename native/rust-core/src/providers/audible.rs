@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use crate::api::auth::Account;
 use crate::api::client::AudibleClient;
 use crate::api::content::{flatten_chapters, DownloadQuality};
-use crate::api::license::DownloadLicense;
 use crate::api::library::SyncStats;
+use crate::api::license::DownloadLicense;
 use crate::storage::Database;
 use crate::{LibationError, Result};
 
@@ -76,6 +76,89 @@ impl AudibleProvider {
             })
             .collect()
     }
+
+    /// Map a granted licence onto a [`DownloadPlan`]. Pure, so the mapping (and the
+    /// throttle flag in particular) can be tested without Audible.
+    fn plan_from_license(
+        item_ref: &str,
+        license: DownloadLicense,
+        chapters: Vec<PlanChapter>,
+    ) -> Result<DownloadPlan> {
+        let licence_throttled = license.throttled_fallback;
+
+        // Filename extension from the URL, falling back by DRM type (mirrors the
+        // logic in the existing nativeGetDownloadLicense).
+        let default_ext = if license.drm_type.is_encrypted() {
+            "aaxc"
+        } else {
+            "mp3"
+        };
+        let ext = license
+            .download_url
+            .split('?')
+            .next()
+            .and_then(|p| p.rsplit('/').next())
+            .and_then(|n| n.rsplit_once('.').map(|(_, e)| e))
+            .filter(|e| e.chars().all(|c| c.is_ascii_alphanumeric()))
+            .unwrap_or(default_ext)
+            .to_ascii_lowercase();
+        let filename = format!("{item_ref}.{ext}");
+
+        // Audible's CDN gets the same User-Agent the Android download path sends
+        // (jni_bridge.rs nativeDownloadBook / nativeGetDownloadLicense).
+        let headers = download_headers();
+
+        let part = if license.drm_type.is_encrypted() {
+            let keys = license
+                .decryption_keys
+                .as_ref()
+                .filter(|k| !k.is_empty())
+                .ok_or_else(|| {
+                    LibationError::InvalidInput("No decryption keys in Audible license".into())
+                })?;
+            let kd = &keys[0];
+            // 4 bytes = activation bytes from the legacy AAX fallback (no IV); 16 = AAXC.
+            if kd.key_part_1.len() == 4 {
+                DownloadPart::Aax {
+                    url: license.download_url,
+                    headers,
+                    activation_bytes: hex::encode(&kd.key_part_1),
+                    filename: format!("{item_ref}.aax"),
+                }
+            } else {
+                if kd.key_part_1.len() != 16 {
+                    return Err(LibationError::InvalidInput(
+                        "Unsupported Audible key format (expected AAXC key or activation bytes)"
+                            .into(),
+                    ));
+                }
+                let iv = kd.key_part_2.as_ref().ok_or_else(|| {
+                    LibationError::InvalidInput("No IV in Audible AAXC keys".into())
+                })?;
+                DownloadPart::Aaxc {
+                    url: license.download_url,
+                    headers,
+                    key: hex::encode(&kd.key_part_1),
+                    iv: hex::encode(iv),
+                    filename,
+                }
+            }
+        } else {
+            DownloadPart::Plain {
+                url: license.download_url,
+                headers,
+                filename,
+            }
+        };
+
+        Ok(DownloadPlan {
+            parts: vec![part],
+            embed_metadata: true,
+            chapters,
+            join_parts: false,
+            licence_throttled,
+        })
+    }
 }
 
 #[async_trait]
@@ -125,88 +208,14 @@ impl Provider for AudibleProvider {
             .build_download_license(item_ref, DownloadQuality::High, false)
             .await?;
 
-        // Filename extension from the URL, falling back by DRM type (mirrors the
-        // logic in the existing nativeGetDownloadLicense).
-        let default_ext = if license.drm_type.is_encrypted() {
-            "aaxc"
-        } else {
-            "mp3"
-        };
-        let ext = license
-            .download_url
-            .split('?')
-            .next()
-            .and_then(|p| p.rsplit('/').next())
-            .and_then(|n| n.rsplit_once('.').map(|(_, e)| e))
-            .filter(|e| e.chars().all(|c| c.is_ascii_alphanumeric()))
-            .unwrap_or(default_ext)
-            .to_ascii_lowercase();
-        let filename = format!("{item_ref}.{ext}");
-
-        // Audible's CDN gets the same User-Agent the Android download path sends
-        // (jni_bridge.rs nativeDownloadBook / nativeGetDownloadLicense).
-        let headers = download_headers();
-
-        // Only encrypted (AAXC) downloads become one big M4B that the engine may
+        // Only encrypted (AAXC/AAX) downloads become one big M4B that the engine may
         // need to split; a plain MP3 asset (podcast episode) is already one file.
         let chapters = if license.drm_type.is_encrypted() {
             Self::plan_chapters(&client, item_ref, &license).await
         } else {
             Vec::new()
         };
-
-        let part = if license.drm_type.is_encrypted() {
-            let keys = license
-                .decryption_keys
-                .as_ref()
-                .filter(|k| !k.is_empty())
-                .ok_or_else(|| {
-                    LibationError::InvalidInput("No decryption keys in Audible license".into())
-                })?;
-            let kd = &keys[0];
-            // 4 bytes = activation bytes from the legacy AAX fallback (no IV); 16 = AAXC.
-            if kd.key_part_1.len() == 4 {
-                return Ok(DownloadPlan {
-                    parts: vec![DownloadPart::Aax {
-                        url: license.download_url,
-                        headers: headers.clone(),
-                        activation_bytes: hex::encode(&kd.key_part_1),
-                        filename: format!("{item_ref}.aax"),
-                    }],
-                    embed_metadata: true,
-                    chapters,
-                    join_parts: false,
-                });
-            }
-            if kd.key_part_1.len() != 16 {
-                return Err(LibationError::InvalidInput(
-                    "Unsupported Audible key format (expected AAXC key or activation bytes)".into(),
-                ));
-            }
-            let iv = kd.key_part_2.as_ref().ok_or_else(|| {
-                LibationError::InvalidInput("No IV in Audible AAXC keys".into())
-            })?;
-            DownloadPart::Aaxc {
-                url: license.download_url,
-                headers: headers.clone(),
-                key: hex::encode(&kd.key_part_1),
-                iv: hex::encode(iv),
-                filename,
-            }
-        } else {
-            DownloadPart::Plain {
-                url: license.download_url,
-                headers: headers.clone(),
-                filename,
-            }
-        };
-
-        Ok(DownloadPlan {
-            parts: vec![part],
-            embed_metadata: true,
-            chapters,
-            join_parts: false,
-        })
+        Self::plan_from_license(item_ref, license, chapters)
     }
 }
 
@@ -222,5 +231,59 @@ mod tests {
             headers.get("User-Agent"),
             Some(&crate::client_profiles::current().audible_download_user_agent)
         );
+    }
+
+    fn licence(
+        key_part_1: Vec<u8>,
+        key_part_2: Option<Vec<u8>>,
+        throttled: bool,
+    ) -> DownloadLicense {
+        use crate::api::content::{ContentMetadata, DrmType};
+        use crate::api::license::KeyData;
+        DownloadLicense {
+            drm_type: DrmType::Adrm,
+            content_metadata: ContentMetadata::default(),
+            decryption_keys: Some(vec![KeyData {
+                key_part_1,
+                key_part_2,
+            }]),
+            download_url: "https://cds.example.invalid/book.aax?sig=x".to_string(),
+            throttled_fallback: throttled,
+        }
+    }
+
+    #[test]
+    fn throttled_aax_fallback_marks_the_plan_throttled() {
+        let plan = AudibleProvider::plan_from_license(
+            "B0TEST",
+            licence(vec![1, 2, 3, 4], None, true),
+            Vec::new(),
+        )
+        .unwrap();
+        assert!(plan.licence_throttled);
+        assert!(matches!(
+            &plan.parts[..],
+            [DownloadPart::Aax { activation_bytes, .. }] if activation_bytes == "01020304"
+        ));
+        let json = serde_json::to_value(&plan).unwrap();
+        assert_eq!(json["licence_throttled"], true);
+    }
+
+    #[test]
+    fn granted_aaxc_licence_is_not_throttled() {
+        let plan = AudibleProvider::plan_from_license(
+            "B0TEST",
+            licence(vec![0; 16], Some(vec![0; 16]), false),
+            Vec::new(),
+        )
+        .unwrap();
+        assert!(!plan.licence_throttled);
+        assert!(matches!(&plan.parts[..], [DownloadPart::Aaxc { .. }]));
+    }
+
+    #[test]
+    fn plans_without_the_flag_deserialize_unthrottled() {
+        let plan: DownloadPlan = serde_json::from_str(r#"{"parts":[]}"#).unwrap();
+        assert!(!plan.licence_throttled);
     }
 }

@@ -351,6 +351,7 @@ impl Provider for LibrofmProvider {
                 embed_metadata: false,
                 chapters: Self::chapters_from(&manifest.tracks),
                 join_parts: false,
+                licence_throttled: false,
             });
         }
 
@@ -377,6 +378,7 @@ impl Provider for LibrofmProvider {
             embed_metadata: false,
             chapters: Vec::new(),
             join_parts: false,
+            licence_throttled: false,
         })
     }
 }

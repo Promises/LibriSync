@@ -50,12 +50,13 @@ pub(crate) fn unique_name(name: &str, taken: &mut HashSet<String>) -> String {
         .expect("an unused name exists")
 }
 
-/// Extract the audio entries of `zip_path` into `dest_dir` under temp names. Returns
-/// `(temp, final)` pairs for the caller's staging; on error, every temp written so far
-/// is removed. Blocking: run it on a blocking thread.
+/// Extract the audio entries of `zip_path` into `dest_dir` under this job's temp names
+/// (`temp_token`). Returns `(temp, final)` pairs for the caller's staging; on error,
+/// every temp written so far is removed. Blocking: run it on a blocking thread.
 pub(crate) fn extract_audio(
     zip_path: &Path,
     dest_dir: &Path,
+    temp_token: &str,
     taken: &mut HashSet<String>,
     reporter: &Arc<Reporter>,
     cancel: &CancellationToken,
@@ -106,7 +107,7 @@ pub(crate) fn extract_audio(
         let mut buffer = vec![0u8; COPY_BUFFER];
         for (index, name, _) in &entries {
             let final_path = dest_dir.join(name);
-            let temp = temp_path_for(&final_path);
+            let temp = temp_path_for(&final_path, temp_token);
             written.push((temp.clone(), final_path));
             let mut entry = archive.by_index(*index).map_err(|e| {
                 PipelineError::new(FailureKind::Validation, format!("damaged ZIP entry {name}: {e}"))

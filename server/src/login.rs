@@ -319,38 +319,6 @@ pub async fn complete_external(app: &AppState, id: &str, response_url: &str) -> 
     Ok(view)
 }
 
-/// Validate an app-exported Audible `Account` JSON and normalise it for storage.
-pub fn parse_import(account_json: &str) -> Result<(String, Value), ApiError> {
-    let bad = |m: &str| ApiError::invalid_field("accountJson", m.to_string());
-    let mut v: Value = serde_json::from_str(account_json).map_err(|_| bad("is not valid JSON"))?;
-    let obj = v.as_object_mut().ok_or_else(|| bad("must be a JSON object"))?;
-    match obj.get("provider").and_then(Value::as_str) {
-        None | Some("audible") => {}
-        Some(_) => return Err(bad("only Audible accounts can be imported")),
-    }
-    obj.insert("provider".into(), Value::from("audible"));
-    // The app omits these for some accounts; rust-core's `Account` requires them.
-    obj.entry("decrypt_key").or_insert_with(|| Value::from(""));
-    obj.entry("library_scan").or_insert(Value::Bool(true));
-
-    let account: rust_core::api::auth::Account =
-        serde_json::from_value(v.clone()).map_err(|e| bad(&format!("is not an Audible account: {e}")))?;
-    if account.account_id.trim().is_empty() {
-        return Err(bad("has no account_id"));
-    }
-    let identity = account.identity.as_ref().ok_or_else(|| bad("has no identity (sign in with the app first)"))?;
-    if identity.refresh_token.trim().is_empty() {
-        return Err(bad("has no refresh token"));
-    }
-    if identity.adp_token.trim().is_empty() || identity.device_private_key.trim().is_empty() {
-        return Err(bad("lacks the device credentials downloads need; sign in again in the app and re-export"));
-    }
-    if v.get("account_name").and_then(Value::as_str).is_none_or(|n| n.trim().is_empty()) {
-        v["account_name"] = Value::from(account.account_id.clone());
-    }
-    Ok((account.account_id, v))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,12 +341,5 @@ mod tests {
         ] {
             assert!(validate_maplanding(bad, &us).is_err(), "{bad}");
         }
-    }
-
-    #[test]
-    fn import_requires_a_usable_audible_identity() {
-        assert!(parse_import("[]").is_err());
-        assert!(parse_import(r#"{"provider":"chirp","account_id":"x"}"#).is_err());
-        assert!(parse_import(r#"{"account_id":"x","account_name":"X"}"#).is_err());
     }
 }

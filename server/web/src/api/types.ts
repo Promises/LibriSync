@@ -75,7 +75,7 @@ export type Credentials = { username: string; password: string };
 
 export type ProviderId = 'audible' | 'librofm' | 'chirp';
 
-export type LoginMethod = 'deviceCode' | 'externalBrowser' | 'credentials' | 'import';
+export type LoginMethod = 'deviceCode' | 'externalBrowser' | 'credentials';
 
 export type OutputFormat = 'm4b' | 'mp3';
 

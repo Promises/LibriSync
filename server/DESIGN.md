@@ -60,7 +60,9 @@ its own migrations, so the server can never break the app's schema or vice versa
   sign-in URL, the user signs in and pastes the final `/ap/maplanding?...` URL back. The
   PKCE verifier and serial live in memory for the 15-minute session.
 - **Libro.fm / Chirp:** email + password through `Provider::login`.
-- **Import:** paste an account JSON exported from the app (the stored `Account` blob).
+- **No import from the app.** The app has no account export, and sharing one device
+  registration between the phone and the server would make two clients present as one
+  device. The server registers its own device through the code sign-in instead.
 
 ## Sync
 

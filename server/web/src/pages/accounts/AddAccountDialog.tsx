@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { ArrowLeft, ExternalLink, FileJson, KeyRound, Mail, Smartphone } from 'lucide-react';
+import { ArrowLeft, ExternalLink, KeyRound, Mail, Smartphone } from 'lucide-react';
 import { keys, useProviders } from '../../api/queries';
 import type { AccountView, LoginMethod, ProviderId, ProviderInfo } from '../../api/types';
 import { Badge } from '../../components/Badge';
@@ -9,7 +9,7 @@ import { ErrorState, SkeletonRows } from '../../components/Feedback';
 import { Modal } from '../../components/Modal';
 import { ProviderIcon } from '../../components/ProviderIcon';
 import { toast } from '../../components/Toast';
-import { CredentialsFlow, DeviceCodeFlow, ExternalBrowserFlow, ImportFlow } from './LoginFlows';
+import { CredentialsFlow, DeviceCodeFlow, ExternalBrowserFlow } from './LoginFlows';
 import styles from './AddAccountDialog.module.css';
 
 const METHOD_INFO: Record<LoginMethod, { title: string; description: string; Icon: typeof Smartphone }> = {
@@ -28,14 +28,9 @@ const METHOD_INFO: Record<LoginMethod, { title: string; description: string; Ico
     description: 'Sign in with the email and password you use in the store app.',
     Icon: Mail,
   },
-  import: {
-    title: 'Import from the LibriSync app',
-    description: 'Paste an account exported from the LibriSync mobile app. No new device registration.',
-    Icon: FileJson,
-  },
 };
 
-const METHOD_ORDER: LoginMethod[] = ['deviceCode', 'credentials', 'externalBrowser', 'import'];
+const METHOD_ORDER: LoginMethod[] = ['deviceCode', 'credentials', 'externalBrowser'];
 
 type Step = { kind: 'provider' } | { kind: 'method'; provider: ProviderInfo } | { kind: 'flow'; provider: ProviderInfo; method: LoginMethod };
 
@@ -175,7 +170,6 @@ export function AddAccountDialog({
           defaultEmail={reauth?.name.includes('@') ? reauth.name : undefined}
         />
       )}
-      {step.kind === 'flow' && step.method === 'import' && <ImportFlow onAdded={onAdded} />}
 
       {step.kind === 'provider' && (
         <p className={styles.footnote}>

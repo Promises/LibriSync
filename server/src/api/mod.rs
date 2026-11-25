@@ -55,7 +55,6 @@ pub fn router(app: AppState) -> Router {
         .route("/login/audible/external", post(accounts::external_start))
         .route("/login/audible/external/{session}", post(accounts::external_complete))
         .route("/login/credentials", post(accounts::credentials))
-        .route("/login/import", post(accounts::import))
         // Books
         .route("/books", get(books::list))
         .route("/books/download", post(books::download_many))

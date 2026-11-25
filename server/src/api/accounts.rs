@@ -41,7 +41,7 @@ pub async fn providers() -> Json<Vec<ProviderInfo>> {
         ProviderInfo {
             id: "audible",
             name: "Audible",
-            login_methods: vec!["deviceCode", "externalBrowser", "import"],
+            login_methods: vec!["deviceCode", "externalBrowser"],
             locales,
             formats: vec!["m4b", "mp3"],
         },
@@ -277,15 +277,4 @@ pub async fn credentials(State(app): State<AppState>, JsonBody(b): JsonBody<Cred
         "identity": creds,
     });
     Ok(Json(accounts::add(&app, &account_id, &account).await?))
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ImportBody {
-    account_json: String,
-}
-
-pub async fn import(State(app): State<AppState>, JsonBody(b): JsonBody<ImportBody>) -> ApiResult<Json<AccountView>> {
-    let (account_id, json) = login::parse_import(&b.account_json)?;
-    Ok(Json(accounts::add(&app, &account_id, &json).await?))
 }

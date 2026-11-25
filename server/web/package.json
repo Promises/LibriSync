@@ -5,9 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "build": "tsc --noEmit && tsc --noEmit -p tsconfig.node.json && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.node.json",
     "lint": "eslint ."
   },
   "dependencies": {
@@ -19,6 +19,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",
+    "@types/node": "^22.20.7",
     "@types/react": "18.3",
     "@types/react-dom": "18.3",
     "@vitejs/plugin-react": "^4.7.0",

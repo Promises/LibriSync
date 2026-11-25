@@ -79,7 +79,7 @@ Passwords: minimum 8 characters.
 type ProviderId = 'audible' | 'librofm' | 'chirp';
 type ProviderInfo = {
   id: ProviderId; name: string;
-  loginMethods: ('deviceCode' | 'externalBrowser' | 'credentials' | 'import')[];
+  loginMethods: ('deviceCode' | 'externalBrowser' | 'credentials')[];
   locales: { code: string; name: string }[];   // Audible only; empty otherwise
   formats: ('m4b' | 'mp3')[];
 };
@@ -130,7 +130,6 @@ All login sessions live in memory for 15 minutes.
 | POST | `/api/v1/login/audible/external` | `{locale}` → `{ sessionId, url }` |
 | POST | `/api/v1/login/audible/external/{sessionId}` | `{ responseUrl }` → `AccountView` |
 | POST | `/api/v1/login/credentials` | `{provider: 'librofm'\|'chirp', email, password}` → `AccountView` |
-| POST | `/api/v1/login/import` | `{ accountJson: string }` (an app-exported Audible `Account`) → `AccountView` |
 
 ```ts
 type DeviceCodeSession = {

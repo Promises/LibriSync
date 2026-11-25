@@ -86,8 +86,6 @@ export const loginApi = {
     }),
   credentials: (body: { provider: 'librofm' | 'chirp'; email: string; password: string }) =>
     request<AccountView>('/login/credentials', { method: 'POST', body }),
-  importAccount: (accountJson: string) =>
-    request<AccountView>('/login/import', { method: 'POST', body: { accountJson } }),
 };
 
 function bookQuery(q: BookQuery) {

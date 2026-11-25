@@ -1,0 +1,46 @@
+.icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+}
+
+
+
+.success {
+  background: var(--color-success-bg);
+  color: var(--color-success-fg);
+}
+
+.warning {
+  background: var(--color-warning-bg);
+  color: var(--color-warning-fg);
+}
+
+.danger {
+  background: var(--color-danger-bg);
+  color: var(--color-danger-fg);
+}
+
+.info {
+  background: var(--color-info-bg);
+  color: var(--color-info-fg);
+}
+
+.neutral {
+  background: var(--color-neutral-bg);
+  color: var(--color-neutral-fg);
+}
+
+.special {
+  background: var(--color-special-bg);
+  color: var(--color-special-fg);
+}
+
+.accent {
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
+}

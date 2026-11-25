@@ -1,0 +1,13 @@
+.coverCol {
+  width: 56px;
+}
+
+.titleCell {
+  min-width: 180px;
+}
+
+@media (max-width: 700px) {
+  .titleCell {
+    min-width: 0;
+  }
+}

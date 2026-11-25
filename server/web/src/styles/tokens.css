@@ -1,0 +1,141 @@
+/*
+ * Design tokens. Nord palette (https://www.nordtheme.com), the same one the LibriSync
+ * app uses (src/styles/theme.ts): Polar Night backgrounds and Snow Storm text in dark
+ * mode, the reverse in light mode, Frost accents, Aurora status colours.
+ *
+ * Every colour is a `light-dark()` pair. The page follows the OS through
+ * `color-scheme: light dark`; the manual toggle pins it by setting
+ * `data-theme="light" | "dark"` on <html>, which narrows `color-scheme`.
+ *
+ * Where a raw Nord colour fails WCAG AA as text on its background (Aurora on Snow
+ * Storm, Frost buttons with light text), a darker shade of the same hue is used.
+ */
+
+:root {
+  /* Nord palette, for reference and for the few places that need a fixed colour. */
+  --nord0: #2e3440;
+  --nord1: #3b4252;
+  --nord2: #434c5e;
+  --nord3: #4c566a;
+  --nord4: #d8dee9;
+  --nord5: #e5e9f0;
+  --nord6: #eceff4;
+  --nord7: #8fbcbb;
+  --nord8: #88c0d0;
+  --nord9: #81a1c1;
+  --nord10: #5e81ac;
+  --nord11: #bf616a;
+  --nord12: #d08770;
+  --nord13: #ebcb8b;
+  --nord14: #a3be8c;
+  --nord15: #b48ead;
+
+  color-scheme: light dark;
+
+  /* Surfaces */
+  --color-bg: light-dark(var(--nord6), var(--nord0));
+  --color-surface: light-dark(#ffffff, var(--nord1));
+  --color-surface-raised: light-dark(#ffffff, var(--nord2));
+  --color-surface-sunken: light-dark(var(--nord5), #272c36);
+  --color-sidebar: light-dark(var(--nord5), #262b35);
+  --color-hover: light-dark(rgb(76 86 106 / 0.08), rgb(216 222 233 / 0.07));
+  --color-selected: light-dark(rgb(94 129 172 / 0.14), rgb(136 192 208 / 0.14));
+  --color-overlay: rgb(20 24 31 / 0.55);
+
+  /* Text */
+  --color-text: light-dark(var(--nord0), var(--nord6));
+  --color-text-muted: light-dark(var(--nord2), var(--nord4));
+  --color-text-subtle: light-dark(#5b6579, #9aa3b5);
+  --color-text-on-accent: light-dark(#ffffff, var(--nord0));
+
+  /* Lines */
+  --color-border: light-dark(var(--nord4), var(--nord3));
+  --color-border-strong: light-dark(#b8c1d1, #5d6880);
+
+  /* Accents */
+  --color-accent: light-dark(#4a6a93, var(--nord8));
+  --color-accent-hover: light-dark(#3d5a7e, #9dcbd8);
+  --color-accent-soft: light-dark(rgb(94 129 172 / 0.14), rgb(136 192 208 / 0.16));
+  --color-link: light-dark(#4a6a93, var(--nord8));
+  --color-focus: light-dark(var(--nord10), var(--nord8));
+
+  /* Status: `-fg` is for text/icons, `-bg` for tinted fills, plain for bars/borders. */
+  --color-success: var(--nord14);
+  --color-success-fg: light-dark(#4b6a35, var(--nord14));
+  --color-success-bg: light-dark(rgb(163 190 140 / 0.22), rgb(163 190 140 / 0.16));
+  --color-warning: light-dark(var(--nord12), var(--nord13));
+  --color-warning-fg: light-dark(#8a4f2c, var(--nord13));
+  --color-warning-bg: light-dark(rgb(208 135 112 / 0.18), rgb(235 203 139 / 0.14));
+  --color-danger: var(--nord11);
+  --color-danger-fg: light-dark(#9c3d47, #d98189);
+  --color-danger-bg: light-dark(rgb(191 97 106 / 0.14), rgb(191 97 106 / 0.2));
+  --color-danger-strong: light-dark(#a4434c, var(--nord11));
+  --color-info: var(--nord9);
+  --color-info-fg: light-dark(#3e5f87, var(--nord9));
+  --color-info-bg: light-dark(rgb(129 161 193 / 0.18), rgb(129 161 193 / 0.16));
+  --color-neutral-fg: var(--color-text-muted);
+  --color-neutral-bg: light-dark(rgb(76 86 106 / 0.1), rgb(216 222 233 / 0.08));
+  --color-special: var(--nord15);
+  --color-special-fg: light-dark(#7d5577, var(--nord15));
+  --color-special-bg: light-dark(rgb(180 142 173 / 0.18), rgb(180 142 173 / 0.16));
+
+  /* Spacing: the app's 4 / 8 / 16 / 24 / 32 scale. */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 16px;
+  --space-4: 24px;
+  --space-5: 32px;
+  --space-6: 48px;
+
+  /* Typography */
+  --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+  --font-serif: Georgia, 'Times New Roman', serif;
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-md: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.5rem;
+  --text-2xl: 2rem;
+  --text-display: 3rem;
+  --leading-tight: 1.25;
+  --leading-normal: 1.5;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  /* Shape and depth */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-pill: 999px;
+  --shadow-sm: 0 1px 2px rgb(20 24 31 / 0.12);
+  --shadow-md: 0 4px 14px rgb(20 24 31 / 0.16);
+  --shadow-lg: 0 12px 40px rgb(20 24 31 / 0.28);
+  --focus-ring: 0 0 0 2px var(--color-bg), 0 0 0 4px var(--color-focus);
+
+  /* Layout */
+  --sidebar-width: 232px;
+  --header-height: 56px;
+  --content-max: 1400px;
+  --control-height: 36px;
+
+  --duration-fast: 120ms;
+  --duration-normal: 200ms;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-fast: 0ms;
+    --duration-normal: 0ms;
+  }
+}

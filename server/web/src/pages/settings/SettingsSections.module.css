@@ -1,0 +1,81 @@
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+.hint {
+  font-size: var(--text-xs);
+  color: var(--color-text-subtle);
+}
+
+.preview {
+  margin-top: calc(-1 * var(--space-2));
+}
+
+.previewPath {
+  display: block;
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-sunken);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+
+.previewRoot {
+  color: var(--color-text-subtle);
+}
+
+.previewFile {
+  color: var(--color-accent);
+}
+
+.previewWarning {
+  margin-top: var(--space-1);
+  font-size: var(--text-xs);
+  color: var(--color-warning-fg);
+}
+
+.tokens {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+}
+
+.tokens summary {
+  color: var(--color-link);
+  cursor: pointer;
+}
+
+.tokens dl {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: var(--space-1) var(--space-3);
+  margin: var(--space-2) 0;
+}
+
+.tokens dl > div {
+  display: flex;
+  gap: var(--space-2);
+  align-items: baseline;
+}
+
+.tokens dd {
+  color: var(--color-text-subtle);
+  font-size: var(--text-xs);
+}
+
+.apiKey {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.apiKey input {
+  flex: 1;
+  min-width: 0;
+}

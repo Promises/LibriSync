@@ -7,7 +7,9 @@ The contract between `server/src` (backend) and `server/web` (UI). JSON in and o
 cookie (`librisync_session`, set by `auth/login`) or the API key (`X-Api-Key` header or
 `?apikey=` query). Unauthenticated → `401 {"error":"unauthorized"}`.
 
-**Errors.** Any non-2xx carries `{"error": "<machine_code>", "message": "<human text>"}`.
+**Errors.** Any non-2xx carries `{"error": "<machine_code>", "message": "<human text>"}`,
+plus `"field": "<dotted.path>"` on `400 invalid_input` when one field is at fault
+(e.g. `"audible.dailyLicenceCap"`, `"currentPassword"`).
 Machine codes include `unauthorized`, `not_found`, `invalid_input`, `conflict`,
 `setup_required`, `license_throttled`, `account_cooldown`, `provider_error`, `internal`.
 
@@ -25,7 +27,7 @@ Machine codes include `unauthorized`, `not_found`, `invalid_input`, `conflict`,
 | GET | `/api/v1/health` | `HealthItem[]` |
 | GET | `/api/v1/system/tasks` | `ScheduledTask[]` |
 | POST | `/api/v1/system/tasks/{name}/run` | run now → `204` |
-| GET | `/api/v1/log?lines=500&level=info` | `{ "lines": LogLine[] }`, newest last |
+| GET | `/api/v1/log?lines=500&level=info` | `{ "lines": LogLine[] }`, newest last; `level` = that level and above |
 | GET | `/api/v1/events` | Server-Sent Events, see below |
 
 ```ts
@@ -52,7 +54,8 @@ sync failed), `notifications` (last delivery failed).
 - `queue` — `QueueItem` (on every state/progress change; progress at most 1/s per item)
 - `queueRemoved` — `{ "id": string }`
 - `history` — `HistoryItem`
-- `account` — `AccountView`
+- `account` — `AccountView` (sent on every change, including sync start/finish and each
+  completed download, so counts and `syncing` stay live)
 - `health` — `HealthItem[]`
 - `task` — `ScheduledTask`
 
@@ -64,7 +67,7 @@ sync failed), `notifications` (last delivery failed).
 | POST | `/api/v1/auth/setup` | *anon, only while setupRequired* `{username, password}` → `204` + session cookie |
 | POST | `/api/v1/auth/login` | *anon* `{username, password}` → `204` + session cookie; `401` on bad credentials |
 | POST | `/api/v1/auth/logout` | → `204`, clears cookie |
-| POST | `/api/v1/auth/password` | `{currentPassword, newPassword}` → `204` |
+| POST | `/api/v1/auth/password` | `{currentPassword, newPassword}` → `204`; wrong current password → `400 invalid_input` with `field: "currentPassword"` |
 
 Passwords: minimum 8 characters.
 
@@ -93,6 +96,7 @@ type AccountView = {
   enabled: boolean;            // included in scheduled sync
   autoDownloadNew: boolean;
   backfill: boolean;
+  syncing: boolean;            // a sync is running now
   lastSync: string | null; nextSync: string | null;
   lastSyncResult: { ok: boolean; added: number; updated: number; total: number; message: string | null } | null;
   bookCount: number; downloadedCount: number;
@@ -142,6 +146,11 @@ type DeviceCodeSession = {
 
 A new account triggers an immediate first sync (its baseline).
 
+**Re-authentication.** Signing in again to an account that already exists (same
+`account_id`) replaces its credentials in place and keeps its settings, history and
+download records; the response is the updated `AccountView`. That is how an account with
+`authStatus: 'expired'` is repaired — the UI offers "Sign in again" with the same flow.
+
 ## Books
 
 ```ts
@@ -170,7 +179,12 @@ type BookView = {
 | GET | `/api/v1/books` | paged; filters `search`, `provider`, `account`, `status` (comma list); `sort` = `title`\|`author`\|`added`\|`purchased`\|`released` with `dir` = `asc`\|`desc` (default `added desc`) |
 | GET | `/api/v1/books/{id}` | → `BookView` + `{ description: string, history: HistoryItem[] }` |
 | POST | `/api/v1/books/{id}/download` | `{force?: boolean}` → `QueueItem` (manual priority). `409 account_cooldown` if the account is cooling down and not forced |
-| POST | `/api/v1/books/download` | `{ids: string[]}` → `{ queued: number, skipped: { id, reason }[] }` |
+| POST | `/api/v1/books/download` | `{ids: string[]}` → `{ queued: number, skipped: { id, reason }[] }`, manual priority |
+
+Manual items skip the Audible spacing and title backoff but **still count against and
+wait for the daily licence cap** — otherwise a bulk "download selected" would walk straight
+into the throttle. `force: true` (single book only) bypasses the cap and an account
+cooldown. To fetch a whole backlog, enable back-fill.
 | POST | `/api/v1/books/{id}/skip` | mark as not wanted (excluded from back-fill) → `BookView` |
 | POST | `/api/v1/books/{id}/unskip` | → `BookView` |
 | POST | `/api/v1/books/{id}/forget` | forget the download record (files untouched) → `BookView` |
@@ -260,10 +274,11 @@ type Settings = {
 type NotificationKind = 'webhook' | 'apprise' | 'audiobookshelf';
 type Notification = {
   id: number; kind: NotificationKind; name: string; enabled: boolean;
-  events: HistoryEvent[] | null;        // null for audiobookshelf (fires on 'download')
+  events: NotificationEvent[] | null;   // null for audiobookshelf (fires on 'download')
   config: WebhookConfig | AppriseConfig | AbsConfig;
   lastResult: { ok: boolean; time: string; message: string | null } | null;
 };
+type NotificationEvent = HistoryEvent | 'health' | 'healthRestored';   // 'test' is sent only by the test endpoint
 type WebhookConfig = { url: string; method: 'POST' | 'PUT'; headers: { key: string; value: string }[]; username?: string; password?: string };
 type AppriseConfig = { serverUrl: string; configKey?: string; statelessUrls?: string; tags?: string };
 type AbsConfig = { url: string; apiKey: string; libraryId: string; pathPrefix?: string };
@@ -276,6 +291,6 @@ type AbsConfig = { url: string; apiKey: string; libraryId: string; pathPrefix?: 
 | PUT | `/api/v1/notifications/{id}` | → `Notification` |
 | DELETE | `/api/v1/notifications/{id}` | → `204` |
 | POST | `/api/v1/notifications/test` | body = a `Notification` (unsaved allowed) → `{ ok, message }` |
-| POST | `/api/v1/notifications/abs/libraries` | `{url, apiKey}` → `{ id, name, folders: string[] }[]` |
+| POST | `/api/v1/notifications/abs/libraries` | `{url, apiKey, id?}` → `{ id, name, folders: string[] }[]`. With `id` of a saved Audiobookshelf connection, a masked `apiKey` (`"********"`) means "use the stored key" |
 
 Webhook payload: `{ eventType, instanceName, applicationUrl, time, account?: {id, provider, name}, book?: {id, title, authors, series, seriesSequence, outputPath}, message }`.

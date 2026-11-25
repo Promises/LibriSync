@@ -1,0 +1,59 @@
+.track {
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  border-radius: var(--radius-pill);
+  background: var(--color-neutral-bg);
+}
+
+.md {
+  height: 8px;
+}
+
+.sm {
+  height: 6px;
+}
+
+.fill {
+  height: 100%;
+  border-radius: inherit;
+  transition: width var(--duration-normal) ease-out;
+}
+
+.accent {
+  background: var(--color-accent);
+}
+
+.success {
+  background: var(--color-success);
+}
+
+.warning {
+  background: var(--color-warning);
+}
+
+.danger {
+  background: var(--color-danger);
+}
+
+.indeterminate {
+  width: 35%;
+  animation: progress-slide 1.3s ease-in-out infinite;
+}
+
+@keyframes progress-slide {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(300%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .indeterminate {
+    width: 100%;
+    opacity: 0.5;
+    animation: none;
+  }
+}

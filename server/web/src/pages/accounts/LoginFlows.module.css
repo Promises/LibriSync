@@ -1,0 +1,75 @@
+.flow {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.lead {
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+}
+
+.hint {
+  font-size: var(--text-xs);
+  color: var(--color-text-subtle);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.steps {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-left: var(--space-4);
+  list-style: decimal;
+  font-size: var(--text-sm);
+}
+
+.steps li::marker {
+  color: var(--color-accent);
+  font-weight: var(--weight-bold);
+}
+
+.inlineAction {
+  margin-top: var(--space-2);
+}
+
+.codeBox {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-3);
+  border: 2px dashed var(--color-accent);
+  border-radius: var(--radius-lg);
+  background: var(--color-accent-soft);
+}
+
+.code {
+  font-family: var(--font-mono);
+  font-size: clamp(2.25rem, 9vw, var(--text-display));
+  font-weight: var(--weight-bold);
+  letter-spacing: 0.18em;
+  line-height: 1;
+  color: var(--color-text);
+  user-select: all;
+  overflow-wrap: anywhere;
+  text-align: center;
+}
+
+.waiting {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}

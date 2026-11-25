@@ -6,11 +6,15 @@ The contract between `server/src` (backend) and `server/web` (UI). JSON in and o
 **Auth.** Every `/api/v1/*` route except those marked *anon* requires either a session
 cookie (`librisync_session`, set by `auth/login`) or the API key (`X-Api-Key` header or
 `?apikey=` query). Unauthenticated → `401 {"error":"unauthorized"}`.
+Cookie-authenticated requests other than GET/HEAD must come from the UI's own origin
+(CSRF): `Sec-Fetch-Site` must be `same-origin` or `none`, or, without that header, `Origin`
+must match `Host` (or `X-Forwarded-Host`); otherwise `403 {"error":"forbidden"}`. API-key
+requests are exempt. A request body must be sent as `Content-Type: application/json`.
 
 **Errors.** Any non-2xx carries `{"error": "<machine_code>", "message": "<human text>"}`,
 plus `"field": "<dotted.path>"` on `400 invalid_input` when one field is at fault
 (e.g. `"audible.dailyLicenceCap"`, `"currentPassword"`).
-Machine codes include `unauthorized`, `not_found`, `invalid_input`, `conflict`,
+Machine codes include `unauthorized`, `forbidden`, `not_found`, `invalid_input`, `conflict`,
 `setup_required`, `license_throttled`, `account_cooldown`, `provider_error`, `internal`.
 
 **Pagination.** List endpoints that page take `page` (1-based, default 1) and `pageSize`
@@ -37,6 +41,8 @@ type SystemStatus = {
   accounts: number; books: number; downloaded: number; queued: number;
 };
 type HealthItem = { source: string; type: 'ok' | 'notice' | 'warning' | 'error'; message: string };
+// source: 'ffmpeg' | 'libraryDir' | 'disk' | 'downloads' (the queue is paused: "Downloads paused: …")
+//         | 'account:<id>' | 'notifications' | 'database'
 type ScheduledTask = {
   name: 'sync' | 'backfill' | 'clientProfiles' | 'housekeeping';
   displayName: string; intervalMinutes: number;
@@ -285,11 +291,11 @@ type AbsConfig = { url: string; apiKey: string; libraryId: string; pathPrefix?: 
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/api/v1/notifications` | → `Notification[]` (secrets returned masked as `"********"`; sending the mask back keeps the stored value) |
+| GET | `/api/v1/notifications` | → `Notification[]` (secrets returned masked as `"********"`: webhook `url`, `password` and secret headers; Apprise `configKey` and `statelessUrls`; Audiobookshelf `apiKey`. Sending the mask back keeps the stored value while the address's scheme, host and port are unchanged; otherwise `400 invalid_input` with the secret's `field`) |
 | POST | `/api/v1/notifications` | create → `Notification` |
 | PUT | `/api/v1/notifications/{id}` | → `Notification` |
 | DELETE | `/api/v1/notifications/{id}` | → `204` |
 | POST | `/api/v1/notifications/test` | body = a `Notification` (unsaved allowed) → `{ ok, message }` |
-| POST | `/api/v1/notifications/abs/libraries` | `{url, apiKey, id?}` → `{ id, name, folders: string[] }[]`. With `id` of a saved Audiobookshelf connection, a masked `apiKey` (`"********"`) means "use the stored key" |
+| POST | `/api/v1/notifications/abs/libraries` | `{url, apiKey, id?}` → `{ id, name, folders: string[] }[]`. With `id` of a saved Audiobookshelf connection, a masked `apiKey` (`"********"`) means "use the stored key" (only for the same server as the stored `url`) |
 
 Webhook payload: `{ eventType, instanceName, applicationUrl, time, account?: {id, provider, name}, book?: {id, title, authors, series, seriesSequence, outputPath}, message }`.

@@ -6,11 +6,16 @@ use std::time::Duration as StdDuration;
 
 use serde::Serialize;
 
+use crate::queue::HoldKind;
 use crate::state::AppState;
 use crate::time;
 
 const MIN_FREE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MONITOR_INTERVAL: StdDuration = StdDuration::from_secs(300);
+/// A queue hold lasts at least this long (see [`try_release_hold`]).
+const HOLD_MIN_AGE: StdDuration = StdDuration::from_secs(300);
+/// Free-space growth that ends a disk-full hold.
+const DISK_FULL_RECOVERY_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct HealthItem {
@@ -51,6 +56,10 @@ struct AccountHealth {
 pub async fn check(app: &AppState) -> Vec<HealthItem> {
     let mut items = Vec::new();
 
+    if let Some(hold) = app.queue.hold() {
+        items.push(HealthItem::new("downloads", "error", hold.message()));
+    }
+
     match app.tools_status() {
         Some(Ok(_)) => {}
         Some(Err(e)) => items.push(HealthItem::new("ffmpeg", "error", format!("ffmpeg is unusable: {e}"))),
@@ -75,8 +84,9 @@ pub async fn check(app: &AppState) -> Vec<HealthItem> {
     let now = time::now();
     match sqlx::query_as::<_, AccountHealth>(
         "SELECT a.account_id, a.account_name, COALESCE(s.auth_status, 'unknown') AS auth_status,
-                s.cooldown_until, s.last_sync_ok, s.last_sync_message
+                p.cooldown_until, s.last_sync_ok, s.last_sync_message
          FROM core.Accounts a LEFT JOIN account_state s ON s.account_id = a.account_id
+         LEFT JOIN licence_pacing p ON p.pacing_key = s.pacing_key
          WHERE COALESCE(s.enabled, 1) = 1",
     )
     .fetch_all(&app.db)
@@ -134,11 +144,60 @@ pub async fn check(app: &AppState) -> Vec<HealthItem> {
     items
 }
 
+/// Re-check what put the queue on hold and release it once that is fixed: ffmpeg works,
+/// the library and work folders are writable with at least [`MIN_FREE_BYTES`] free,
+/// and — after a disk-full failure — free space has grown by [`DISK_FULL_RECOVERY_BYTES`]
+/// since the hold began (the failed book needed more than was free, and the general
+/// threshold alone can't tell whether that is still true). A hold younger than
+/// `min_age` is left alone, so a problem that comes and goes can't release it and
+/// spend a licence per round. Returns true if a hold was released.
+pub async fn try_release_hold(app: &AppState, min_age: StdDuration) -> bool {
+    let Some(hold) = app.queue.hold() else { return false };
+    if hold.since.elapsed() < min_age {
+        return false;
+    }
+    let tools = app.executor.check_tools().await;
+    let tools_ok = tools.is_ok();
+    app.set_tools_status(tools);
+    if !tools_ok {
+        return false;
+    }
+    let dirs = [app.cfg.library_dir.clone(), app.cfg.work_dir()];
+    let free = tokio::task::spawn_blocking(move || {
+        let mut min_free = u64::MAX;
+        for dir in &dirs {
+            let _ = std::fs::create_dir_all(dir);
+            writable(dir).ok()?;
+            min_free = min_free.min(fs2::available_space(dir).ok()?);
+        }
+        Some(min_free)
+    })
+    .await
+    .ok()
+    .flatten();
+    let Some(free) = free else { return false };
+    if free < MIN_FREE_BYTES {
+        return false;
+    }
+    if hold.kind == HoldKind::DiskFull {
+        let before = hold.free_at_hold.unwrap_or(0);
+        if free < before.saturating_add(DISK_FULL_RECOVERY_BYTES) {
+            return false;
+        }
+    }
+    let released = app.queue.release_hold(hold.id);
+    if released {
+        tracing::info!("{} resolved; downloads resume", hold.waiting_reason());
+    }
+    released
+}
+
 /// Periodically re-check; publish changes over SSE and notify about new problems
-/// (`health`) and resolved ones (`healthRestored`).
+/// (`health`) and resolved ones (`healthRestored`). A queue hold wakes it at once.
 pub async fn monitor(app: AppState) {
     let mut previous: Option<Vec<HealthItem>> = None;
     loop {
+        try_release_hold(&app, HOLD_MIN_AGE).await;
         let current = check(&app).await;
         if previous.as_ref() != Some(&current) {
             app.hub.publish("health", &current);
@@ -164,6 +223,7 @@ pub async fn monitor(app: AppState) {
         tokio::select! {
             _ = app.shutdown.cancelled() => return,
             _ = tokio::time::sleep(MONITOR_INTERVAL) => {}
+            _ = app.queue.health_changed.notified() => {}
         }
     }
 }

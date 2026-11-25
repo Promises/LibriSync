@@ -11,8 +11,8 @@ pub mod worker;
 #[cfg(test)]
 mod flow_tests;
 
-use std::collections::{HashMap, HashSet};
-use std::sync::atomic::AtomicBool;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -171,19 +171,73 @@ pub fn overall_progress(p: &Progress) -> f64 {
 }
 
 struct Running {
+    generation: u64,
     cancel: CancellationToken,
     user_cancelled: Arc<AtomicBool>,
     progress: Option<Progress>,
     last_emit: Option<Instant>,
 }
 
+/// Why the whole queue is paused: a local problem (disk, ffmpeg, folder) that every
+/// download would hit, so starting more would only spend licences on books that can't
+/// be saved. Released by the health monitor once the problem is gone, or by the user
+/// retrying the failed item.
+#[derive(Debug, Clone)]
+pub struct Hold {
+    pub id: u64,
+    pub kind: HoldKind,
+    /// The pipeline's error, for the health message.
+    pub detail: String,
+    pub since: Instant,
+    /// For [`HoldKind::DiskFull`]: the lower of the library's and the work folder's
+    /// free space when the hold began (bytes).
+    pub free_at_hold: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HoldKind {
+    DiskFull,
+    Ffmpeg,
+    Io,
+}
+
+impl Hold {
+    pub fn summary(&self) -> &'static str {
+        match self.kind {
+            HoldKind::DiskFull => "disk full",
+            HoldKind::Ffmpeg => "ffmpeg is not working",
+            HoldKind::Io => "the library or work folder can't be written",
+        }
+    }
+
+    /// The `waitingReason` of every item while the hold lasts.
+    pub fn waiting_reason(&self) -> String {
+        format!("Downloads paused: {}", self.summary())
+    }
+
+    /// The health message.
+    pub fn message(&self) -> String {
+        format!(
+            "Downloads paused: {} ({}). They resume once the problem is fixed, or when you retry the failed download.",
+            self.summary(),
+            self.detail
+        )
+    }
+}
+
 /// In-memory queue state shared by the dispatcher, workers and API.
 #[derive(Default)]
 pub struct Runtime {
     pub wake: Notify,
+    /// Pinged when the queue's contribution to health changes (a hold began or ended).
+    pub health_changed: Notify,
     running: Mutex<HashMap<i64, Running>>,
-    /// Audible accounts with a licence request in flight.
-    in_flight: Mutex<HashSet<String>>,
+    next_generation: AtomicU64,
+    /// Pacing key → the queue item whose Audible licence request is in flight.
+    in_flight: Mutex<HashMap<String, i64>>,
+    hold: Mutex<Option<Hold>>,
+    /// Serialises choosing and recording an item's library folder.
+    pub dest_lock: tokio::sync::Mutex<()>,
 }
 
 impl Runtime {
@@ -195,15 +249,21 @@ impl Runtime {
         self.running.lock().map(|r| r.len()).unwrap_or(0)
     }
 
-    pub fn register(&self, id: i64, cancel: CancellationToken, user_cancelled: Arc<AtomicBool>) {
+    /// Register a running item; returns the generation that must be passed to
+    /// [`Runtime::unregister`], so a stale worker can't remove a newer registration.
+    pub fn register(&self, id: i64, cancel: CancellationToken, user_cancelled: Arc<AtomicBool>) -> u64 {
+        let generation = self.next_generation.fetch_add(1, Ordering::SeqCst) + 1;
         if let Ok(mut r) = self.running.lock() {
-            r.insert(id, Running { cancel, user_cancelled, progress: None, last_emit: None });
+            r.insert(id, Running { generation, cancel, user_cancelled, progress: None, last_emit: None });
         }
+        generation
     }
 
-    pub fn unregister(&self, id: i64) {
+    pub fn unregister(&self, id: i64, generation: u64) {
         if let Ok(mut r) = self.running.lock() {
-            r.remove(&id);
+            if r.get(&id).is_some_and(|item| item.generation == generation) {
+                r.remove(&id);
+            }
         }
     }
 
@@ -212,7 +272,7 @@ impl Runtime {
         let Ok(r) = self.running.lock() else { return false };
         match r.get(&id) {
             Some(item) => {
-                item.user_cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+                item.user_cancelled.store(true, Ordering::SeqCst);
                 item.cancel.cancel();
                 true
             }
@@ -244,17 +304,62 @@ impl Runtime {
         self.running.lock().ok().and_then(|r| r.get(&id).and_then(|i| i.progress.clone()))
     }
 
-    pub fn licence_in_flight(&self, account: &str) -> bool {
-        self.in_flight.lock().map(|s| s.contains(account)).unwrap_or(false)
+    pub fn licence_in_flight(&self, pacing_key: &str) -> bool {
+        self.in_flight.lock().map(|s| s.contains_key(pacing_key)).unwrap_or(false)
     }
 
-    pub fn set_licence_in_flight(&self, account: &str, on: bool) {
+    /// Mark `item`'s licence request for `pacing_key` as in flight.
+    pub fn set_licence_in_flight(&self, pacing_key: &str, item: i64) {
         if let Ok(mut s) = self.in_flight.lock() {
-            if on {
-                s.insert(account.to_string());
-            } else {
-                s.remove(account);
+            s.insert(pacing_key.to_string(), item);
+        }
+    }
+
+    /// Clear the in-flight mark, but only if it is `item`'s: a worker that finishes
+    /// late must not clear the mark of a newer request for the same customer.
+    pub fn clear_licence_in_flight(&self, pacing_key: &str, item: i64) {
+        if let Ok(mut s) = self.in_flight.lock() {
+            if s.get(pacing_key) == Some(&item) {
+                s.remove(pacing_key);
             }
+        }
+    }
+
+    pub fn hold(&self) -> Option<Hold> {
+        self.hold.lock().ok().and_then(|h| h.clone())
+    }
+
+    /// Pause the queue. A hold already in place is kept (it began first).
+    pub fn set_hold(&self, kind: HoldKind, detail: String, free_at_hold: Option<u64>) {
+        if let Ok(mut h) = self.hold.lock() {
+            if h.is_none() {
+                let id = self.next_generation.fetch_add(1, Ordering::SeqCst) + 1;
+                *h = Some(Hold { id, kind, detail, since: Instant::now(), free_at_hold });
+            }
+        }
+        self.health_changed.notify_one();
+    }
+
+    /// Release the hold `id` (a newer hold stays). Returns true if it was released.
+    pub fn release_hold(&self, id: u64) -> bool {
+        let released = match self.hold.lock() {
+            Ok(mut h) if h.as_ref().is_some_and(|x| x.id == id) => {
+                *h = None;
+                true
+            }
+            _ => false,
+        };
+        if released {
+            self.health_changed.notify_one();
+            self.wake();
+        }
+        released
+    }
+
+    /// The user retried: release whatever hold there is.
+    pub fn clear_hold(&self) {
+        if let Some(h) = self.hold() {
+            self.release_hold(h.id);
         }
     }
 
@@ -444,12 +549,13 @@ pub async fn enqueue(app: &App, book_id: &str, priority: Priority, force: bool) 
 
     // Pick the owning account: signed in, enabled and not cooling down, if possible.
     let owners: Vec<OwnerRow> = sqlx::query_as(
-        "SELECT a.account_id, s.cooldown_until, COALESCE(s.auth_status, 'unknown') AS auth_status,
+        "SELECT a.account_id, p.cooldown_until, COALESCE(s.auth_status, 'unknown') AS auth_status,
                 COALESCE(s.enabled, 1) AS enabled
          FROM core.BookAccounts ba
          JOIN core.Books b ON b.book_id = ba.book_id
          JOIN core.Accounts a ON a.account_id = ba.account
          LEFT JOIN account_state s ON s.account_id = a.account_id
+         LEFT JOIN licence_pacing p ON p.pacing_key = s.pacing_key
          WHERE b.audible_product_id = ? AND ba.is_deleted = 0
            AND COALESCE(a.provider, 'audible') = COALESCE(b.source, 'audible')
          ORDER BY a.account_id",
@@ -551,6 +657,11 @@ async fn upgrade_slot(
             .bind(existing.id)
             .execute(pool)
             .await?;
+            // Retrying a failed download by hand is the user saying the problem that
+            // paused the queue is fixed.
+            if priority == Priority::Manual {
+                app.queue.clear_hold();
+            }
         }
         _ => return Ok(existing),
     }

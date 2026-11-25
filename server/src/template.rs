@@ -5,7 +5,7 @@
 //! directory. Components that render empty are dropped, and separators left dangling
 //! by an empty token (`{seriesSequence} - {title}` without a sequence) are tidied away.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub const DEFAULT_SERIES_TEMPLATE: &str = "{author}/{series}/{seriesSequence} - {title}";
 pub const DEFAULT_TEMPLATE: &str = "{author}/{title}";
@@ -174,6 +174,25 @@ fn fallback_title(v: &TemplateValues) -> String {
     }
 }
 
+/// `rel` with ` [<id>]` appended to its last component, for when two books render to
+/// the same folder. The base is shortened as needed so the id always survives the
+/// component length limit.
+pub fn disambiguate(rel: &Path, id: &str) -> PathBuf {
+    let suffix = format!(" [{}]", sanitize_component(id));
+    let last = rel.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let budget = MAX_COMPONENT_BYTES.saturating_sub(suffix.len());
+    let mut end = last.len().min(budget);
+    while !last.is_char_boundary(end) {
+        end -= 1;
+    }
+    let base = last[..end].trim_end_matches(['.', ' ']);
+    let component = format!("{base}{suffix}").trim_start().to_string();
+    match rel.parent() {
+        Some(parent) => parent.join(component),
+        None => PathBuf::from(component),
+    }
+}
+
 /// The file stem for single-file output (`{title}.m4b`).
 pub fn file_stem(v: &TemplateValues) -> String {
     fallback_title(v)
@@ -333,5 +352,20 @@ mod tests {
         assert!(validate("{title").is_err());
         assert!(validate("title}").is_err());
         assert!(validate("").is_err());
+    }
+
+    #[test]
+    fn disambiguation_keeps_the_id_within_the_length_limit() {
+        assert_eq!(
+            disambiguate(Path::new("Ann Author/The Book"), "B0123"),
+            PathBuf::from("Ann Author/The Book [B0123]")
+        );
+        assert_eq!(disambiguate(Path::new("Solo"), "x"), PathBuf::from("Solo [x]"));
+        let long = "é".repeat(MAX_COMPONENT_BYTES);
+        let out = disambiguate(&Path::new("A").join(&long), "B0123456789");
+        let last = out.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(last.len() <= MAX_COMPONENT_BYTES, "{}", last.len());
+        assert!(last.ends_with(" [B0123456789]"));
+        assert_eq!(out.parent(), Some(Path::new("A")));
     }
 }

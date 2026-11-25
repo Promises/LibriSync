@@ -63,10 +63,10 @@ pub async fn login(State(app): State<AppState>, JsonBody(c): JsonBody<Credential
     }
     let user = auth::find_user(&app.db, c.username.trim()).await?;
     let ok = match &user {
-        Some((_, _, hash)) => auth::verify_password(&c.password, hash),
+        Some((_, _, hash)) => auth::verify_password_limited(&c.password, hash).await,
         // Hash anyway so an unknown username takes as long as a wrong password.
         None => {
-            let _ = auth::hash_password(&c.password);
+            let _ = auth::hash_password_limited(&c.password).await;
             false
         }
     };
@@ -104,7 +104,7 @@ pub async fn password(
         None => auth::first_user(&app.db).await?,
     };
     let Some((id, _, hash)) = user else { return Err(ApiError::setup_required()) };
-    if !auth::verify_password(&body.current_password, &hash) {
+    if !auth::verify_password_limited(&body.current_password, &hash).await {
         return Err(ApiError::invalid_field("currentPassword", "is not correct"));
     }
     auth::check_new_password(&body.new_password).map_err(|_| {

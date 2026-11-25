@@ -55,6 +55,9 @@ its own migrations, so the server can never break the app's schema or vice versa
   "go to amazon.{tld}/code and enter **ABC12**" → the server polls `POST auth/register`
   with the code pair until it is confirmed (10 min). No password, PKCE or URL pasting;
   2FA/CAPTCHA/CVF happen on Amazon's page. Registers with the current iPhone profile.
+  Signing in again to an existing account replaces its registration; the old device is
+  then deregistered (best effort). A sign-in cancelled while a poll is in flight never
+  adds the account.
 - **Audible, external browser (fallback).** For pre-Amazon Audible accounts (legacy
   DE/US/UK "Audible username" accounts) that device code does not cover: the UI shows the
   sign-in URL, the user signs in and pastes the final `/ap/maplanding?...` URL back. The
@@ -63,6 +66,8 @@ its own migrations, so the server can never break the app's schema or vice versa
 - **No import from the app.** The app has no account export, and sharing one device
   registration between the phone and the server would make two clients present as one
   device. The server registers its own device through the code sign-in instead.
+- **Token refresh** is serialised per account: sync and download planning both refresh an
+  expiring Audible token, under one lock, so two refreshes can never race to save.
 
 ## Sync
 
@@ -72,9 +77,16 @@ attempts per page with backoff, skip a page that still fails, stop after three
 consecutive failures, cap at 500 pages. Books whose `Books.created_at` is at or after the
 sync's start are **new**.
 
-The first successful sync of an account establishes its **baseline**: everything found
-then is "existing library" (back-fill), not "new". Afterwards, new books are queued at
-`new` priority if `autoDownloadNew` is on.
+The first sync of an account that reads **every page and every item** (no skipped pages,
+no unreadable items) establishes its **baseline**: everything found then is "existing
+library" (back-fill), not "new". A first sync that skipped a page sets no baseline —
+the books on that page would otherwise turn up on the next sync as "new purchases".
+After three successful but incomplete syncs the baseline is set anyway (with a history
+note): a page or item that fails every time would otherwise block every download.
+Afterwards, new books are queued at `new` priority if `autoDownloadNew` is on, but at
+most **10 per sync** (the most recently purchased): more than that at once is almost
+certainly library the baseline missed, not a shopping spree, so the excess is left to
+back-fill's pacing (logged, with a `syncCompleted` history note).
 
 ## Download queue
 
@@ -87,11 +99,28 @@ Audiobookshelf scan). Plans are not persisted across restarts: signed URLs expir
 restarted item re-plans. Partial files in its work dir are reused when the plan's part
 file names match.
 
+A pipeline that fails with a network or HTTP error is run **once more with the same
+plan** straight away (its signed URLs are still valid), so a blip doesn't cost a licence;
+only then does the item go back to the queue to re-plan later.
+
+Two books whose folder template renders the same folder never share it: when the folder
+is already recorded for another book (`downloads`) or in use by another book's queue
+item, ` [<book id>]` is appended to the last component, and the chosen folder is recorded
+on the queue row.
+
 ### Audible licence pacing (the point of the whole thing)
 
 Only Audible licence requests are budgeted; DRM-free stores are limited by concurrency
 alone. Nobody knows Audible's real threshold, so the defaults are conservative and every
-number is a setting:
+number is a setting.
+
+Audible throttles an Amazon **customer**, and one customer signed in for two marketplaces
+is two accounts here (`amzn1.account.X:us`, `amzn1.account.X:uk`). So pacing state — the
+cooldown, the spacing, the daily cap's request log, the "unavailable" hold and the
+in-flight request — is kept per **pacing key**: the Amazon customer id for Audible
+(`identity.customer_info.user_id`, else the account id before its `:`), the account id
+for every other provider. It is kept when an account is removed, so removing and re-adding
+an account doesn't forget a throttle. "Per account" below means per customer.
 
 | Setting | Default |
 |---|---|
@@ -100,18 +129,24 @@ number is a setting:
 | `backfill.window` | optional local-time window (e.g. 01:00–07:00) for back-fill only |
 | `backfill.order` | `newest_first` (by purchase date) or `oldest_first` |
 
-At most one licence request per account is in flight at a time.
+At most one licence request per account is in flight at a time, and a request's outcome
+(cooldown, hold, granted probe, expired sign-in) is recorded **before** the next request
+for that account may start. A `force` is spent by the request it allowed, whatever the
+answer.
 
 **Refusals** (modelled on Libation's backoff, lengthened for an unattended daemon):
 
 | Refusal | Effect |
 |---|---|
-| `license_throttled` (CustomerThrottled) | **Account cooldown**: no licence requests for that account for 24 h, doubling per consecutive throttle, capped at 7 days. After it expires the next request is a single probe; a success resets the level. |
+| `license_throttled` (CustomerThrottled, or a 429) | **Account cooldown**: no licence requests for that account for 24 h, doubling per consecutive throttle, capped at 7 days. After it expires the next request is a single probe; a success resets the level. |
+| A plan with `licence_throttled` (AAXC refused as throttled, served from the AAX fallback) | The book downloads, but the request counts as throttled and starts the account cooldown exactly as above; it is not a successful probe, so the level is not reset. |
+| Server error (5xx) or network error from the licence request | **Account hold**: no licence requests for that account for 30 min ("Audible unavailable, retrying at …"). The title counts an attempt (so one title Audible always fails on can't block the rest forever). |
 | `license_denied` for an eligibility reason | **Title backoff**: 1 day, doubling, capped at 30 days. Other titles continue. |
-| Network / disk / ffmpeg failure | Normal retry: up to 3 attempts with 5 min → 30 min → 2 h waits, then `failed`. No cooldown. |
+| Network / HTTP / validation failure in the pipeline | Normal retry: up to 3 attempts with 5 min → 30 min → 2 h waits, then `failed`. No cooldown. |
+| Disk full, ffmpeg missing or broken, a folder that can't be written | The item **fails at once** (retrying would re-plan and spend another licence) and the **whole queue pauses** ("Downloads paused: disk full", shown in health) until the health monitor (every 5 min, a hold lasts at least 5 min) finds ffmpeg working and the library and work folders writable with ≥ 2 GB free — after a disk-full failure also ≥ 1 GB more free than when it paused — or the user retries the failed item. |
 
-A manual download bypasses title backoff and spacing, but **not** an account cooldown
-unless the request says `force: true` (the UI warns that retrying into a throttle is
+A manual download bypasses title backoff and spacing, but **not** an account cooldown or
+hold unless the request says `force: true` (the UI warns that retrying into a throttle is
 believed to extend it).
 
 ## Output layout
@@ -136,11 +171,22 @@ dots/spaces, ≤ 120 bytes). The audio file is `{title}.m4b`; MP3 output is
 Events: `test`, `bookAdded`, `grab`, `download`, `downloadFailed`, `licenceThrottled`,
 `authExpired`, `health`, `healthRestored`.
 
+Secrets are masked (`********`) in API responses: webhook URLs (their token is usually in
+the path or query), passwords and secret-looking headers, Apprise configuration keys and
+stateless URLs, Audiobookshelf API keys. Sending the mask back keeps the stored value —
+only while the address (scheme, host, port) is unchanged; a changed address needs every
+secret entered again, so a stored secret can never be redirected to another server.
+
 ## Security
 
 - First start with no user: the UI shows a setup page that creates the admin
-  user (argon2 hash). Sessions are an `HttpOnly`, `SameSite=Lax` cookie backed by the
-  `sessions` table.
+  user (argon2 hash; at most two hashes run at once, so a login flood queues rather than
+  exhausting CPU and memory). Sessions are an `HttpOnly`, `SameSite=Lax` cookie backed
+  by the `sessions` table.
+- CSRF: a cookie-authenticated request other than GET/HEAD must carry `Sec-Fetch-Site:
+  same-origin` (or `none`), or, from a browser that doesn't send it, an `Origin` matching
+  `Host` / `X-Forwarded-Host`. API-key requests are exempt (browsers never add the key).
+  Request bodies must be `application/json`.
 - The API key (generated on first start, shown under Settings → General) authenticates
   `X-Api-Key` or `?apikey=`. `GET /ping` is anonymous.
 - Account credentials live in `librisync.db` in `/config`. That volume is the secret;

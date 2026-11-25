@@ -12,7 +12,7 @@ use std::any::Any;
 
 use axum::body::Bytes;
 use axum::extract::{FromRequest, Request};
-use axum::http::StatusCode;
+use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{middleware, Json, Router};
@@ -150,16 +150,36 @@ impl<S: Send + Sync, T: DeserializeOwned + Default> FromRequest<S> for OptionalJ
     type Rejection = ApiError;
 
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        let json_type = req
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(is_json_content_type);
         let bytes = Bytes::from_request(req, state)
             .await
             .map_err(|e| ApiError::invalid(e.body_text()))?;
         if bytes.iter().all(|b| b.is_ascii_whitespace()) {
             return Ok(Self(T::default()));
         }
+        // Like `Json`: a body must say it is JSON. A cross-site form can only send
+        // `text/plain`, `multipart/form-data` or `application/x-www-form-urlencoded`.
+        if !json_type {
+            return Err(ApiError::new(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "invalid_input",
+                "Expected request with `Content-Type: application/json`",
+            ));
+        }
         serde_json::from_slice(&bytes)
             .map(Self)
             .map_err(|e| ApiError::invalid(format!("Invalid JSON body: {e}")))
     }
+}
+
+/// `application/json` or `application/<anything>+json`, with or without parameters.
+fn is_json_content_type(v: &str) -> bool {
+    let mime = v.split(';').next().unwrap_or_default().trim().to_ascii_lowercase();
+    mime == "application/json" || (mime.starts_with("application/") && mime.ends_with("+json"))
 }
 
 #[cfg(test)]
@@ -255,7 +275,11 @@ mod tests {
         assert_eq!(j["authenticated"], true);
         assert_eq!(j["username"], "admin");
 
-        let req = HttpRequest::post("/api/v1/auth/logout").header("cookie", &session).body(Body::empty()).unwrap();
+        let req = HttpRequest::post("/api/v1/auth/logout")
+            .header("cookie", &session)
+            .header("sec-fetch-site", "same-origin")
+            .body(Body::empty())
+            .unwrap();
         let (s, _, _) = call(&app, req).await;
         assert_eq!(s, StatusCode::NO_CONTENT);
         let req = HttpRequest::get("/api/v1/books").header("cookie", &session).body(Body::empty()).unwrap();
@@ -288,5 +312,80 @@ mod tests {
         assert_eq!(s, StatusCode::BAD_REQUEST);
         assert_eq!(j["error"], "invalid_input");
         assert!(j["message"].as_str().unwrap().contains("sync.intervalHours"));
+    }
+
+    async fn session(app: &AppState) -> String {
+        let (s, _, h) = call(app, json_req("POST", "/api/v1/auth/setup", serde_json::json!({"username": "admin", "password": "long enough"}))).await;
+        assert_eq!(s, StatusCode::NO_CONTENT);
+        h.get("set-cookie").unwrap().to_str().unwrap().split(';').next().unwrap().to_string()
+    }
+
+    fn post_with(uri: &str, headers: &[(&str, &str)]) -> HttpRequest<Body> {
+        let mut b = HttpRequest::post(uri).header("host", "librisync.local:8383");
+        for (k, v) in headers {
+            b = b.header(*k, *v);
+        }
+        b.body(Body::empty()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn cookie_requests_that_change_things_must_come_from_our_own_pages() {
+        let (app, _dir) = test_app().await;
+        let cookie = session(&app).await;
+        // `system/tasks/{name}/run` is a body-less POST with a cheap, harmless effect.
+        let uri = "/api/v1/system/tasks/clientProfiles/run";
+        let refused = [
+            vec![("cookie", cookie.as_str())],
+            vec![("cookie", cookie.as_str()), ("sec-fetch-site", "cross-site")],
+            vec![("cookie", cookie.as_str()), ("sec-fetch-site", "same-site")],
+            vec![("cookie", cookie.as_str()), ("origin", "https://evil.example")],
+            vec![("cookie", cookie.as_str()), ("origin", "http://librisync.local:9999")],
+            vec![("cookie", cookie.as_str()), ("origin", "null")],
+            // Sec-Fetch-Site wins over a matching Origin.
+            vec![("cookie", cookie.as_str()), ("sec-fetch-site", "cross-site"), ("origin", "http://librisync.local:8383")],
+        ];
+        for headers in refused {
+            let (s, j, _) = call(&app, post_with(uri, &headers)).await;
+            assert_eq!((s, j["error"].as_str()), (StatusCode::FORBIDDEN, Some("forbidden")), "{headers:?}");
+        }
+        let allowed = [
+            vec![("cookie", cookie.as_str()), ("sec-fetch-site", "same-origin")],
+            vec![("cookie", cookie.as_str()), ("sec-fetch-site", "none")],
+            vec![("cookie", cookie.as_str()), ("origin", "http://librisync.local:8383")],
+            vec![("cookie", cookie.as_str()), ("origin", "https://books.example"), ("x-forwarded-host", "books.example")],
+        ];
+        for headers in allowed {
+            let (s, _, _) = call(&app, post_with(uri, &headers)).await;
+            assert_ne!(s, StatusCode::FORBIDDEN, "{headers:?}");
+        }
+        // Reads are not checked; neither is the API key, which browsers never send.
+        let req = HttpRequest::get("/api/v1/accounts").header("cookie", &cookie).body(Body::empty()).unwrap();
+        assert_eq!(call(&app, req).await.0, StatusCode::OK);
+        let key = app.api_key();
+        let (s, _, _) = call(&app, post_with(uri, &[("x-api-key", key.as_str())])).await;
+        assert_ne!(s, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn an_optional_json_body_must_be_sent_as_json() {
+        let (app, _dir) = test_app().await;
+        let key = app.api_key();
+        let req = HttpRequest::post("/api/v1/books/nope/download")
+            .header("x-api-key", &key)
+            .header("content-type", "text/plain")
+            .body(Body::from(r#"{"force":true}"#))
+            .unwrap();
+        let (s, j, _) = call(&app, req).await;
+        assert_eq!((s, j["error"].as_str()), (StatusCode::UNSUPPORTED_MEDIA_TYPE, Some("invalid_input")));
+
+        // No body at all is fine (and then the book simply doesn't exist).
+        let req = HttpRequest::post("/api/v1/books/nope/download").header("x-api-key", &key).body(Body::empty()).unwrap();
+        assert_eq!(call(&app, req).await.0, StatusCode::NOT_FOUND);
+        let mut req = json_req("POST", "/api/v1/books/nope/download", serde_json::json!({"force": true}));
+        req.headers_mut().insert("x-api-key", key.parse().unwrap());
+        assert_eq!(call(&app, req).await.0, StatusCode::NOT_FOUND);
+        assert!(is_json_content_type("application/json; charset=utf-8"));
+        assert!(is_json_content_type("application/merge-patch+json"));
+        assert!(!is_json_content_type("text/json"));
     }
 }

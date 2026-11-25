@@ -169,12 +169,15 @@ where
 
 /// Errors that mean the stored credential is no longer accepted.
 pub fn is_auth_error(e: &LibationError) -> bool {
-    match e {
-        LibationError::AuthenticationFailed { .. } | LibationError::TokenExpired => true,
-        LibationError::ApiRequestFailed { status_code: Some(401), .. } => true,
-        LibationError::UnexpectedStatusCode { status_code: 401, .. } => true,
-        _ => false,
+    if e.error_code() == "auth_expired" {
+        return true;
     }
+    // A bare 401 (Libro.fm's edge answers bad tokens this way) also means re-sign-in.
+    matches!(
+        e,
+        LibationError::ApiRequestFailed { status_code: Some(401), .. }
+            | LibationError::UnexpectedStatusCode { status_code: 401, .. }
+    )
 }
 
 /// The next scheduled sync: `interval` from now, ±30 minutes of jitter so accounts
@@ -201,6 +204,10 @@ impl Running {
         }
         Some(RunningGuard { set: self, id: id.to_string() })
     }
+
+    pub fn is_running(&self, id: &str) -> bool {
+        self.0.lock().map(|s| s.contains(id)).unwrap_or(false)
+    }
 }
 
 impl Drop for RunningGuard<'_> {
@@ -220,11 +227,22 @@ pub fn spawn(app: AppState, id: String) {
     });
 }
 
+/// Sync one account now. Publishes the account (with `syncing`) when the sync starts
+/// and again when it has finished.
 pub async fn sync_account(app: &AppState, id: &str) -> anyhow::Result<()> {
-    let Some(_guard) = app.syncs.try_start(id) else {
-        tracing::debug!("Sync already running for an account; skipping");
-        return Ok(());
+    let result = {
+        let Some(_guard) = app.syncs.try_start(id) else {
+            tracing::debug!("Sync already running for an account; skipping");
+            return Ok(());
+        };
+        accounts::publish(app, id).await;
+        sync_locked(app, id).await
     };
+    accounts::publish(app, id).await;
+    result
+}
+
+async fn sync_locked(app: &AppState, id: &str) -> anyhow::Result<()> {
     accounts::ensure_state(app, id).await?;
     let Some(account) = accounts::load_json(app, id).await? else {
         return Ok(());
@@ -233,7 +251,8 @@ pub async fn sync_account(app: &AppState, id: &str) -> anyhow::Result<()> {
     let started = time::now();
     // Books.created_at uses SQLite's CURRENT_TIMESTAMP form at second precision.
     let started_core = time::core_fmt(started);
-    tracing::info!("Syncing {} account {}", provider.as_str(), account_label(&account, id));
+    // The id, not the display name: Libro.fm and Chirp names are email addresses.
+    tracing::info!("Syncing {} account {id}", provider.as_str());
 
     let outcome = run_paged(
         &PagePolicy::default(),
@@ -263,14 +282,6 @@ pub async fn sync_account(app: &AppState, id: &str) -> anyhow::Result<()> {
     .await;
 
     finish(app, id, provider.as_str(), &started_core, &outcome).await
-}
-
-fn account_label(account: &serde_json::Value, id: &str) -> String {
-    account
-        .get("account_name")
-        .and_then(|n| n.as_str())
-        .unwrap_or(id)
-        .to_string()
 }
 
 async fn finish(app: &AppState, id: &str, provider: &str, started_core: &str, outcome: &PagedOutcome) -> anyhow::Result<()> {
@@ -315,7 +326,6 @@ async fn finish(app: &AppState, id: &str, provider: &str, started_core: &str, ou
             .await;
         }
         history::record(app, NewEvent::new("syncFailed", format!("Sync failed: {fatal}")).account(id)).await;
-        accounts::publish(app, id).await;
         return Ok(());
     }
 
@@ -360,7 +370,6 @@ async fn finish(app: &AppState, id: &str, provider: &str, started_core: &str, ou
     });
     let event = if ok { "syncCompleted" } else { "syncFailed" };
     history::record(app, NewEvent::new(event, summary).account(id).data(data)).await;
-    accounts::publish(app, id).await;
 
     // A first sync makes the whole library eligible for back-fill.
     let app2 = app.clone();

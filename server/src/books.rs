@@ -255,12 +255,14 @@ pub async fn get(pool: &SqlitePool, id: &str) -> sqlx::Result<Option<BookView>> 
     Ok(list(pool, &q).await?.1.into_iter().next())
 }
 
+/// The book's description as plain text.
 pub async fn description(pool: &SqlitePool, id: &str) -> sqlx::Result<String> {
-    Ok(sqlx::query_scalar::<_, String>("SELECT description FROM core.Books WHERE audible_product_id = ?")
+    let raw = sqlx::query_scalar::<_, String>("SELECT description FROM core.Books WHERE audible_product_id = ?")
         .bind(id)
         .fetch_optional(pool)
         .await?
-        .unwrap_or_default())
+        .unwrap_or_default();
+    Ok(html_to_text(&raw))
 }
 
 #[derive(Default)]
@@ -408,7 +410,7 @@ pub async fn meta(pool: &SqlitePool, product_id: &str) -> sqlx::Result<Option<(B
         series_sequence,
         publisher: r.publisher,
         release_date: row.date_published.filter(|d| !d.is_empty()),
-        description: Some(row.description).filter(|d| !d.trim().is_empty()),
+        description: Some(html_to_text(&row.description)).filter(|d| !d.is_empty()),
         language: row.language,
         genres: Vec::new(),
         asin: (row.source == "audible").then(|| product_id.to_string()),
@@ -416,6 +418,73 @@ pub async fn meta(pool: &SqlitePool, product_id: &str) -> sqlx::Result<Option<(B
         cover_url: row.cover.filter(|c| !c.trim().is_empty()),
     };
     Ok(Some((meta, row.source)))
+}
+
+/// Store descriptions can be HTML (Audible's are). Reduce one to plain text: block
+/// ends become line breaks, other tags are dropped, common entities decoded.
+pub fn html_to_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if c == '<' {
+            let next = s[i + 1..].chars().next();
+            if next.is_some_and(|n| n.is_ascii_alphabetic() || n == '/' || n == '!') {
+                let end = s[i..].find('>').map(|e| i + e);
+                let Some(end) = end else { break };
+                let tag = s[i + 1..end].trim_start_matches('/').to_ascii_lowercase();
+                let name: String = tag.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+                if matches!(name.as_str(), "br" | "p" | "div" | "li" | "ul" | "ol" | "h1" | "h2" | "h3" | "h4") {
+                    out.push('\n');
+                }
+                while chars.peek().is_some_and(|(j, _)| *j <= end) {
+                    chars.next();
+                }
+                continue;
+            }
+        }
+        if c == '&' {
+            if let Some(semi) = s[i..].find(';').filter(|n| *n <= 10) {
+                let entity = &s[i + 1..i + semi];
+                let decoded = match entity {
+                    "amp" => Some('&'),
+                    "lt" => Some('<'),
+                    "gt" => Some('>'),
+                    "quot" => Some('"'),
+                    "apos" => Some('\''),
+                    "nbsp" => Some(' '),
+                    e if e.starts_with("#x") || e.starts_with("#X") => {
+                        u32::from_str_radix(&e[2..], 16).ok().and_then(char::from_u32)
+                    }
+                    e if e.starts_with('#') => e[1..].parse().ok().and_then(char::from_u32),
+                    _ => None,
+                };
+                if let Some(d) = decoded {
+                    out.push(d);
+                    while chars.peek().is_some_and(|(j, _)| *j <= i + semi) {
+                        chars.next();
+                    }
+                    continue;
+                }
+            }
+        }
+        out.push(c);
+    }
+    // Tidy whitespace: trim lines, at most one blank line in a row.
+    let mut text = String::new();
+    let mut blank = 0;
+    for line in out.lines().map(|l| l.split_whitespace().collect::<Vec<_>>().join(" ")) {
+        if line.is_empty() {
+            blank += 1;
+            if blank > 1 || text.is_empty() {
+                continue;
+            }
+        } else {
+            blank = 0;
+        }
+        text.push_str(&line);
+        text.push('\n');
+    }
+    text.trim_end().to_string()
 }
 
 /// Folder-template values for a book.
@@ -442,6 +511,15 @@ pub fn template_values(meta: &BookMeta, provider: &str) -> TemplateValues {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn html_descriptions_become_plain_text() {
+        let html = "<p>A <b>bold</b> start &amp; more.</p><p>Second&nbsp;para &#8212; <i>end</i></p><br/>";
+        assert_eq!(html_to_text(html), "A bold start & more.\n\nSecond para \u{2014} end");
+        assert_eq!(html_to_text("Plain 3 < 4 text"), "Plain 3 < 4 text");
+        assert_eq!(html_to_text("Fish &chips; ok"), "Fish &chips; ok");
+        assert_eq!(html_to_text(""), "");
+    }
 
     #[test]
     fn like_patterns_escape_wildcards() {

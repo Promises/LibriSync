@@ -257,8 +257,10 @@ pub async fn credentials(State(app): State<AppState>, JsonBody(b): JsonBody<Cred
         .as_provider()
         .login(json!({ "username": email, "password": b.password }))
         .await
+        // From a login call, `auth_expired` means the store refused these credentials.
         .map_err(|e| match e {
             LibationError::AuthenticationFailed { message, .. } => ApiError::provider_rejected(message),
+            other if other.error_code() == "auth_expired" => ApiError::provider_rejected(other.to_string()),
             other => ApiError::provider(format!("Sign-in failed: {other}")),
         })?;
     // A provider may namespace its account id (Chirp: `chirp:<user id>`) so the same

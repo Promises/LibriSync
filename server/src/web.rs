@@ -44,7 +44,7 @@ pub async fn serve(uri: Uri) -> Response {
     }
     // A missing file with an extension is a real 404, not a client-side route.
     let last = path.rsplit('/').next().unwrap_or_default();
-    if last.contains('.') {
+    if last.contains('.') && path != "index.html" {
         return (StatusCode::NOT_FOUND, "Not found").into_response();
     }
     file_response("index.html").unwrap_or_else(|| {

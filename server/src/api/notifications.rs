@@ -88,16 +88,23 @@ pub async fn test(State(app): State<AppState>, JsonBody(mut n): JsonBody<Notific
 pub struct AbsBody {
     url: String,
     api_key: String,
+    id: Option<i64>,
 }
 
 pub async fn abs_libraries(State(app): State<AppState>, JsonBody(b): JsonBody<AbsBody>) -> ApiResult<Json<Vec<AbsLibrary>>> {
     let key = if b.api_key == MASK {
         // The UI is editing a saved connection whose key it only has masked.
-        notify::list(&app.db)
-            .await?
-            .into_iter()
+        let stored = match b.id {
+            Some(id) => notify::get(&app.db, id).await?,
+            // Without an id, the saved connection to the same server.
+            None => notify::list(&app.db)
+                .await?
+                .into_iter()
+                .filter(|n| n.kind == Kind::Audiobookshelf)
+                .find(|n| n.config.get("url").and_then(|u| u.as_str()) == Some(b.url.as_str())),
+        };
+        stored
             .filter(|n| n.kind == Kind::Audiobookshelf)
-            .find(|n| n.config.get("url").and_then(|u| u.as_str()) == Some(b.url.as_str()))
             .and_then(|n| n.config.get("apiKey").and_then(|k| k.as_str()).map(String::from))
             .ok_or_else(|| ApiError::invalid_field("apiKey", "enter the API key"))?
     } else {

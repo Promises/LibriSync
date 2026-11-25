@@ -7,7 +7,7 @@
 //! |---|---|
 //! | Account cooldown after `license_throttled`: base (24 h) doubling per consecutive throttle, capped at 7 days | every priority; manual only with `force` |
 //! | One licence request in flight per account (so the first after a cooldown is a single probe) | every priority |
-//! | Rolling 24 h cap counting every request | every priority |
+//! | Rolling 24 h cap counting every request | every priority; manual only with `force` |
 //! | Random spacing between requests | back-fill only |
 //! | Local-time window | back-fill only (every provider) |
 //! | Title backoff after `license_denied`: 1 day doubling, capped at 30 days | back-fill and new; manual bypasses |
@@ -84,8 +84,10 @@ pub fn licence_gate(
     force: bool,
     now: DateTime<Utc>,
 ) -> Gate {
+    // A forced single-book download is the user's explicit override.
+    let forced = priority == Priority::Manual && force;
     if let Some(until) = acct.cooldown_until.filter(|u| *u > now) {
-        if !(priority == Priority::Manual && force) {
+        if !forced {
             return Gate::Wait { until: Some(until), reason: WaitReason::Cooldown(until) };
         }
     }
@@ -95,8 +97,10 @@ pub fn licence_gate(
             reason: WaitReason::InFlight { probing: acct.cooldown_level > 0 },
         };
     }
-    if let Some(slot) = cap_next_slot(&acct.recent_requests, cfg.daily_cap, now) {
-        return Gate::Wait { until: Some(slot), reason: WaitReason::Budget(slot) };
+    if !forced {
+        if let Some(slot) = cap_next_slot(&acct.recent_requests, cfg.daily_cap, now) {
+            return Gate::Wait { until: Some(slot), reason: WaitReason::Budget(slot) };
+        }
     }
     if priority == Priority::Backfill {
         if let Some(next) = acct.next_licence_at.filter(|n| *n > now) {
@@ -255,20 +259,25 @@ mod tests {
     }
 
     #[test]
-    fn cap_applies_to_every_priority_including_manual() {
+    fn cap_holds_every_priority_unless_a_manual_download_is_forced() {
         let now = t(12, 0);
         let acct = AccountPacing {
             recent_requests: vec![now - Duration::hours(3); 3],
             ..Default::default()
         };
-        for p in [Priority::Manual, Priority::New, Priority::Backfill] {
-            match licence_gate(&cfg(), &acct, p, true, now) {
+        for (p, force) in [
+            (Priority::Manual, false),
+            (Priority::New, true),
+            (Priority::Backfill, true),
+        ] {
+            match licence_gate(&cfg(), &acct, p, force, now) {
                 Gate::Wait { reason: WaitReason::Budget(slot), .. } => {
                     assert_eq!(slot, now + Duration::hours(21))
                 }
                 other => panic!("{p:?}: {other:?}"),
             }
         }
+        assert_eq!(licence_gate(&cfg(), &acct, Priority::Manual, true, now), Gate::Go);
     }
 
     #[test]

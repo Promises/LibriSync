@@ -301,7 +301,12 @@ pub async fn finish(app: &AppState, row: &QueueRow, outcome: Outcome, user_cance
             .bind(&row.account_id)
             .execute(&app.db)
             .await?;
-            // Not this title's fault: back to the queue, attempts untouched.
+            // Not this title's fault: back to the queue, attempts untouched. A `force`
+            // is spent: it must not carry the item straight past the new cooldown.
+            sqlx::query("UPDATE queue SET force = 0 WHERE id = ?")
+                .bind(row.id)
+                .execute(&app.db)
+                .await?;
             requeue(app, row, None, Some(message.clone())).await?;
             history::record(
                 app,

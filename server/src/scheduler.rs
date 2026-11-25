@@ -135,9 +135,9 @@ pub async fn view(app: &AppState, t: TaskName) -> ScheduledTask {
                 .unwrap_or_default()
                 .into_iter()
                 .filter(|a| a.enabled)
-                .map(|a| a.next_sync.as_deref().and_then(time::parse).or(st.next_run))
+                .filter_map(|a| a.next_sync.as_deref().and_then(time::parse).or(st.next_run))
                 .min()
-                .flatten();
+                .or(st.next_run);
             (settings.sync.interval_hours as i64 * 60, next)
         }
         _ => (t.period().num_minutes(), st.next_run),

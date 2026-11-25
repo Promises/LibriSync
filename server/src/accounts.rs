@@ -44,6 +44,7 @@ pub struct AccountView {
     pub licences_last24h: i64,
     pub daily_licence_cap: Option<u32>,
     pub auth_status: String,
+    pub syncing: bool,
 }
 
 #[derive(sqlx::FromRow)]
@@ -91,7 +92,7 @@ SELECT a.account_id,
 FROM core.Accounts a
 LEFT JOIN account_state s ON s.account_id = a.account_id";
 
-fn to_view(r: ViewRow, cap: u32, now: DateTime<Utc>) -> AccountView {
+fn to_view(r: ViewRow, cap: u32, now: DateTime<Utc>, syncing: bool) -> AccountView {
     let audible = r.provider == "audible";
     let cooldown_active = r
         .cooldown_until
@@ -122,6 +123,7 @@ fn to_view(r: ViewRow, cap: u32, now: DateTime<Utc>) -> AccountView {
         daily_licence_cap: audible.then_some(cap),
         auth_status: r.auth_status,
         provider: r.provider,
+        syncing,
     }
 }
 
@@ -132,7 +134,10 @@ pub async fn list(app: &App) -> sqlx::Result<Vec<AccountView>> {
         .bind(time::fmt(now - chrono::Duration::hours(24)))
         .fetch_all(&app.db)
         .await?;
-    Ok(rows.into_iter().map(|r| to_view(r, cap, now)).collect())
+    Ok(rows.into_iter().map(|r| {
+        let syncing = app.syncs.is_running(&r.account_id);
+        to_view(r, cap, now, syncing)
+    }).collect())
 }
 
 pub async fn get(app: &App, id: &str) -> sqlx::Result<Option<AccountView>> {
@@ -143,7 +148,10 @@ pub async fn get(app: &App, id: &str) -> sqlx::Result<Option<AccountView>> {
         .bind(id)
         .fetch_optional(&app.db)
         .await?;
-    Ok(row.map(|r| to_view(r, cap, now)))
+    Ok(row.map(|r| {
+        let syncing = app.syncs.is_running(&r.account_id);
+        to_view(r, cap, now, syncing)
+    }))
 }
 
 /// Publish an account's current view over SSE.
@@ -317,11 +325,11 @@ mod tests {
 
     #[test]
     fn drm_free_accounts_have_no_locale_or_cap() {
-        let v = to_view(row("chirp"), 20, time::now());
+        let v = to_view(row("chirp"), 20, time::now(), false);
         assert_eq!(v.locale, None);
         assert_eq!(v.daily_licence_cap, None);
         assert_eq!(v.licences_last24h, 0);
-        let v = to_view(row("audible"), 20, time::now());
+        let v = to_view(row("audible"), 20, time::now(), false);
         assert_eq!(v.locale.as_deref(), Some("us"));
         assert_eq!(v.daily_licence_cap, Some(20));
         assert_eq!(v.licences_last24h, 4);
@@ -329,7 +337,7 @@ mod tests {
 
     #[test]
     fn an_expired_cooldown_is_not_reported() {
-        let v = to_view(row("audible"), 20, time::now());
+        let v = to_view(row("audible"), 20, time::now(), false);
         assert_eq!(v.cooldown_until, None);
         assert_eq!(v.cooldown_reason, None);
         let json = serde_json::to_value(&v).unwrap();

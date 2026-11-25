@@ -4,6 +4,7 @@
 
 use std::collections::VecDeque;
 use std::fmt::Write as _;
+use std::io::IsTerminal;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -171,7 +172,7 @@ pub fn init(logs_dir: &Path, level_override: Option<&str>, initial_level: &str) 
 
     let registry = tracing_subscriber::registry()
         .with(filter_layer)
-        .with(tracing_subscriber::fmt::layer())
+        .with(tracing_subscriber::fmt::layer().with_ansi(std::io::stdout().is_terminal()))
         .with(file_layer)
         .with(RingLayer(buffer.clone()));
     // A second init (tests) is harmless: keep the first subscriber.

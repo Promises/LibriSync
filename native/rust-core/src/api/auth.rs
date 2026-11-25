@@ -861,6 +861,28 @@ impl Locale {
         format!("https://api.{}", self.domain)
     }
 
+    /// The Amazon domain this marketplace signs in and registers against, e.g.
+    /// `amazon.co.uk` for `uk`. Sign-in (`www.`), registration and token refresh
+    /// (`api.`) all live on it. Unknown country codes fall back to `amazon.com`.
+    ///
+    /// Reference: mkb79/Audible `localization.py` (`LOCALE_TEMPLATES[...]["domain"]`).
+    pub fn amazon_domain(&self) -> &'static str {
+        match self.country_code.as_str() {
+            "us" => "amazon.com",
+            "uk" => "amazon.co.uk",
+            "de" => "amazon.de",
+            "fr" => "amazon.fr",
+            "ca" => "amazon.ca",
+            "au" => "amazon.com.au",
+            "it" => "amazon.it",
+            "es" => "amazon.es",
+            "in" => "amazon.in",
+            "jp" => "amazon.co.jp",
+            "br" => "amazon.com.br",
+            _ => "amazon.com",
+        }
+    }
+
     /// Get the OAuth URL for this locale
     pub fn oauth_url(&self) -> String {
         format!("https://www.amazon.com/ap/signin")
@@ -1097,21 +1119,7 @@ pub fn generate_authorization_url(
     let client_id = format!("device:{}", serial_and_type);
 
     // Amazon login domain varies by region
-    // Most regions use amazon.com, but some use local Amazon domains
-    let amazon_domain = match locale.country_code.as_str() {
-        "us" => "amazon.com",
-        "uk" => "amazon.co.uk",
-        "de" => "amazon.de",
-        "fr" => "amazon.fr",
-        "ca" => "amazon.ca",
-        "au" => "amazon.com.au",
-        "it" => "amazon.it",
-        "es" => "amazon.es",
-        "in" => "amazon.in",
-        "jp" => "amazon.co.jp",
-        "br" => "amazon.com.br",
-        _ => "amazon.com", // Default fallback
-    };
+    let amazon_domain = locale.amazon_domain();
 
     // Build authorization URL
     let mut url = Url::parse(&format!("https://www.{}/ap/signin", amazon_domain))
@@ -1427,7 +1435,9 @@ pub async fn exchange_authorization_code_as(
     authorization_code: &str,
     device_serial: &str,
     pkce: &PkceChallenge,
-    profile: &DeviceProfile,
+    // Unused: we register as the iPhone profile (see `registration_request_body`). Still
+    // carried for the register signature and potential future use.
+    _profile: &DeviceProfile,
 ) -> Result<RegistrationResponse> {
     let config = OAuthConfig::default();
 
@@ -1440,70 +1450,15 @@ pub async fn exchange_authorization_code_as(
         .map(|b| format!("{:02x}", b)) // lowercase hex!
         .collect::<String>();
 
-    // Amazon domain for token endpoint
-    let amazon_domain = match locale.country_code.as_str() {
-        "us" => "amazon.com",
-        "uk" => "amazon.co.uk",
-        "de" => "amazon.de",
-        "fr" => "amazon.fr",
-        "ca" => "amazon.ca",
-        "au" => "amazon.com.au",
-        "it" => "amazon.it",
-        "es" => "amazon.es",
-        "in" => "amazon.in",
-        "jp" => "amazon.co.jp",
-        "br" => "amazon.com.br",
-        _ => "amazon.com",
-    };
-
+    let amazon_domain = locale.amazon_domain();
     let register_url = format!("https://api.{}/auth/register", amazon_domain);
 
-    // Build registration request body - EXACT match to mkb79/Audible Python library
-    let request_body = serde_json::json!({
-        "requested_token_type": [
-            "bearer",
-            "mac_dms",
-            "website_cookies",
-            "store_authentication_cookie"
-        ],
-        "cookies": {
-            "website_cookies": [],
-            // Cookie domain must match the full Amazon TLD, not the bare country code.
-            // e.g. uk -> .amazon.co.uk, au -> .amazon.com.au, jp -> .amazon.co.jp.
-            // Using the country code directly produced invalid domains like ".amazon.uk",
-            // which Amazon accepted with HTTP 200 but then omitted the cookie token types
-            // from the response, causing a downstream unwrap() panic. Reuse the already
-            // resolved Amazon domain so the cookie domain is always valid.
-            "domain": format!(".{}", amazon_domain)
-        },
-        // The iPhone registration shape (device_type A2CZJZGLK2JJVM, domain "Device").
-        // This is the whole fix: Audible throttles licence requests from the Android
-        // device type but grants them to this one. It also sends no `device_metadata`
-        // block, so we don't either. `profile` is unused here now but is still carried for
-        // the register signature and potential future use.
-        // Reference: mkb79/audible register.py (register()).
-        "registration_data": {
-            "domain": "Device",
-            "app_version": IPHONE_APP_VERSION,
-            "device_serial": device_serial,
-            "device_type": "A2CZJZGLK2JJVM",
-            "device_name": format!(
-                "%FIRST_NAME%%FIRST_NAME_POSSESSIVE_STRING%%DUPE_STRATEGY_1ST%Audible for iPhone"
-            ),
-            "os_version": IPHONE_OS_VERSION,
-            "software_version": IPHONE_SOFTWARE_VERSION,
-            "device_model": "iPhone",
-            "app_name": "Audible"
-        },
-        "auth_data": {
-            "client_id": &serial_type_hex,
-            "authorization_code": authorization_code,
-            "code_verifier": &pkce.verifier,
-            "code_algorithm": "SHA-256",
-            "client_domain": "DeviceLegacy"
-        },
-        "requested_extensions": ["device_info", "customer_info"]
-    });
+    let auth = RegistrationAuth::AuthorizationCode {
+        client_id_hex: &serial_type_hex,
+        authorization_code,
+        code_verifier: &pkce.verifier,
+    };
+    let request_body = registration_request_body(amazon_domain, device_serial, &auth);
 
     // Never log the request body: it contains the authorization code and
     // PKCE verifier, and stderr is readable via logcat on Android.
@@ -1539,12 +1494,132 @@ pub async fn exchange_authorization_code_as(
     }
 
     let response_text = response.text().await.unwrap_or_default();
+    parse_registration_response(&response_text, &auth)
+}
 
+/// How the device proves that the user signed in, in an `/auth/register` request.
+///
+/// Reference: mkb79's device-code gist (`registration_body`, `CODE_PAIR_TOKEN_TYPES`,
+/// `AUTHORIZATION_CODE_TOKEN_TYPES`), https://gist.github.com/mkb79/d3ca499c2a7516933199914be3039d2d
+pub(crate) enum RegistrationAuth<'a> {
+    /// The browser/PKCE flow: an authorization code from `/ap/maplanding`.
+    AuthorizationCode {
+        /// Lowercase hex of `SERIAL#DEVICETYPE`.
+        client_id_hex: &'a str,
+        authorization_code: &'a str,
+        code_verifier: &'a str,
+    },
+    /// The device-code flow: a code pair from `/auth/create/codepair`.
+    CodePair {
+        public_code: &'a str,
+        private_code: &'a str,
+    },
+}
+
+impl RegistrationAuth<'_> {
+    /// Token types to request. The code-pair flow does not ask for
+    /// `store_authentication_cookie` (the reference keeps the two lists apart), so its
+    /// response has none.
+    fn requested_token_types(&self) -> &'static [&'static str] {
+        match self {
+            RegistrationAuth::AuthorizationCode { .. } => &[
+                "bearer",
+                "mac_dms",
+                "website_cookies",
+                "store_authentication_cookie",
+            ],
+            RegistrationAuth::CodePair { .. } => &["bearer", "mac_dms", "website_cookies"],
+        }
+    }
+
+    fn expects_store_authentication_cookie(&self) -> bool {
+        self.requested_token_types()
+            .contains(&"store_authentication_cookie")
+    }
+
+    fn auth_data(&self) -> serde_json::Value {
+        match self {
+            RegistrationAuth::AuthorizationCode {
+                client_id_hex,
+                authorization_code,
+                code_verifier,
+            } => serde_json::json!({
+                "client_id": client_id_hex,
+                "authorization_code": authorization_code,
+                "code_verifier": code_verifier,
+                "code_algorithm": "SHA-256",
+                "client_domain": "DeviceLegacy"
+            }),
+            RegistrationAuth::CodePair {
+                public_code,
+                private_code,
+            } => serde_json::json!({
+                "code_pair": {
+                    "public_code": public_code,
+                    "private_code": private_code
+                },
+                "use_global_authentication": "true"
+            }),
+        }
+    }
+}
+
+/// The `/auth/register` request body, registering as the current Audible for iPhone
+/// profile. Shared by the browser and the device-code flows.
+///
+/// Reference: mkb79/audible register.py (register()) and the device-code gist's
+/// `registration_body`.
+pub(crate) fn registration_request_body(
+    amazon_domain: &str,
+    device_serial: &str,
+    auth: &RegistrationAuth<'_>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "requested_token_type": auth.requested_token_types(),
+        "cookies": {
+            "website_cookies": [],
+            // Cookie domain must match the full Amazon TLD, not the bare country code.
+            // e.g. uk -> .amazon.co.uk, au -> .amazon.com.au, jp -> .amazon.co.jp.
+            // Using the country code directly produced invalid domains like ".amazon.uk",
+            // which Amazon accepted with HTTP 200 but then omitted the cookie token types
+            // from the response, causing a downstream unwrap() panic. Reuse the already
+            // resolved Amazon domain so the cookie domain is always valid.
+            "domain": format!(".{}", amazon_domain)
+        },
+        // The iPhone registration shape (device_type A2CZJZGLK2JJVM, domain "Device").
+        // This is the whole fix: Audible throttles licence requests from the Android
+        // device type but grants them to this one. It also sends no `device_metadata`
+        // block, so we don't either.
+        "registration_data": {
+            "domain": "Device",
+            "app_version": IPHONE_APP_VERSION,
+            "device_serial": device_serial,
+            "device_type": OAuthConfig::default().device_type,
+            "device_name":
+                "%FIRST_NAME%%FIRST_NAME_POSSESSIVE_STRING%%DUPE_STRATEGY_1ST%Audible for iPhone",
+            "os_version": IPHONE_OS_VERSION,
+            "software_version": IPHONE_SOFTWARE_VERSION,
+            "device_model": "iPhone",
+            "app_name": "Audible"
+        },
+        "auth_data": auth.auth_data(),
+        "requested_extensions": ["device_info", "customer_info"]
+    })
+}
+
+/// Parse a successful `/auth/register` response body (`response.success`).
+///
+/// `store_authentication_cookie` is required only when `auth` asked for it; otherwise a
+/// missing one becomes an empty cookie (it is stored but never sent anywhere).
+pub(crate) fn parse_registration_response(
+    response_text: &str,
+    auth: &RegistrationAuth<'_>,
+) -> Result<RegistrationResponse> {
     // Parse the response without persisting tokens or customer data to disk.
     let register_response: serde_json::Value =
-        serde_json::from_str(&response_text).map_err(|e| LibationError::InvalidApiResponse {
+        serde_json::from_str(response_text).map_err(|e| LibationError::InvalidApiResponse {
             message: format!("Failed to parse registration response: {}", e),
-            response_body: Some(response_text.clone()),
+            response_body: Some(response_text.to_string()),
         })?;
 
     // Extract full registration data
@@ -1607,12 +1682,22 @@ pub async fn exchange_authorization_code_as(
         })?;
 
     // Parse store authentication cookie
-    let store_authentication_cookie: StoreAuthCookie =
-        serde_json::from_value(require_field(tokens, "store_authentication_cookie")?)
-            .map_err(|e| LibationError::InvalidApiResponse {
+    let store_cookie_value = if auth.expects_store_authentication_cookie() {
+        Some(require_field(tokens, "store_authentication_cookie")?)
+    } else {
+        tokens.get("store_authentication_cookie").cloned()
+    };
+    let store_authentication_cookie: StoreAuthCookie = match store_cookie_value {
+        Some(value) => {
+            serde_json::from_value(value).map_err(|e| LibationError::InvalidApiResponse {
                 message: format!("Failed to parse store_authentication_cookie: {}", e),
                 response_body: Some(tokens.to_string()),
-            })?;
+            })?
+        }
+        None => StoreAuthCookie {
+            cookie: String::new(),
+        },
+    };
 
     // Parse device info
     let device_info: DeviceInfo =
@@ -1671,20 +1756,7 @@ pub async fn refresh_access_token(
     let config = OAuthConfig::default();
     let client_id = format!("device:{}#{}", device_serial, config.device_type);
 
-    let amazon_domain = match locale.country_code.as_str() {
-        "us" => "amazon.com",
-        "uk" => "amazon.co.uk",
-        "de" => "amazon.de",
-        "fr" => "amazon.fr",
-        "ca" => "amazon.ca",
-        "au" => "amazon.com.au",
-        "it" => "amazon.it",
-        "es" => "amazon.es",
-        "in" => "amazon.in",
-        "jp" => "amazon.co.jp",
-        "br" => "amazon.com.br",
-        _ => "amazon.com",
-    };
+    let amazon_domain = locale.amazon_domain();
 
     let token_url = format!("https://api.{}/auth/token", amazon_domain);
 
@@ -1712,8 +1784,20 @@ pub async fn refresh_access_token(
     if !response.status().is_success() {
         let status = response.status();
         let error_body = response.text().await.unwrap_or_default();
+        let message = format!("Token refresh failed (status {}): {}", status, error_body);
+        // An overloaded or failing token endpoint says nothing about the refresh token;
+        // only a 4xx means the stored credential itself was refused (expired, revoked,
+        // device deregistered). Keeping them apart stops a transient outage from being
+        // reported as "sign in again" (see `LibationError::error_code`).
+        if status.as_u16() == 429 || status.is_server_error() {
+            return Err(LibationError::ApiRequestFailed {
+                message,
+                status_code: Some(status.as_u16()),
+                endpoint: Some("/auth/token".to_string()),
+            });
+        }
         return Err(LibationError::AuthenticationFailed {
-            message: format!("Token refresh failed (status {}): {}", status, error_body),
+            message,
             account_id: None,
         });
     }
@@ -2367,6 +2451,69 @@ mod tests {
         assert_eq!(locale.domain, "audible.com.br");
         assert_eq!(locale.name, "Brazil");
         assert!(!locale.with_username);
+    }
+
+    #[test]
+    fn amazon_domain_covers_every_locale() {
+        let domains: Vec<_> = Locale::all().iter().map(|l| l.amazon_domain()).collect();
+        assert_eq!(
+            domains,
+            [
+                "amazon.com",
+                "amazon.co.uk",
+                "amazon.de",
+                "amazon.fr",
+                "amazon.ca",
+                "amazon.com.au",
+                "amazon.it",
+                "amazon.es",
+                "amazon.in",
+                "amazon.co.jp",
+                "amazon.com.br"
+            ]
+        );
+        let unknown = Locale::new("xx".into(), "audible.xx".into(), "X".into(), true);
+        assert_eq!(unknown.amazon_domain(), "amazon.com");
+    }
+
+    /// The browser flow's registration body, unchanged by the move into the shared
+    /// builder (the device-code flow reuses it).
+    #[test]
+    fn authorization_code_registration_body() {
+        let auth = RegistrationAuth::AuthorizationCode {
+            client_id_hex: "6869",
+            authorization_code: "auth-code",
+            code_verifier: "verifier",
+        };
+        let body = registration_request_body("amazon.com.au", "SERIAL", &auth);
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "requested_token_type": [
+                    "bearer", "mac_dms", "website_cookies", "store_authentication_cookie"
+                ],
+                "cookies": {"website_cookies": [], "domain": ".amazon.com.au"},
+                "registration_data": {
+                    "domain": "Device",
+                    "app_version": "4.60",
+                    "device_serial": "SERIAL",
+                    "device_type": "A2CZJZGLK2JJVM",
+                    "device_name": "%FIRST_NAME%%FIRST_NAME_POSSESSIVE_STRING%%DUPE_STRATEGY_1ST%Audible for iPhone",
+                    "os_version": "26.2",
+                    "software_version": "46000856",
+                    "device_model": "iPhone",
+                    "app_name": "Audible"
+                },
+                "auth_data": {
+                    "client_id": "6869",
+                    "authorization_code": "auth-code",
+                    "code_verifier": "verifier",
+                    "code_algorithm": "SHA-256",
+                    "client_domain": "DeviceLegacy"
+                },
+                "requested_extensions": ["device_info", "customer_info"]
+            })
+        );
     }
 
     #[test]

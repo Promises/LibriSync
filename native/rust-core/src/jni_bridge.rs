@@ -140,26 +140,15 @@ fn error_response(error: &str) -> String {
 }
 
 /// Error envelope carrying a stable machine-readable code alongside the message, so the
-/// Kotlin side can act on a failure instead of matching on prose.
+/// Kotlin side can act on a failure instead of matching on prose. The codes come from
+/// [`crate::LibationError::error_code`], shared with the server.
 fn error_response_coded(error: &crate::LibationError) -> String {
     serde_json::json!({
         "success": false,
         "error": error.to_string(),
-        "error_code": error_code(error),
+        "error_code": error.error_code(),
     })
     .to_string()
-}
-
-/// Stable codes for the failures callers need to branch on. Everything else is `null`
-/// and stays a message.
-fn error_code(error: &crate::LibationError) -> Option<&'static str> {
-    match error {
-        // Audible is refusing licences for this customer for a while. Callers must back
-        // off rather than retry, which is what prolongs it.
-        crate::LibationError::LicenseDenied { throttled: true, .. } => Some("license_throttled"),
-        crate::LibationError::LicenseDenied { .. } => Some("license_denied"),
-        _ => None,
-    }
 }
 
 /// Wrap a function call with panic catching

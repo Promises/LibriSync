@@ -106,6 +106,8 @@ export type AccountView = {
   enabled: boolean;
   autoDownloadNew: boolean;
   backfill: boolean;
+  /** A sync is running now. */
+  syncing: boolean;
   lastSync: Timestamp | null;
   nextSync: Timestamp | null;
   lastSyncResult: SyncResult | null;
@@ -360,6 +362,11 @@ export type AbsConfig = {
   pathPrefix?: string;
 };
 
+/** History events plus health changes. ('test' is sent only by the test endpoint.) */
+export type NotificationEvent = HistoryEvent | 'health' | 'healthRestored';
+
+export const NOTIFICATION_EVENTS: readonly NotificationEvent[] = [...HISTORY_EVENTS, 'health', 'healthRestored'];
+
 type NotificationBase = {
   id: number;
   name: string;
@@ -370,8 +377,8 @@ type NotificationBase = {
 // API.md types `config` as an untagged union; the UI narrows it by `kind`, which is
 // the only thing that determines its shape.
 export type Notification =
-  | (NotificationBase & { kind: 'webhook'; events: HistoryEvent[] | null; config: WebhookConfig })
-  | (NotificationBase & { kind: 'apprise'; events: HistoryEvent[] | null; config: AppriseConfig })
+  | (NotificationBase & { kind: 'webhook'; events: NotificationEvent[] | null; config: WebhookConfig })
+  | (NotificationBase & { kind: 'apprise'; events: NotificationEvent[] | null; config: AppriseConfig })
   | (NotificationBase & { kind: 'audiobookshelf'; events: null; config: AbsConfig });
 
 /** What the UI sends when creating; the server assigns `id` and `lastResult`. */

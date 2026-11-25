@@ -5,13 +5,13 @@ import { errorMessage } from '../../api/client';
 import { notificationsApi } from '../../api/endpoints';
 import { keys } from '../../api/queries';
 import {
-  HISTORY_EVENTS,
+  NOTIFICATION_EVENTS,
   SECRET_MASK,
   type AbsConfig,
   type AbsLibrary,
   type AppriseConfig,
-  type HistoryEvent,
   type Notification,
+  type NotificationEvent,
   type NotificationDraft,
   type NotificationKind,
   type NotificationTestResult,
@@ -22,11 +22,11 @@ import { Banner } from '../../components/Feedback';
 import { Checkbox, FieldRow, Fieldset, FormField, Select, Switch, TextInput, Textarea } from '../../components/Form';
 import { Modal } from '../../components/Modal';
 import { toast } from '../../components/Toast';
-import { HISTORY_EVENT } from '../../lib/meta';
+import { NOTIFICATION_EVENT_LABEL } from '../../lib/meta';
 import { KIND_META } from './kinds';
 import styles from './NotificationModal.module.css';
 
-const DEFAULT_EVENTS: HistoryEvent[] = ['download', 'downloadFailed', 'licenceThrottled', 'syncFailed', 'authExpired'];
+const DEFAULT_EVENTS: NotificationEvent[] = ['download', 'downloadFailed', 'licenceThrottled', 'syncFailed', 'authExpired', 'health'];
 
 function blankDraft(kind: NotificationKind): NotificationDraft {
   const base = { name: KIND_META[kind].label, enabled: true };
@@ -183,15 +183,17 @@ export function NotificationModal({
 
         {draft.kind === 'webhook' && <WebhookFields config={draft.config} setConfig={setConfig<WebhookConfig>} errors={errors} />}
         {draft.kind === 'apprise' && <AppriseFields config={draft.config} setConfig={setConfig<AppriseConfig>} errors={errors} />}
-        {draft.kind === 'audiobookshelf' && <AbsFields config={draft.config} setConfig={setConfig<AbsConfig>} errors={errors} />}
+        {draft.kind === 'audiobookshelf' && (
+          <AbsFields config={draft.config} setConfig={setConfig<AbsConfig>} errors={errors} savedId={initial?.id} />
+        )}
 
         {draft.kind !== 'audiobookshelf' && draft.events && (
           <Fieldset legend="Events" description="Which events send a notification.">
             <div className={styles.events}>
-              {HISTORY_EVENTS.map((ev) => (
+              {NOTIFICATION_EVENTS.map((ev) => (
                 <Checkbox
                   key={ev}
-                  label={HISTORY_EVENT[ev].label}
+                  label={NOTIFICATION_EVENT_LABEL[ev]}
                   checked={draft.events?.includes(ev) ?? false}
                   onChange={(e) =>
                     setDraft((d) => {
@@ -349,14 +351,18 @@ function AbsFields({
   config,
   setConfig,
   errors,
+  savedId,
 }: {
   config: AbsConfig;
   setConfig: (p: Partial<AbsConfig>) => void;
   errors: Errors;
+  /** Id of the saved connection, so a masked key can be resolved server-side. */
+  savedId: number | undefined;
 }) {
   const [libraries, setLibraries] = useState<AbsLibrary[] | null>(null);
   const fetchLibraries = useMutation({
-    mutationFn: () => notificationsApi.absLibraries(config.url.trim(), config.apiKey),
+    mutationFn: () =>
+      notificationsApi.absLibraries(config.url.trim(), config.apiKey, config.apiKey === SECRET_MASK ? savedId : undefined),
     meta: { silent: true },
     onSuccess: (libs) => {
       setLibraries(libs);
@@ -364,7 +370,8 @@ function AbsFields({
     },
   });
   const keyIsMasked = config.apiKey === SECRET_MASK;
-  const canFetch = isHttpUrl(config.url) && config.apiKey.trim() !== '' && !keyIsMasked;
+  // A masked key only works for the saved connection it belongs to.
+  const canFetch = isHttpUrl(config.url) && config.apiKey.trim() !== '' && (!keyIsMasked || savedId !== undefined);
   const selected = libraries?.find((l) => l.id === config.libraryId);
 
   return (
@@ -391,7 +398,6 @@ function AbsFields({
         <Button icon={<Library size={16} />} onClick={() => fetchLibraries.mutate()} disabled={!canFetch} loading={fetchLibraries.isPending}>
           Fetch libraries
         </Button>
-        {keyIsMasked && <p className={styles.hint}>Re-enter the API key to fetch the library list.</p>}
       </div>
       {fetchLibraries.isError && (
         <Banner tone="danger" title="Could not reach Audiobookshelf">

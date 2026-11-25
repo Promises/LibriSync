@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { MutationCache, QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/react-query';
-import { BrowserRouter, Navigate, Route, Routes } from 'react-router';
+import { createBrowserRouter, Navigate, Route, RouterProvider, Routes } from 'react-router';
 import { ApiError, errorMessage, onUnauthorized } from './api/client';
 import { keys, useAuthState } from './api/queries';
 import type { AuthState } from './api/types';
@@ -108,17 +108,25 @@ function AuthGate() {
   );
 }
 
+function Root() {
+  return (
+    <ConfirmProvider>
+      <UnauthorizedWatcher />
+      <AuthGate />
+      <ToastViewport />
+    </ConfirmProvider>
+  );
+}
+
+// A data router only so `useBlocker` works (unsaved settings); the routes themselves stay
+// declarative inside AuthGate, which decides between setup, login and the app.
+const router = createBrowserRouter([{ path: '*', element: <Root /> }]);
+
 export function App() {
   const [client] = useState(makeQueryClient);
   return (
     <QueryClientProvider client={client}>
-      <BrowserRouter>
-        <ConfirmProvider>
-          <UnauthorizedWatcher />
-          <AuthGate />
-          <ToastViewport />
-        </ConfirmProvider>
-      </BrowserRouter>
+      <RouterProvider router={router} />
     </QueryClientProvider>
   );
 }

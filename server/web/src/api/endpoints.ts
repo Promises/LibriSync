@@ -151,6 +151,7 @@ export const notificationsApi = {
   remove: (id: number) => request<void>(`/notifications/${seg(id)}`, { method: 'DELETE' }),
   test: (body: NotificationDraft) =>
     request<NotificationTestResult>('/notifications/test', { method: 'POST', body }),
-  absLibraries: (url: string, apiKey: string) =>
-    request<AbsLibrary[]>('/notifications/abs/libraries', { method: 'POST', body: { url, apiKey } }),
+  /** With the `id` of a saved connection, a masked `apiKey` means "use the stored key". */
+  absLibraries: (url: string, apiKey: string, id?: number) =>
+    request<AbsLibrary[]>('/notifications/abs/libraries', { method: 'POST', body: { url, apiKey, id } }),
 };

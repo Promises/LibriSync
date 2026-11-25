@@ -40,18 +40,34 @@ export function PasswordCard() {
     change.mutate();
   };
 
-  const failure = change.error
-    ? isApiError(change.error) && change.error.status === 401
-      ? 'The current password is wrong.'
-      : errorMessage(change.error)
-    : null;
+  // A wrong current password is `400 invalid_input` with field "currentPassword"; it
+  // belongs on that field. Anything else is shown above the form.
+  const wrongCurrent =
+    isApiError(change.error) && change.error.error === 'invalid_input' && change.error.field === 'currentPassword';
+  const failure = change.error && !wrongCurrent ? errorMessage(change.error) : null;
+  const currentError = wrongCurrent
+    ? 'The current password is wrong.'
+    : touched && !current
+      ? 'Enter your current password.'
+      : null;
 
   return (
     <Card id="password" title="Password" description="The password for signing in to this web interface.">
       <form className={styles.stack} onSubmit={submit} noValidate>
         {failure && <Banner tone="danger" title={failure} />}
-        <FormField label="Current password" error={touched && !current ? 'Enter your current password.' : null}>
-          {(p) => <TextInput {...p} type="password" autoComplete="current-password" value={current} onChange={(e) => setCurrent(e.target.value)} />}
+        <FormField label="Current password" error={currentError}>
+          {(p) => (
+            <TextInput
+              {...p}
+              type="password"
+              autoComplete="current-password"
+              value={current}
+              onChange={(e) => {
+                setCurrent(e.target.value);
+                if (wrongCurrent) change.reset();
+              }}
+            />
+          )}
         </FormField>
         <FormField label="New password" error={nextError} hint={`At least ${MIN} characters.`}>
           {(p) => <TextInput {...p} type="password" autoComplete="new-password" value={next} onChange={(e) => setNext(e.target.value)} />}

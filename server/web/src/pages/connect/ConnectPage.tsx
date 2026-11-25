@@ -13,7 +13,7 @@ import { Switch } from '../../components/Form';
 import { PageHeader } from '../../components/Navigation';
 import { toast } from '../../components/Toast';
 import { formatDateTime, formatRelative } from '../../lib/format';
-import { HISTORY_EVENT } from '../../lib/meta';
+import { NOTIFICATION_EVENT_LABEL } from '../../lib/meta';
 import { KIND_META, KindPicker } from './kinds';
 import { NotificationModal } from './NotificationModal';
 import styles from './ConnectPage.module.css';
@@ -24,7 +24,7 @@ function eventsSummary(n: Notification): string {
   if (n.kind === 'audiobookshelf') return 'Scans the library after each download';
   if (!n.events || n.events.length === 0) return 'No events selected';
   if (n.events.length > 3) return `${n.events.length} events`;
-  return n.events.map((e) => HISTORY_EVENT[e].label).join(', ');
+  return n.events.map((e) => NOTIFICATION_EVENT_LABEL[e]).join(', ');
 }
 
 export function ConnectPage() {

@@ -19,7 +19,7 @@ import {
   XCircle,
   type LucideProps,
 } from 'lucide-react';
-import type { BookStatus, HistoryEvent, QueuePriority, QueueStage, QueueState } from '../api/types';
+import type { BookStatus, HistoryEvent, NotificationEvent, QueuePriority, QueueStage, QueueState } from '../api/types';
 import type { Tone } from '../components/Badge';
 
 type Meta = { label: string; tone: Tone; Icon: ComponentType<LucideProps> };
@@ -74,4 +74,11 @@ export const HISTORY_EVENT: Record<HistoryEvent, Meta> = {
   accountAdded: { label: 'Account added', tone: 'info', Icon: UserPlus },
   accountRemoved: { label: 'Account removed', tone: 'neutral', Icon: UserMinus },
   authExpired: { label: 'Sign-in expired', tone: 'warning', Icon: KeyRound },
+};
+
+/** Labels for the notification event checkboxes: every history event plus health changes. */
+export const NOTIFICATION_EVENT_LABEL: Record<NotificationEvent, string> = {
+  ...(Object.fromEntries(Object.entries(HISTORY_EVENT).map(([k, v]) => [k, v.label])) as Record<HistoryEvent, string>),
+  health: 'Health issue',
+  healthRestored: 'Health restored',
 };

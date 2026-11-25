@@ -5,12 +5,13 @@ import { Button } from '../../components/Button';
 import { EmptyState, ErrorState, SkeletonRows } from '../../components/Feedback';
 import { PageHeader } from '../../components/Navigation';
 import { AccountCard } from './AccountCard';
-import { AddAccountDialog } from './AddAccountDialog';
+import { AddAccountDialog, type ReauthTarget } from './AddAccountDialog';
 import styles from './AccountsPage.module.css';
 
 export function AccountsPage() {
   const accounts = useAccounts();
   const [adding, setAdding] = useState(false);
+  const [reauth, setReauth] = useState<ReauthTarget | null>(null);
 
   const addButton = (
     <Button variant="primary" icon={<Plus size={16} />} onClick={() => setAdding(true)}>
@@ -37,11 +38,27 @@ export function AccountsPage() {
       ) : (
         <div className={styles.grid}>
           {accounts.data.map((a) => (
-            <AccountCard key={a.id} account={a} />
+            <AccountCard
+              key={a.id}
+              account={a}
+              onReauth={(acc) => {
+                setReauth({ provider: acc.provider, locale: acc.locale, name: acc.name });
+                setAdding(true);
+              }}
+            />
           ))}
         </div>
       )}
-      <AddAccountDialog open={adding} onClose={() => setAdding(false)} />
+      <AddAccountDialog
+        // A fresh dialog per target, so a re-auth never inherits the last flow's state.
+        key={reauth ? `${reauth.provider}:${reauth.name}` : 'new'}
+        open={adding}
+        reauth={reauth}
+        onClose={() => {
+          setAdding(false);
+          setReauth(null);
+        }}
+      />
     </>
   );
 }

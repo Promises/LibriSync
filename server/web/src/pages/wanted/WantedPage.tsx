@@ -25,8 +25,8 @@ function BackfillEstimate({ data }: { data: WantedResponse }) {
         title="Back-fill is off"
         action={<Link to="/settings#backfill">Back-fill settings</Link>}
       >
-        These books will only be downloaded when you pick them. Turn back-fill on to fetch them slowly in the
-        background.
+        These books are only downloaded when you pick them. To fetch the whole backlog, turn back-fill on: it works
+        through the library in the background at a pace Audible tolerates.
       </Banner>
     );
   }
@@ -88,14 +88,10 @@ export function WantedPage() {
             : 'Books you own but have not downloaded yet.'
         }
         actions={
-          items.length > 0 && (
-            <Button
-              variant="primary"
-              icon={<Download size={16} />}
-              loading={bulk.isPending}
-              onClick={() => void bulk.run(selected.size ? [...selected] : items.map((b) => b.id))}
-            >
-              {selected.size ? `Download ${formatNumber(selected.size)} selected` : 'Download this page'}
+          // Picking is for books wanted soon; the backlog as a whole is back-fill's job.
+          selected.size > 0 && (
+            <Button variant="primary" icon={<Download size={16} />} loading={bulk.isPending} onClick={() => void bulk.run([...selected])}>
+              Download {formatNumber(selected.size)} selected
             </Button>
           )
         }

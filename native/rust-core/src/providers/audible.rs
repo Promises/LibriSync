@@ -14,9 +14,17 @@ use crate::storage::Database;
 use crate::{LibationError, Result};
 
 use super::{
-    CredentialBlob, DownloadPart, DownloadPlan, LoginInput, PlanChapter, PlanOptions, Provider,
-    ProviderId,
+    CredentialBlob, DownloadPart, DownloadPlan, Headers, LoginInput, PlanChapter, PlanOptions,
+    Provider, ProviderId,
 };
+
+/// Headers for fetching an Audible download (AAXC, AAX or plain MP3) from its CDN.
+fn download_headers() -> Headers {
+    Headers::from([(
+        "User-Agent".to_string(),
+        crate::client_profiles::current().audible_download_user_agent,
+    )])
+}
 
 /// Audible provider. Stateless — it rebuilds an [`AudibleClient`] from the stored
 /// credential blob per call, exactly as the current JNI entry points do.
@@ -135,6 +143,10 @@ impl Provider for AudibleProvider {
             .to_ascii_lowercase();
         let filename = format!("{item_ref}.{ext}");
 
+        // Audible's CDN gets the same User-Agent the Android download path sends
+        // (jni_bridge.rs nativeDownloadBook / nativeGetDownloadLicense).
+        let headers = download_headers();
+
         // Only encrypted (AAXC) downloads become one big M4B that the engine may
         // need to split; a plain MP3 asset (podcast episode) is already one file.
         let chapters = if license.drm_type.is_encrypted() {
@@ -157,7 +169,7 @@ impl Provider for AudibleProvider {
                 return Ok(DownloadPlan {
                     parts: vec![DownloadPart::Aax {
                         url: license.download_url,
-                        headers: Default::default(),
+                        headers: headers.clone(),
                         activation_bytes: hex::encode(&kd.key_part_1),
                         filename: format!("{item_ref}.aax"),
                     }],
@@ -176,7 +188,7 @@ impl Provider for AudibleProvider {
             })?;
             DownloadPart::Aaxc {
                 url: license.download_url,
-                headers: Default::default(),
+                headers: headers.clone(),
                 key: hex::encode(&kd.key_part_1),
                 iv: hex::encode(iv),
                 filename,
@@ -184,7 +196,7 @@ impl Provider for AudibleProvider {
         } else {
             DownloadPart::Plain {
                 url: license.download_url,
-                headers: Default::default(),
+                headers: headers.clone(),
                 filename,
             }
         };
@@ -195,5 +207,20 @@ impl Provider for AudibleProvider {
             chapters,
             join_parts: false,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn download_parts_carry_the_audible_download_user_agent() {
+        let headers = download_headers();
+        assert_eq!(headers.len(), 1);
+        assert_eq!(
+            headers.get("User-Agent"),
+            Some(&crate::client_profiles::current().audible_download_user_agent)
+        );
     }
 }

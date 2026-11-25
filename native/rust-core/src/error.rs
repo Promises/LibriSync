@@ -428,6 +428,14 @@ impl From<std::num::ParseFloatError> for LibationError {
 
 // Helper methods for creating common errors
 impl LibationError {
+    /// Stable, machine-readable code for this error, for callers that branch on the
+    /// kind of failure (the server's queue, the bridges' JSON envelopes).
+    /// `license_throttled` = Audible `CustomerThrottled`; `license_denied` = any other
+    /// licence refusal; `auth_expired` = the stored credential can no longer be used.
+    pub fn error_code(&self) -> &'static str {
+        todo!("core: LibationError::error_code")
+    }
+
     /// Create a RecordNotFound error with a resource name
     pub fn not_found<S: Into<String>>(resource: S) -> Self {
         LibationError::RecordNotFound(resource.into())

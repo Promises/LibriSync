@@ -13,6 +13,8 @@ audiobook you have bought on **Audible**, **Libro.fm** and **Chirp**.
 
 It shares its Rust core with the [LibriSync](../README.md) Android app.
 
+![LibriSync Server library view](docs/library.png)
+
 ## Quick start
 
 No prebuilt image is published; you build it from this repository. Docker builds for

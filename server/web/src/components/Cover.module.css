@@ -1,0 +1,31 @@
+.cover {
+  display: block;
+  aspect-ratio: 1;
+  object-fit: cover;
+  background: var(--color-surface-sunken);
+}
+
+.fill {
+  width: 100%;
+}
+
+.thumb {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-sm);
+}
+
+.large {
+  width: 100%;
+  max-width: 220px;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+}
+
+.placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-subtle);
+  background: linear-gradient(135deg, var(--color-surface-sunken), var(--color-neutral-bg));
+}

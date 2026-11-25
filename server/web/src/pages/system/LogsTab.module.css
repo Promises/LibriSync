@@ -1,0 +1,102 @@
+.wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+}
+
+.select {
+  width: auto;
+}
+
+.viewport {
+  max-height: calc(100dvh - 280px);
+  min-height: 240px;
+  overflow: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-sunken);
+}
+
+.table {
+  width: 100%;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
+
+.table td {
+  padding: 2px var(--space-2);
+  vertical-align: top;
+}
+
+.table tr:hover {
+  background: var(--color-hover);
+}
+
+.time,
+.target {
+  color: var(--color-text-subtle);
+  white-space: nowrap;
+}
+
+.level {
+  font-weight: var(--weight-bold);
+  white-space: nowrap;
+}
+
+.message {
+  width: 100%;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.trace .level,
+.debug .level {
+  color: var(--color-text-subtle);
+}
+
+.info .level {
+  color: var(--color-info-fg);
+}
+
+.warn .level {
+  color: var(--color-warning-fg);
+}
+
+.error .level {
+  color: var(--color-danger-fg);
+}
+
+.error {
+  background: var(--color-danger-bg);
+}
+
+/* On a phone each line becomes "time LEVEL" over a full-width message. */
+@media (max-width: 700px) {
+  .table,
+  .table tbody {
+    display: block;
+  }
+
+  .table tr {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    padding: var(--space-1) 0;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .target {
+    display: none;
+  }
+
+  .message {
+    grid-column: 1 / -1;
+  }
+}

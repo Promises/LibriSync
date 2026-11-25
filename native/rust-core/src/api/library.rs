@@ -1072,7 +1072,7 @@ impl AudibleClient {
     ///
     /// # Returns
     /// Tuple of (new_count, updated_count, errors)
-    async fn import_items_to_db(
+    pub async fn import_items_to_db(
         &self,
         db: &Database,
         items: &[LibraryItem],
@@ -2125,9 +2125,13 @@ impl AudibleClient {
 
     /// Mark books absent from last scan
     ///
+    /// `items` must be the account's **complete** library: every book of the account not
+    /// in it is flagged. Never call it after a sync that skipped or lost a page — that is
+    /// why the page-by-page path doesn't.
+    ///
     /// # Reference
     /// Based on `LibraryBookImporter.upsertLibraryBooks()` - DtoImporterService/LibraryBookImporter.cs:89-94
-    async fn mark_absent_books(
+    pub async fn mark_absent_books(
         &self,
         db: &Database,
         items: &[LibraryItem],

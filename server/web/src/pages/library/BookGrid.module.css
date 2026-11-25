@@ -1,0 +1,157 @@
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: var(--space-4) var(--space-3);
+}
+
+.card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.poster {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+  transition:
+    box-shadow var(--duration-fast),
+    outline-color var(--duration-fast);
+}
+
+.card:hover .poster {
+  box-shadow: var(--shadow-md);
+}
+
+.selected .poster {
+  outline-color: var(--color-accent);
+}
+
+.check {
+  position: absolute;
+  top: var(--space-2);
+  left: var(--space-2);
+  display: flex;
+  padding: 6px;
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-sm);
+  opacity: 0;
+  cursor: pointer;
+  transition: opacity var(--duration-fast);
+}
+
+.check input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--color-accent);
+  cursor: pointer;
+}
+
+/* The checkbox appears on hover/focus, and stays once anything is selected. */
+.card:hover .check,
+.check:focus-within,
+.selecting .check,
+.selected .check {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .check {
+    opacity: 1;
+  }
+}
+
+.provider {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-2);
+  display: flex;
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+}
+
+.status {
+  position: absolute;
+  bottom: var(--space-2);
+  left: var(--space-2);
+  max-width: calc(100% - var(--space-3));
+  display: flex;
+  border-radius: var(--radius-pill);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.progress {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  padding: 0 2px 2px;
+}
+
+.text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  text-align: left;
+}
+
+.text:hover .title {
+  color: var(--color-link);
+}
+
+.title {
+  display: -webkit-box;
+  overflow: hidden;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-tight);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+
+.author,
+.series {
+  overflow: hidden;
+  font-size: var(--text-xs);
+  color: var(--color-text-subtle);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.series {
+  font-style: italic;
+}
+
+/* The whole poster is the hit area for opening the book. */
+.text::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+}
+
+.check,
+.provider,
+.status {
+  z-index: 1;
+}
+
+@media (max-width: 480px) {
+  .grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-3) var(--space-2);
+  }
+}

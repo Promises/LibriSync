@@ -1,0 +1,37 @@
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.select {
+  width: auto;
+  max-width: 260px;
+}
+
+.iconCol {
+  width: 40px;
+  vertical-align: top;
+}
+
+.eventLine {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 var(--space-2);
+}
+
+.eventLabel {
+  font-weight: var(--weight-semibold);
+}
+
+.message {
+  margin-top: 2px;
+  color: var(--color-text-subtle);
+  overflow-wrap: anywhere;
+}
+
+.when {
+  color: var(--color-text-subtle);
+  white-space: nowrap;
+}

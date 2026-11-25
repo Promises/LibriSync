@@ -1,0 +1,89 @@
+.shell {
+  display: grid;
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+  min-height: 100dvh;
+}
+
+.main {
+  min-width: 0;
+  width: 100%;
+  max-width: var(--content-max);
+  padding: var(--space-4) var(--space-5) var(--space-6);
+}
+
+.main:focus {
+  outline: none;
+}
+
+.healthBanner {
+  margin-bottom: var(--space-4);
+}
+
+.skip {
+  position: absolute;
+  top: var(--space-2);
+  left: var(--space-2);
+  z-index: 300;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--color-accent);
+  color: var(--color-text-on-accent);
+  transform: translateY(-200%);
+}
+
+.skip:focus {
+  transform: none;
+}
+
+.mobileBar {
+  display: none;
+}
+
+.scrim {
+  display: none;
+}
+
+@media (max-width: 900px) {
+  .shell {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: var(--header-height) 1fr;
+  }
+
+  .mobileBar {
+    position: sticky;
+    top: 0;
+    z-index: 90;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    height: var(--header-height);
+    padding: 0 var(--space-2);
+    background: var(--color-sidebar);
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .mobileBrand {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    color: var(--color-text);
+    font-weight: var(--weight-semibold);
+    text-decoration: none;
+  }
+
+  .mobileBrand img {
+    border-radius: var(--radius-sm);
+  }
+
+  .scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 190;
+    display: block;
+    background: var(--color-overlay);
+  }
+
+  .main {
+    padding: var(--space-3) var(--space-3) var(--space-6);
+  }
+}

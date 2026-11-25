@@ -148,6 +148,11 @@ pub struct DownloadPlan {
     /// joined file's markers. Every part must then be [`DownloadPart::Plain`].
     #[serde(default)]
     pub join_parts: bool,
+    /// Audible refused the AAXC licence as CustomerThrottled and this plan came from the
+    /// legacy AAX fallback; callers that pace licence requests must treat the account as
+    /// throttled even though this plan is usable.
+    #[serde(default)]
+    pub licence_throttled: bool,
 }
 
 /// The behaviour every audiobook provider implements. Not object-safe (async

@@ -1,0 +1,122 @@
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+}
+
+.head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+
+.titles {
+  flex: 1;
+  min-width: 0;
+}
+
+.title {
+  color: var(--color-text);
+  font-weight: var(--weight-semibold);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.title:hover {
+  color: var(--color-link);
+  text-decoration: underline;
+}
+
+.sub {
+  font-size: var(--text-sm);
+  color: var(--color-text-subtle);
+}
+
+.badges {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-1);
+}
+
+.progress {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.waiting {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--color-warning-bg);
+  color: var(--color-warning-fg);
+  font-size: var(--text-sm);
+}
+
+.waiting svg {
+  flex-shrink: 0;
+}
+
+.error {
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--color-danger-bg);
+  color: var(--color-danger-fg);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.meta {
+  margin-right: auto;
+  font-size: var(--text-xs);
+  color: var(--color-text-subtle);
+}
+
+.priority {
+  width: auto;
+  min-height: 28px;
+  padding-top: 2px;
+  padding-bottom: 2px;
+  font-size: var(--text-xs);
+}
+
+@media (max-width: 600px) {
+  .head {
+    flex-wrap: wrap;
+  }
+
+  .badges {
+    justify-content: flex-start;
+    width: 100%;
+  }
+}

@@ -37,6 +37,7 @@ pub mod storage;
 pub mod file;
 pub mod providers;
 pub mod client_profiles;
+pub mod pipeline;
 
 // Re-export commonly used types for convenience
 pub use error::{LibationError, Result};

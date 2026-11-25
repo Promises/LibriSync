@@ -428,6 +428,79 @@ impl From<std::num::ParseFloatError> for LibationError {
 
 // Helper methods for creating common errors
 impl LibationError {
+    /// Stable, machine-readable code for this error, for callers that branch on the
+    /// kind of failure (the server's queue, the bridges' JSON envelopes).
+    /// `license_throttled` = Audible `CustomerThrottled`; `license_denied` = any other
+    /// licence refusal; `auth_expired` = the stored credential can no longer be used.
+    ///
+    /// The full set:
+    ///
+    /// | code | meaning |
+    /// |---|---|
+    /// | `license_throttled` | Audible `CustomerThrottled`: back off the account, don't retry |
+    /// | `license_denied` | any other licence refusal |
+    /// | `auth_expired` | the store refused the credential (refresh token rejected, device deregistered, session expired) — sign in again. From a *sign-in* call it means the sign-in itself was refused. |
+    /// | `network` | transient: transport failure, timeout, interrupted download, HTTP 429 or 5xx |
+    /// | `not_found` | the account, record, file or remote resource (HTTP 404) does not exist |
+    /// | `invalid_input` | the caller passed something malformed (bad JSON, path, URL, locale) |
+    /// | `cancelled` | the operation was cancelled |
+    /// | `internal` | everything else |
+    ///
+    /// The licence codes are what the Android bridge has always emitted (Kotlin's
+    /// `DownloadOrchestrator` matches on `license_throttled`); the bridges serialise this.
+    pub fn error_code(&self) -> &'static str {
+        use LibationError::*;
+        match self {
+            // Audible is refusing licences for this customer for a while. Callers must
+            // back off rather than retry, which is what prolongs it.
+            LicenseDenied { throttled: true, .. } => "license_throttled",
+            LicenseDenied { .. } => "license_denied",
+
+            AuthenticationFailed { .. } | TokenExpired => "auth_expired",
+
+            NetworkError { .. }
+            | Timeout(_)
+            | DownloadInterrupted
+            | RateLimitExceeded { .. } => "network",
+            ApiRequestFailed { status_code: Some(status), .. }
+            | UnexpectedStatusCode { status_code: status, .. } => match status {
+                404 => "not_found",
+                429 | 500..=599 => "network",
+                _ => "internal",
+            },
+            ReqwestError(e) => {
+                if e.is_timeout() || e.is_connect() || e.is_request() || e.is_body() {
+                    "network"
+                } else {
+                    match e.status().map(|s| s.as_u16()) {
+                        Some(404) => "not_found",
+                        Some(429 | 500..=599) => "network",
+                        _ => "internal",
+                    }
+                }
+            }
+
+            AccountNotFound(_)
+            | RecordNotFound(_)
+            | FileNotFound(_)
+            | DownloadDirectoryNotFound(_)
+            | RequiredFileNotFound(_) => "not_found",
+
+            InvalidInput(_)
+            | InvalidData(_)
+            | MissingRequiredField(_)
+            | InvalidPath(_)
+            | InvalidDownloadUrl(_)
+            | InvalidActivationBytes(_)
+            | UnknownApiDomain(_)
+            | UnsupportedExportFormat(_) => "invalid_input",
+
+            Cancelled => "cancelled",
+
+            _ => "internal",
+        }
+    }
+
     /// Create a RecordNotFound error with a resource name
     pub fn not_found<S: Into<String>>(resource: S) -> Self {
         LibationError::RecordNotFound(resource.into())
@@ -801,3 +874,103 @@ impl LibationError {
 // - Structured errors with context fields instead of exception properties
 // - Explicit error categorization (retryable, auth, file, crypto)
 // - User-friendly messages via method instead of exception messages
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn licence_codes_match_what_the_android_bridge_emitted() {
+        let throttled = LibationError::LicenseDenied {
+            reason: "CustomerThrottled".into(),
+            throttled: true,
+        };
+        let denied = LibationError::LicenseDenied {
+            reason: "NotOwned".into(),
+            throttled: false,
+        };
+        assert_eq!(throttled.error_code(), "license_throttled");
+        assert_eq!(denied.error_code(), "license_denied");
+    }
+
+    #[test]
+    fn unusable_credentials_are_auth_expired() {
+        assert_eq!(
+            LibationError::auth_failed("refresh refused", None).error_code(),
+            "auth_expired"
+        );
+        assert_eq!(LibationError::TokenExpired.error_code(), "auth_expired");
+    }
+
+    #[test]
+    fn transient_failures_are_network() {
+        assert_eq!(LibationError::network_error("reset", true).error_code(), "network");
+        assert_eq!(LibationError::network_error("dns", false).error_code(), "network");
+        assert_eq!(LibationError::Timeout(30).error_code(), "network");
+        assert_eq!(LibationError::DownloadInterrupted.error_code(), "network");
+        assert_eq!(
+            LibationError::RateLimitExceeded {
+                retry_after_seconds: 5,
+                endpoint: "/x".into()
+            }
+            .error_code(),
+            "network"
+        );
+        assert_eq!(
+            LibationError::api_failed("busy", Some(503), None).error_code(),
+            "network"
+        );
+        assert_eq!(
+            LibationError::UnexpectedStatusCode {
+                status_code: 502,
+                host: "cdn".into()
+            }
+            .error_code(),
+            "network"
+        );
+    }
+
+    #[test]
+    fn missing_things_are_not_found() {
+        assert_eq!(LibationError::AccountNotFound("a".into()).error_code(), "not_found");
+        assert_eq!(LibationError::not_found("book").error_code(), "not_found");
+        assert_eq!(LibationError::FileNotFound("f".into()).error_code(), "not_found");
+        assert_eq!(
+            LibationError::api_failed("gone", Some(404), None).error_code(),
+            "not_found"
+        );
+    }
+
+    #[test]
+    fn bad_caller_input_is_invalid_input() {
+        assert_eq!(LibationError::invalid_input("bad json").error_code(), "invalid_input");
+        assert_eq!(LibationError::InvalidPath("..".into()).error_code(), "invalid_input");
+        assert_eq!(
+            LibationError::MissingRequiredField("asin".into()).error_code(),
+            "invalid_input"
+        );
+    }
+
+    #[test]
+    fn everything_else_is_internal_or_cancelled() {
+        assert_eq!(LibationError::Cancelled.error_code(), "cancelled");
+        assert_eq!(LibationError::internal("bug").error_code(), "internal");
+        assert_eq!(LibationError::FfmpegError("x".into()).error_code(), "internal");
+        assert_eq!(
+            LibationError::api_failed("teapot", Some(418), None).error_code(),
+            "internal"
+        );
+        assert_eq!(
+            LibationError::api_failed("no status", None, None).error_code(),
+            "internal"
+        );
+        assert_eq!(
+            LibationError::InvalidApiResponse {
+                message: "x".into(),
+                response_body: None
+            }
+            .error_code(),
+            "internal"
+        );
+    }
+}

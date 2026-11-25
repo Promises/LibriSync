@@ -1,0 +1,19 @@
+# Example deployment. Copy to docker-compose.yml and adjust the paths.
+#
+# /config holds the database with your store credentials — treat it as a secret and
+# back it up. /audiobooks is where finished books land; point Audiobookshelf's library
+# at the same folder.
+services:
+  librisync:
+    image: ghcr.io/promises/librisync-server:latest
+    container_name: librisync
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+    volumes:
+      - ./config:/config
+      - /path/to/audiobooks:/audiobooks
+    ports:
+      - "8383:8383"
+    restart: unless-stopped

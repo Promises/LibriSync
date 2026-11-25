@@ -1,0 +1,10 @@
+# Build context is the repository root; only the server and the Rust core are needed.
+*
+!native/rust-core/
+!server/
+native/rust-core/target/
+native/rust-core/target-*/
+server/target/
+server/web/node_modules/
+server/web/dist/
+**/.DS_Store

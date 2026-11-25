@@ -398,6 +398,7 @@ export const SECRET_MASK = '********';
 
 export type ApiErrorCode =
   | 'unauthorized'
+  | 'forbidden'
   | 'not_found'
   | 'invalid_input'
   | 'conflict'

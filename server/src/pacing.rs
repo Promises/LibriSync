@@ -1,11 +1,14 @@
 //! Audible licence pacing (DESIGN.md "Audible licence pacing"), as pure functions.
 //!
-//! Nothing here touches the database or the clock: callers pass `now` and the
-//! account's recorded state, which keeps every rule unit-testable.
+//! Nothing here touches the database or the clock: callers pass `now` and the state
+//! recorded for the account's pacing key, which keeps every rule unit-testable. The
+//! pacing key is the Amazon customer for Audible (`accounts::pacing_key_for`): one
+//! customer signed in for two marketplaces shares one cooldown, cap and spacing.
 //!
 //! | Rule | Applies to |
 //! |---|---|
 //! | Account cooldown after `license_throttled`: base (24 h) doubling per consecutive throttle, capped at 7 days | every priority; manual only with `force` |
+//! | "Audible unavailable" hold (30 min) after a licence request hit a 5xx or network error | every priority; manual only with `force` |
 //! | One licence request in flight per account (so the first after a cooldown is a single probe) | every priority |
 //! | Rolling 24 h cap counting every request | every priority; manual only with `force` |
 //! | Random spacing between requests | back-fill only |
@@ -21,6 +24,9 @@ pub const MAX_COOLDOWN: Duration = Duration::days(7);
 pub const TITLE_BACKOFF_BASE: Duration = Duration::days(1);
 pub const MAX_TITLE_BACKOFF: Duration = Duration::days(30);
 pub const CAP_WINDOW: Duration = Duration::hours(24);
+/// How long a customer's licence requests stop after Audible answered one with a server
+/// or network error.
+pub const UNAVAILABLE_HOLD: Duration = Duration::minutes(30);
 
 /// The pacing settings that matter for one decision.
 #[derive(Debug, Clone)]
@@ -38,6 +44,8 @@ pub struct AccountPacing {
     pub cooldown_level: u32,
     /// Earliest next back-fill request (spacing).
     pub next_licence_at: Option<DateTime<Utc>>,
+    /// "Audible unavailable" hold after a licence request hit a server or network error.
+    pub hold_until: Option<DateTime<Utc>>,
     /// Request times within the last [`CAP_WINDOW`] (any order).
     pub recent_requests: Vec<DateTime<Utc>>,
     /// A licence request for this account is running right now.
@@ -56,6 +64,7 @@ pub enum WaitReason {
     InFlight { probing: bool },
     Budget(DateTime<Utc>),
     Spacing(DateTime<Utc>),
+    Unavailable(DateTime<Utc>),
 }
 
 impl WaitReason {
@@ -72,6 +81,7 @@ impl WaitReason {
             }
             WaitReason::Budget(t) => format!("Licence budget: next slot {}", local_label(*t)),
             WaitReason::Spacing(t) => format!("Licence spacing: next request {}", local_label(*t)),
+            WaitReason::Unavailable(t) => format!("Audible unavailable, retrying at {}", local_label(*t)),
         }
     }
 }
@@ -89,6 +99,11 @@ pub fn licence_gate(
     if let Some(until) = acct.cooldown_until.filter(|u| *u > now) {
         if !forced {
             return Gate::Wait { until: Some(until), reason: WaitReason::Cooldown(until) };
+        }
+    }
+    if let Some(until) = acct.hold_until.filter(|u| *u > now) {
+        if !forced {
+            return Gate::Wait { until: Some(until), reason: WaitReason::Unavailable(until) };
         }
     }
     if acct.in_flight {
@@ -306,6 +321,22 @@ mod tests {
             );
         }
         assert_eq!(licence_gate(&cfg(), &acct, Priority::Manual, true, now), Gate::Go);
+    }
+
+    #[test]
+    fn an_unavailable_hold_blocks_everything_but_forced_manual() {
+        let now = t(12, 0);
+        let until = now + UNAVAILABLE_HOLD;
+        let acct = AccountPacing { hold_until: Some(until), ..Default::default() };
+        for (p, force) in [(Priority::Backfill, false), (Priority::New, false), (Priority::Manual, false)] {
+            assert_eq!(
+                licence_gate(&cfg(), &acct, p, force, now),
+                Gate::Wait { until: Some(until), reason: WaitReason::Unavailable(until) }
+            );
+        }
+        assert_eq!(licence_gate(&cfg(), &acct, Priority::Manual, true, now), Gate::Go);
+        assert_eq!(licence_gate(&cfg(), &acct, Priority::Backfill, false, until), Gate::Go, "over once it passes");
+        assert!(WaitReason::Unavailable(until).describe().starts_with("Audible unavailable, retrying at"));
     }
 
     #[test]

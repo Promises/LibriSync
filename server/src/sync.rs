@@ -22,11 +22,16 @@ use rust_core::api::library::SyncStats;
 use rust_core::providers::AnyProvider;
 use rust_core::LibationError;
 
-use crate::accounts;
+use crate::accounts::{self, CredentialError};
 use crate::history::{self, NewEvent};
 use crate::queue::{self, EnqueueError, Priority};
 use crate::state::{App, AppState};
 use crate::time;
+
+/// The most books one sync queues as new purchases (see `enqueue_new_books`).
+pub const MAX_NEW_PER_SYNC: usize = 10;
+/// Successful but incomplete syncs after which the baseline is set anyway (see `finish`).
+pub const BASELINE_ATTEMPTS: i64 = 3;
 
 #[derive(Debug, Clone)]
 pub struct PagePolicy {
@@ -74,6 +79,13 @@ pub struct PagedOutcome {
 impl PagedOutcome {
     pub fn ok(&self) -> bool {
         self.fatal.is_none() && self.stopped.is_none()
+    }
+
+    /// Every page was read and every item in it understood. Only such a sync may
+    /// establish the baseline: a book on a skipped page, or one that couldn't be read,
+    /// would otherwise show up on the next sync as a "new purchase".
+    pub fn complete(&self) -> bool {
+        self.ok() && self.pages_skipped.is_empty() && self.items_failed == 0
     }
 
     /// A one-line summary for `lastSyncResult.message`; `None` for a clean sync.
@@ -260,10 +272,14 @@ async fn sync_locked(app: &AppState, id: &str) -> anyhow::Result<()> {
             let app = app.clone();
             let id = id.to_string();
             async move {
-                let creds = accounts::load_json(&app, &id)
-                    .await
-                    .map_err(|e| PageError::Retryable(e.to_string()))?
-                    .ok_or_else(|| PageError::Fatal("The account was removed during the sync".into()))?;
+                // Refresh an expiring token under the account's lock, so a download
+                // planning at the same moment doesn't refresh it a second time.
+                let creds = match accounts::fresh_credentials(&app, &id).await {
+                    Ok(Some(creds)) => creds,
+                    Ok(None) => return Err(PageError::Fatal("The account was removed during the sync".into())),
+                    Err(CredentialError::Refresh(e)) if is_auth_error(&e) => return Err(PageError::Fatal(e.to_string())),
+                    Err(e) => return Err(PageError::Retryable(e.to_string())),
+                };
                 let p = AnyProvider::get(provider).map_err(|e| PageError::Fatal(e.to_string()))?;
                 p.as_provider()
                     .sync_library_page(&app.core, &creds, page)
@@ -284,7 +300,7 @@ async fn sync_locked(app: &AppState, id: &str) -> anyhow::Result<()> {
     finish(app, id, provider.as_str(), &started_core, &outcome).await
 }
 
-async fn finish(app: &AppState, id: &str, provider: &str, started_core: &str, outcome: &PagedOutcome) -> anyhow::Result<()> {
+pub(crate) async fn finish(app: &AppState, id: &str, provider: &str, started_core: &str, outcome: &PagedOutcome) -> anyhow::Result<()> {
     let now = time::now();
     let settings = app.settings();
     let next = next_sync_at(&mut rand::thread_rng(), now, settings.sync.interval_hours);
@@ -336,18 +352,40 @@ async fn finish(app: &AppState, id: &str, provider: &str, started_core: &str, ou
         rust_core::storage::accounts::update_last_sync(app.core.pool(), id).await?;
     }
 
-    let baseline: Option<String> = sqlx::query_scalar("SELECT baseline_at FROM account_state WHERE account_id = ?")
-        .bind(id)
-        .fetch_optional(&app.db)
-        .await?
-        .flatten();
+    let (baseline, attempts): (Option<String>, i64) =
+        sqlx::query_as("SELECT baseline_at, baseline_attempts FROM account_state WHERE account_id = ?")
+            .bind(id)
+            .fetch_optional(&app.db)
+            .await?
+            .unwrap_or((None, 0));
 
+    // Until a complete sync (no skipped pages, no unreadable items) has established the
+    // baseline, everything found is "existing library" (back-fill), never "new". A
+    // library with a page or item that fails every time would never get one, and with
+    // no baseline nothing downloads at all; so after BASELINE_ATTEMPTS successful but
+    // incomplete syncs the baseline is set anyway (books that turn up later are still
+    // capped by MAX_NEW_PER_SYNC).
+    let establishes_baseline = baseline.is_none()
+        && (outcome.complete() || (ok && attempts + 1 >= BASELINE_ATTEMPTS));
     if baseline.is_none() {
-        // Until a complete sync has established the baseline, everything found is
-        // "existing library" (back-fill), never "new".
-        if ok {
-            sqlx::query("UPDATE account_state SET baseline_at = ? WHERE account_id = ?")
+        if establishes_baseline {
+            sqlx::query("UPDATE account_state SET baseline_at = ?, baseline_attempts = baseline_attempts + 1 WHERE account_id = ?")
                 .bind(time::fmt(now))
+                .bind(id)
+                .execute(&app.db)
+                .await?;
+            if !outcome.complete() {
+                let note = format!(
+                    "Library baseline set although {} sync(s) in a row were incomplete ({}); books that \
+                     appear later are treated as new purchases",
+                    attempts + 1,
+                    message.as_deref().unwrap_or("incomplete")
+                );
+                tracing::warn!("Account {id}: {note}");
+                history::record(app, NewEvent::new("syncCompleted", note).account(id)).await;
+            }
+        } else if ok {
+            sqlx::query("UPDATE account_state SET baseline_attempts = baseline_attempts + 1 WHERE account_id = ?")
                 .bind(id)
                 .execute(&app.db)
                 .await?;
@@ -366,7 +404,7 @@ async fn finish(app: &AppState, id: &str, provider: &str, started_core: &str, ou
     let data = serde_json::json!({
         "added": outcome.added, "updated": outcome.updated, "items": outcome.items,
         "itemsFailed": outcome.items_failed, "pagesSkipped": outcome.pages_skipped.len(),
-        "baseline": baseline.is_none() && ok,
+        "baseline": establishes_baseline,
     });
     let event = if ok { "syncCompleted" } else { "syncFailed" };
     history::record(app, NewEvent::new(event, summary).account(id).data(data)).await;
@@ -379,12 +417,17 @@ async fn finish(app: &AppState, id: &str, provider: &str, started_core: &str, ou
 
 /// Books first seen by this sync are new purchases: record them and queue them at
 /// `new` priority when the account wants that.
+///
+/// At most [`MAX_NEW_PER_SYNC`] of them, the most recently purchased: a sync that finds
+/// more than that is almost certainly seeing library the baseline missed (a store
+/// hiccup, a page that came back this time), not a shopping spree, and queueing it all
+/// at `new` priority would skip the back-fill pacing. The rest are left to back-fill.
 async fn enqueue_new_books(app: &App, id: &str, started_core: &str) -> anyhow::Result<()> {
     let new_books: Vec<(String, String)> = sqlx::query_as(
         "SELECT b.audible_product_id, b.title FROM core.Books b
          JOIN core.BookAccounts ba ON ba.book_id = b.book_id
          WHERE ba.account = ? AND ba.is_deleted = 0 AND b.created_at >= ? AND b.content_type != 4
-         ORDER BY b.created_at, b.book_id",
+         ORDER BY ba.date_added DESC, b.created_at DESC, b.book_id",
     )
     .bind(id)
     .bind(started_core)
@@ -400,7 +443,24 @@ async fn enqueue_new_books(app: &App, id: &str, started_core: &str) -> anyhow::R
             .await?
             .unwrap_or((true, true));
 
-    for (book_id, title) in new_books {
+    let excess = new_books.len().saturating_sub(MAX_NEW_PER_SYNC);
+    if excess > 0 {
+        let message = format!(
+            "{} books appeared in one sync; treating the {MAX_NEW_PER_SYNC} most recent as new purchases and \
+             leaving {excess} to back-fill",
+            new_books.len()
+        );
+        tracing::warn!("Account {id}: {message}");
+        history::record(
+            app,
+            NewEvent::new("syncCompleted", message)
+                .account(id)
+                .data(serde_json::json!({ "newBooks": new_books.len(), "treatedAsBackfill": excess })),
+        )
+        .await;
+    }
+
+    for (book_id, title) in new_books.into_iter().take(MAX_NEW_PER_SYNC) {
         history::record(app, NewEvent::new("bookAdded", format!("New in library: {title}")).account(id).book(&book_id, &title)).await;
         if enabled && auto {
             match queue::enqueue(app, &book_id, Priority::New, false).await {

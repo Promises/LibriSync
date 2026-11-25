@@ -22,7 +22,10 @@ pub enum PlanFailureKind {
     Denied,
     /// The stored credential no longer works; the user must sign in again.
     AuthExpired,
-    /// Anything else (network, unexpected response): ordinary retry.
+    /// A network error or a 5xx / 429 from the store: the service is unavailable.
+    /// For Audible this holds the whole customer briefly (DESIGN.md).
+    Unavailable,
+    /// Anything else (unexpected response): ordinary retry.
     Other,
 }
 
@@ -62,6 +65,7 @@ pub fn classify(err: &LibationError) -> PlanFailureKind {
         "license_throttled" => PlanFailureKind::Throttled,
         "license_denied" => PlanFailureKind::Denied,
         "auth_expired" => PlanFailureKind::AuthExpired,
+        "network" => PlanFailureKind::Unavailable,
         _ => PlanFailureKind::Other,
     }
 }
@@ -130,10 +134,13 @@ impl Executor for CoreExecutor {
         let tools = self.tools.clone();
         let http = self.http.clone();
         // A separate task so a panic inside the pipeline fails this book, not the worker.
+        // Reported as `InvalidPlan`: the book fails without a retry (a crash on this
+        // input would recur, and each retry re-plans, spending a licence), and — unlike
+        // `Io` — it doesn't pause the whole queue as a disk or folder problem would.
         match tokio::spawn(async move { pipeline::run(job, &tools, &http, on_progress, cancel).await }).await {
             Ok(result) => result,
             Err(join) => Err(PipelineError::new(
-                FailureKind::Io,
+                FailureKind::InvalidPlan,
                 format!("The download pipeline crashed: {}", panic_text(join)),
             )),
         }

@@ -48,7 +48,15 @@ pub async fn run(app: AppState) {
 #[derive(sqlx::FromRow)]
 struct AccountRow {
     account_id: String,
+    provider: String,
     auth_status: String,
+    pacing_key: Option<String>,
+}
+
+/// What the dispatcher needs to know about an item's account.
+struct AccountInfo {
+    auth_status: String,
+    pacing_key: String,
 }
 
 pub async fn dispatch_once(app: &AppState) -> anyhow::Result<()> {
@@ -62,14 +70,30 @@ pub async fn dispatch_once(app: &AppState) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let accounts: HashMap<String, String> = sqlx::query_as::<_, AccountRow>(
-        "SELECT a.account_id, COALESCE(s.auth_status, 'unknown') AS auth_status
+    // A local problem (disk, ffmpeg) pauses everything: each start would only spend a
+    // licence on a book that can't be saved.
+    if let Some(hold) = app.queue.hold() {
+        let reason = hold.waiting_reason();
+        for row in &pending {
+            set_waiting(app, row, QueueState::Waiting, Some(reason.clone())).await?;
+        }
+        return Ok(());
+    }
+
+    let accounts: HashMap<String, AccountInfo> = sqlx::query_as::<_, AccountRow>(
+        "SELECT a.account_id, COALESCE(a.provider, 'audible') AS provider,
+                COALESCE(s.auth_status, 'unknown') AS auth_status, s.pacing_key
          FROM core.Accounts a LEFT JOIN account_state s ON s.account_id = a.account_id",
     )
     .fetch_all(&app.db)
     .await?
     .into_iter()
-    .map(|r| (r.account_id, r.auth_status))
+    .map(|r| {
+        let pacing_key = r
+            .pacing_key
+            .unwrap_or_else(|| accounts::pacing_key_for(&r.provider, &r.account_id, None));
+        (r.account_id, AccountInfo { auth_status: r.auth_status, pacing_key })
+    })
     .collect();
 
     let cfg = PacingConfig {
@@ -86,24 +110,27 @@ pub async fn dispatch_once(app: &AppState) -> anyhow::Result<()> {
         let decision = decide(app, &row, &accounts, &cfg, window, local_now, now, free, &mut pacing_cache).await?;
         match decision {
             Decision::Start => {
-                if start(app, &row).await? {
+                let licence_key = (row.provider == "audible")
+                    .then(|| accounts.get(&row.account_id).map(|a| a.pacing_key.clone()))
+                    .flatten();
+                if start(app, &row, licence_key.clone()).await? {
                     free -= 1;
-                    if row.provider == "audible" {
-                        if let Some(p) = pacing_cache.get_mut(&row.account_id) {
-                            p.in_flight = true;
-                        }
+                    if let Some(p) = licence_key.and_then(|k| pacing_cache.get_mut(&k)) {
+                        p.in_flight = true;
                     }
                 }
             }
             Decision::Ready => set_waiting(app, &row, QueueState::Queued, None).await?,
             Decision::Wait(reason) => set_waiting(app, &row, QueueState::Waiting, Some(reason)).await?,
             Decision::Drop(reason) => {
-                sqlx::query("UPDATE queue SET state = 'failed', error = ?, finished_at = ? WHERE id = ?")
-                    .bind(&reason)
-                    .bind(time::now_str())
-                    .bind(row.id)
-                    .execute(&app.db)
-                    .await?;
+                sqlx::query(
+                    "UPDATE queue SET state = 'failed', error = ?, finished_at = ? WHERE id = ? AND state IN ('queued','waiting')",
+                )
+                .bind(&reason)
+                .bind(time::now_str())
+                .bind(row.id)
+                .execute(&app.db)
+                .await?;
                 queue::publish_id(app, row.id).await;
             }
         }
@@ -115,7 +142,7 @@ pub async fn dispatch_once(app: &AppState) -> anyhow::Result<()> {
 async fn decide(
     app: &AppState,
     row: &QueueRow,
-    accounts: &HashMap<String, String>,
+    accounts: &HashMap<String, AccountInfo>,
     cfg: &PacingConfig,
     window: Option<(chrono::NaiveTime, chrono::NaiveTime)>,
     local_now: chrono::NaiveDateTime,
@@ -123,10 +150,10 @@ async fn decide(
     free: usize,
     pacing_cache: &mut HashMap<String, AccountPacing>,
 ) -> anyhow::Result<Decision> {
-    let Some(auth) = accounts.get(&row.account_id) else {
+    let Some(account) = accounts.get(&row.account_id) else {
         return Ok(Decision::Drop("The account that owns this book has been removed".into()));
     };
-    if auth == "expired" {
+    if account.auth_status == "expired" {
         return Ok(Decision::Wait("Account sign-in expired; sign in again to continue".into()));
     }
     if let Some(nb) = row.not_before().filter(|nb| *nb > now) {
@@ -150,12 +177,18 @@ async fn decide(
         }
     }
     if row.provider == "audible" {
-        if !pacing_cache.contains_key(&row.account_id) {
-            let mut p = accounts::pacing(&app.db, &row.account_id, now).await?;
-            p.in_flight = app.queue.licence_in_flight(&row.account_id);
-            pacing_cache.insert(row.account_id.clone(), p);
+        // Pacing is per Amazon customer, shared by its marketplace accounts.
+        let key = &account.pacing_key;
+        if !pacing_cache.contains_key(key) {
+            // In-flight first, then the database: a worker records a request's outcome
+            // before clearing its mark, so if the mark is already gone, the read below
+            // sees the outcome (the other order could miss both).
+            let in_flight = app.queue.licence_in_flight(key);
+            let mut p = accounts::pacing(&app.db, key, now).await?;
+            p.in_flight = in_flight;
+            pacing_cache.insert(key.clone(), p);
         }
-        let acct = &pacing_cache[&row.account_id];
+        let acct = &pacing_cache[key];
         if let Gate::Wait { reason, .. } = pacing::licence_gate(cfg, acct, row.priority(), row.force, now) {
             return Ok(Decision::Wait(reason.describe()));
         }
@@ -178,7 +211,13 @@ async fn set_waiting(app: &AppState, row: &QueueRow, state: QueueState, reason: 
 }
 
 /// Claim the row and spawn its worker. Returns false if another path got there first.
-async fn start(app: &AppState, row: &QueueRow) -> anyhow::Result<bool> {
+///
+/// The item is registered *before* it is claimed, so any row in `planning`/`running`
+/// has a registration that a cancel can reach.
+async fn start(app: &AppState, row: &QueueRow, licence_key: Option<String>) -> anyhow::Result<bool> {
+    let cancel = app.shutdown.child_token();
+    let user_cancelled = Arc::new(AtomicBool::new(false));
+    let generation = app.queue.register(row.id, cancel.clone(), user_cancelled.clone());
     let claimed = sqlx::query(
         "UPDATE queue SET state = 'planning', started_at = ?, waiting_reason = NULL, error = NULL
          WHERE id = ? AND state IN ('queued','waiting')",
@@ -186,24 +225,27 @@ async fn start(app: &AppState, row: &QueueRow) -> anyhow::Result<bool> {
     .bind(time::now_str())
     .bind(row.id)
     .execute(&app.db)
-    .await?
-    .rows_affected()
-        == 1;
+    .await;
+    let claimed = match claimed {
+        Ok(r) => r.rows_affected() == 1,
+        Err(e) => {
+            app.queue.unregister(row.id, generation);
+            return Err(e.into());
+        }
+    };
     if !claimed {
+        app.queue.unregister(row.id, generation);
         return Ok(false);
     }
-    let cancel = app.shutdown.child_token();
-    let user_cancelled = Arc::new(AtomicBool::new(false));
-    app.queue.register(row.id, cancel.clone(), user_cancelled.clone());
-    if row.provider == "audible" {
-        app.queue.set_licence_in_flight(&row.account_id, true);
+    if let Some(key) = &licence_key {
+        app.queue.set_licence_in_flight(key, row.id);
     }
     queue::publish_id(app, row.id).await;
 
     let app = app.clone();
     let id = row.id;
     tokio::spawn(async move {
-        super::worker::run(app, id, cancel, user_cancelled).await;
+        super::worker::run(app, id, generation, licence_key, cancel, user_cancelled).await;
     });
     Ok(true)
 }

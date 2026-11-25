@@ -158,6 +158,8 @@ pub async fn delete(
     }
 
     rust_core::storage::accounts::delete_account(app.core.pool(), &id).await?;
+    // Licence pacing (cooldown, request log) is kept: it belongs to the Amazon customer,
+    // so removing and re-adding the account must not forget a throttle.
     sqlx::query("DELETE FROM account_state WHERE account_id = ?").bind(&id).execute(&app.db).await?;
     history::record(
         &app,

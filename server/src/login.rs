@@ -143,9 +143,49 @@ async fn account_json(
     Ok((id, json))
 }
 
+/// Save a signed-in Audible account. When it replaces an existing registration of the
+/// same account (signing in again), the old device is deregistered afterwards, best
+/// effort: it would otherwise linger in the customer's Amazon device list.
+async fn save_audible_account(app: &AppState, account_id: &str, json: &Value) -> anyhow::Result<AccountView> {
+    let previous = accounts::load_json(app, account_id).await.ok().flatten();
+    let view = accounts::add(app, account_id, json).await?;
+    if let Some(old) = previous.and_then(|p| device_to_deregister(&p, json)) {
+        tokio::spawn(async move {
+            match rust_core::api::auth::deregister_device(&old).await {
+                Ok(()) => tracing::info!("Deregistered the previous device of a re-signed-in Audible account"),
+                Err(e) => tracing::warn!("Could not deregister the previous device of a re-signed-in Audible account: {e}"),
+            }
+        });
+    }
+    Ok(view)
+}
+
+/// The previous registration to deregister: an Audible account with a different
+/// device serial than the new one. The same serial would deregister the new device.
+fn device_to_deregister(previous: &Value, new: &Value) -> Option<rust_core::api::auth::Account> {
+    if accounts::provider_of(previous).ok()? != rust_core::providers::ProviderId::Audible {
+        return None;
+    }
+    let serial = |v: &Value| {
+        v.pointer("/identity/device_serial_number")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+    };
+    let old_serial = serial(previous)?;
+    if Some(&old_serial) == serial(new).as_ref() {
+        return None;
+    }
+    serde_json::from_value(previous.clone()).ok()
+}
+
 pub async fn start_device_code(app: &AppState, locale_code: &str) -> Result<DeviceCodeSession, ApiError> {
     let locale = locale(locale_code)?;
     let serial = generate_device_serial();
+    // The pair's lifetime counts from when Amazon issued it, so measure from just
+    // before asking: never later than Amazon's own deadline.
+    let requested = Instant::now();
+    let requested_at = time::now();
     let pair: CodePair = {
         let (l, s) = (locale.clone(), serial.clone());
         isolate(async move { device_code::create_code_pair(&l, &s).await })
@@ -160,7 +200,7 @@ pub async fn start_device_code(app: &AppState, locale_code: &str) -> Result<Devi
         status: DeviceStatus::Pending,
         public_code: pair.public_code.clone(),
         verification_url: pair.verification_url.clone(),
-        expires_at: time::fmt(time::now() + Duration::seconds(pair.expires_in as i64)),
+        expires_at: time::fmt(requested_at + Duration::seconds(pair.expires_in as i64)),
         account: None,
         message: None,
     };
@@ -169,14 +209,22 @@ pub async fn start_device_code(app: &AppState, locale_code: &str) -> Result<Devi
     if let Ok(mut m) = app.logins.device.lock() {
         m.insert(id.clone(), DeviceState { view: view.clone(), cancel: cancel.clone(), created: Instant::now() });
     }
-    tokio::spawn(poll_device_code(app.clone(), id, locale, serial, pair, cancel));
+    let deadline = requested + StdDuration::from_secs(pair.expires_in);
+    tokio::spawn(poll_device_code(app.clone(), id, locale, serial, pair, deadline, cancel));
     Ok(view)
 }
 
 /// Poll Amazon until the user confirms the code, the pair expires, or the session is
 /// cancelled. Honours Amazon's polling interval and its backoff requests.
-async fn poll_device_code(app: AppState, id: String, locale: Locale, serial: String, pair: CodePair, cancel: CancellationToken) {
-    let deadline = Instant::now() + StdDuration::from_secs(pair.expires_in);
+async fn poll_device_code(
+    app: AppState,
+    id: String,
+    locale: Locale,
+    serial: String,
+    pair: CodePair,
+    deadline: Instant,
+    cancel: CancellationToken,
+) {
     let interval = StdDuration::from_secs(pair.polling_interval.max(1));
     let mut wait = interval;
     let mut backoffs: u32 = 0;
@@ -196,6 +244,20 @@ async fn poll_device_code(app: AppState, id: String, locale: Locale, serial: Str
             let (l, s, p) = (locale.clone(), serial.clone(), pair.clone());
             isolate(async move { device_code::poll_code_pair_registration(&l, &s, &p, backoffs).await }).await
         };
+        // Cancelled while the poll was in flight: never add the account. If Amazon
+        // registered the device in that moment, undo the registration (best effort).
+        if cancel.is_cancelled() {
+            if let Ok(Ok(CodePairPoll::Registered(reg))) = poll {
+                if let Ok((_, json)) = account_json(*reg, locale.clone(), serial.clone()).await {
+                    if let Ok(account) = serde_json::from_value::<rust_core::api::auth::Account>(json) {
+                        if let Err(e) = rust_core::api::auth::deregister_device(&account).await {
+                            tracing::warn!("Could not deregister a device registered after its sign-in was cancelled: {e}");
+                        }
+                    }
+                }
+            }
+            return;
+        }
         match poll {
             Ok(Ok(CodePairPoll::Pending)) => {
                 backoffs = 0;
@@ -207,7 +269,9 @@ async fn poll_device_code(app: AppState, id: String, locale: Locale, serial: Str
             }
             Ok(Ok(CodePairPoll::Registered(reg))) => {
                 let result = match account_json(*reg, locale.clone(), serial.clone()).await {
-                    Ok((account_id, json)) => accounts::add(&app, &account_id, &json).await.map_err(|e| format!("{e:#}")),
+                    Ok((account_id, json)) => {
+                        save_audible_account(&app, &account_id, &json).await.map_err(|e| format!("{e:#}"))
+                    }
                     Err(e) => Err(e),
                 };
                 app.logins.update_device(&id, |v| match result {
@@ -312,7 +376,7 @@ pub async fn complete_external(app: &AppState, id: &str, response_url: &str) -> 
         .await
         .map_err(|e| ApiError::provider(format!("Amazon refused the sign-in: {e}")))?;
     let (account_id, json) = account_json(reg, locale, serial).await.map_err(ApiError::internal)?;
-    let view = accounts::add(app, &account_id, &json).await?;
+    let view = save_audible_account(app, &account_id, &json).await?;
     if let Ok(mut m) = app.logins.external.lock() {
         m.remove(id);
     }
@@ -322,6 +386,28 @@ pub async fn complete_external(app: &AppState, id: &str, response_url: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_replaced_audible_device_is_deregistered() {
+        use rust_core::api::auth::{AccessToken, Account, Identity};
+        let account = |serial: &str, provider: &str| {
+            let mut a = Account::new("amzn1.account.X:us".into()).unwrap();
+            let token = AccessToken { token: "t".into(), expires_at: chrono::Utc::now() };
+            let locale = Locale::from_country_code("us").unwrap();
+            let mut identity = Identity::new(token, "r".into(), "k".into(), "adp".into(), locale);
+            identity.device_serial_number = serial.into();
+            a.identity = Some(identity);
+            let mut v = serde_json::to_value(&a).unwrap();
+            v["provider"] = Value::from(provider);
+            v
+        };
+        let old = device_to_deregister(&account("A", "audible"), &account("B", "audible")).expect("a replaced device");
+        assert_eq!(old.identity.unwrap().device_serial_number, "A", "the old device, not the new one");
+        // The same serial is the device just registered: never deregister it.
+        assert!(device_to_deregister(&account("A", "audible"), &account("A", "audible")).is_none());
+        assert!(device_to_deregister(&account("A", "chirp"), &account("B", "chirp")).is_none());
+        assert!(device_to_deregister(&account("", "audible"), &account("B", "audible")).is_none());
+    }
 
     #[test]
     fn maplanding_urls_are_checked_strictly() {

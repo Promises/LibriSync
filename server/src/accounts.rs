@@ -4,8 +4,12 @@
 //! Accounts are provider-scoped: every path that hands an account to provider code
 //! reads its `provider` tag and dispatches on it.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use chrono::{DateTime, Utc};
 use rust_core::providers::ProviderId;
+use rust_core::LibationError;
 use serde::Serialize;
 use sqlx::SqlitePool;
 
@@ -81,16 +85,17 @@ SELECT a.account_id,
        COALESCE(s.backfill, 1) AS backfill,
        s.last_sync, s.next_sync, s.last_sync_ok, s.last_sync_added, s.last_sync_updated,
        s.last_sync_total, s.last_sync_message,
-       s.cooldown_until, s.cooldown_reason,
+       p.cooldown_until, p.cooldown_reason,
        COALESCE(s.auth_status, 'unknown') AS auth_status,
        (SELECT COUNT(*) FROM core.BookAccounts ba WHERE ba.account = a.account_id AND ba.is_deleted = 0) AS book_count,
        (SELECT COUNT(*) FROM core.BookAccounts ba
           JOIN core.Books b ON b.book_id = ba.book_id
           JOIN downloads d ON d.book_id = b.audible_product_id
          WHERE ba.account = a.account_id AND ba.is_deleted = 0) AS downloaded_count,
-       (SELECT COUNT(*) FROM licence_requests l WHERE l.account_id = a.account_id AND l.time > ?) AS licences
+       (SELECT COUNT(*) FROM licence_requests l WHERE l.pacing_key = s.pacing_key AND l.time > ?) AS licences
 FROM core.Accounts a
-LEFT JOIN account_state s ON s.account_id = a.account_id";
+LEFT JOIN account_state s ON s.account_id = a.account_id
+LEFT JOIN licence_pacing p ON p.pacing_key = s.pacing_key";
 
 fn to_view(r: ViewRow, cap: u32, now: DateTime<Utc>, syncing: bool) -> AccountView {
     let audible = r.provider == "audible";
@@ -163,19 +168,126 @@ pub async fn publish(app: &App, id: &str) {
     }
 }
 
-/// Make sure `account_state` has a row, seeded from the global defaults.
-pub async fn ensure_state(app: &App, id: &str) -> sqlx::Result<()> {
+/// The key Audible licence pacing is kept under (DESIGN.md "Audible licence pacing").
+///
+/// Audible throttles an Amazon *customer*, and one customer signed in for two
+/// marketplaces is two accounts here (`{customer id}:us`, `{customer id}:uk`), so an
+/// Audible account's key is its customer id: `identity.customer_info.user_id`, else
+/// the part of the account id before the first `:`. Every other provider's key is its
+/// account id (Chirp's ids contain a `:` too, so this must look at the provider).
+pub fn pacing_key_for(provider: &str, account_id: &str, account: Option<&serde_json::Value>) -> String {
+    if provider != ProviderId::Audible.as_str() {
+        return account_id.to_string();
+    }
+    let customer = account
+        .and_then(|a| a.pointer("/identity/customer_info/user_id"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    match customer {
+        Some(c) => c.to_string(),
+        None => match account_id.split_once(':') {
+            Some((customer, _)) if !customer.is_empty() => customer.to_string(),
+            _ => account_id.to_string(),
+        },
+    }
+}
+
+/// Make sure `account_state` has a row, seeded from the global defaults, and return
+/// the account's pacing key.
+pub async fn ensure_state(app: &App, id: &str) -> anyhow::Result<String> {
+    let existing: Option<Option<String>> =
+        sqlx::query_scalar("SELECT pacing_key FROM account_state WHERE account_id = ?")
+            .bind(id)
+            .fetch_optional(&app.db)
+            .await?;
+    if let Some(Some(key)) = existing {
+        return Ok(key);
+    }
+    let account = load_json(app, id).await?;
+    let provider = account
+        .as_ref()
+        .and_then(|a| a.get("provider"))
+        .and_then(|p| p.as_str())
+        .unwrap_or("audible")
+        .to_string();
+    let key = pacing_key_for(&provider, id, account.as_ref());
     let s = app.settings();
     sqlx::query(
-        "INSERT INTO account_state (account_id, enabled, auto_download_new, backfill) VALUES (?, 1, ?, ?)
-         ON CONFLICT(account_id) DO NOTHING",
+        "INSERT INTO account_state (account_id, enabled, auto_download_new, backfill, pacing_key) VALUES (?, 1, ?, ?, ?)
+         ON CONFLICT(account_id) DO UPDATE SET pacing_key = COALESCE(account_state.pacing_key, excluded.pacing_key)",
     )
     .bind(id)
     .bind(s.sync.auto_download_new)
     .bind(s.backfill.enabled)
+    .bind(&key)
     .execute(&app.db)
     .await?;
-    Ok(())
+    Ok(key)
+}
+
+/// Serialises Audible token refreshes per account. Sync and download planning both
+/// refresh an expiring token; two refreshes at once would each save a token pair and
+/// one of them would lose (Amazon may rotate the refresh token).
+#[derive(Default)]
+pub struct TokenLocks(std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>);
+
+impl TokenLocks {
+    fn lock_for(&self, id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut map = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        map.entry(id.to_string()).or_default().clone()
+    }
+}
+
+/// Refresh earlier than the provider's own 30-minute check, so the provider call that
+/// follows never refreshes outside the lock.
+const REFRESH_THRESHOLD_MINUTES: i64 = 35;
+
+#[derive(Debug)]
+pub enum CredentialError {
+    Db(anyhow::Error),
+    /// Refreshing the access token failed.
+    Refresh(LibationError),
+}
+
+impl std::fmt::Display for CredentialError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CredentialError::Db(e) => write!(f, "{e:#}"),
+            CredentialError::Refresh(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// The stored account JSON with a usable access token: for Audible, an expiring token
+/// is refreshed (and saved) under the account's [`TokenLocks`] lock, so concurrent
+/// callers refresh once and the rest read the saved result.
+pub async fn fresh_credentials(app: &App, id: &str) -> Result<Option<serde_json::Value>, CredentialError> {
+    let lock = app.token_locks.lock_for(id);
+    let _guard = lock.lock().await;
+    let Some(account) = load_json(app, id).await.map_err(CredentialError::Db)? else {
+        return Ok(None);
+    };
+    if provider_of(&account).ok() != Some(ProviderId::Audible) {
+        return Ok(Some(account));
+    }
+    // Only a complete Audible account can be refreshed; anything else goes to the
+    // provider unchanged and fails there with its own error.
+    let refreshable = serde_json::from_value::<rust_core::api::auth::Account>(account.clone())
+        .is_ok_and(|a| a.identity.is_some());
+    if !refreshable {
+        return Ok(Some(account));
+    }
+    let json = account.to_string();
+    let refreshed = rust_core::api::auth::ensure_valid_token(app.core.pool(), &json, REFRESH_THRESHOLD_MINUTES)
+        .await
+        .map_err(CredentialError::Refresh)?;
+    if refreshed == json {
+        return Ok(Some(account));
+    }
+    // `ensure_valid_token` serialises rust-core's `Account`, which has no `provider`
+    // field; the saved row keeps its provider column, but re-read it to be exact.
+    load_json(app, id).await.map_err(CredentialError::Db)
 }
 
 /// The stored account JSON (rust-core's shape), which is also the provider credential blob.
@@ -209,39 +321,52 @@ pub async fn list_sched(pool: &SqlitePool) -> sqlx::Result<Vec<AccountSched>> {
         "SELECT a.account_id, COALESCE(a.provider, 'audible') AS provider,
                 COALESCE(s.enabled, 1) AS enabled,
                 COALESCE(s.backfill, 1) AS backfill, s.baseline_at, s.next_sync,
-                COALESCE(s.auth_status, 'unknown') AS auth_status, s.cooldown_until
+                COALESCE(s.auth_status, 'unknown') AS auth_status, p.cooldown_until
          FROM core.Accounts a LEFT JOIN account_state s ON s.account_id = a.account_id
+         LEFT JOIN licence_pacing p ON p.pacing_key = s.pacing_key
          ORDER BY a.account_id",
     )
     .fetch_all(pool)
     .await
 }
 
-/// The pacing state of an Audible account (without the in-flight flag).
-pub async fn pacing(pool: &SqlitePool, id: &str, now: DateTime<Utc>) -> sqlx::Result<AccountPacing> {
-    let row: Option<(Option<String>, i64, Option<String>)> = sqlx::query_as(
-        "SELECT cooldown_until, cooldown_level, next_licence_at FROM account_state WHERE account_id = ?",
+/// The pacing state for a pacing key (without the in-flight flag).
+pub async fn pacing(pool: &SqlitePool, pacing_key: &str, now: DateTime<Utc>) -> sqlx::Result<AccountPacing> {
+    // cooldown_until, cooldown_level, next_licence_at, hold_until
+    type PacingRow = (Option<String>, i64, Option<String>, Option<String>);
+    let row: Option<PacingRow> = sqlx::query_as(
+        "SELECT cooldown_until, cooldown_level, next_licence_at, hold_until FROM licence_pacing WHERE pacing_key = ?",
     )
-    .bind(id)
+    .bind(pacing_key)
     .fetch_optional(pool)
     .await?;
     let recent: Vec<String> =
-        sqlx::query_scalar("SELECT time FROM licence_requests WHERE account_id = ? AND time > ?")
-            .bind(id)
+        sqlx::query_scalar("SELECT time FROM licence_requests WHERE pacing_key = ? AND time > ?")
+            .bind(pacing_key)
             .bind(time::fmt(now - crate::pacing::CAP_WINDOW))
             .fetch_all(pool)
             .await?;
-    let (cooldown_until, level, next) = row.unwrap_or((None, 0, None));
+    let (cooldown_until, level, next, hold) = row.unwrap_or((None, 0, None, None));
     Ok(AccountPacing {
         cooldown_until: cooldown_until.as_deref().and_then(time::parse),
         cooldown_level: level.max(0) as u32,
         next_licence_at: next.as_deref().and_then(time::parse),
+        hold_until: hold.as_deref().and_then(time::parse),
         recent_requests: recent.iter().filter_map(|t| time::parse(t)).collect(),
         in_flight: false,
     })
 }
 
-pub async fn set_auth_status(app: &App, id: &str, status: &str) -> sqlx::Result<()> {
+/// Make sure `licence_pacing` has a row for `pacing_key`.
+pub async fn ensure_pacing(pool: &SqlitePool, pacing_key: &str) -> sqlx::Result<()> {
+    sqlx::query("INSERT INTO licence_pacing (pacing_key) VALUES (?) ON CONFLICT(pacing_key) DO NOTHING")
+        .bind(pacing_key)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn set_auth_status(app: &App, id: &str, status: &str) -> anyhow::Result<()> {
     ensure_state(app, id).await?;
     sqlx::query("UPDATE account_state SET auth_status = ? WHERE account_id = ?")
         .bind(status)
@@ -251,11 +376,15 @@ pub async fn set_auth_status(app: &App, id: &str, status: &str) -> sqlx::Result<
     Ok(())
 }
 
-pub async fn clear_cooldown(app: &App, id: &str) -> sqlx::Result<()> {
+/// Clear the cooldown (and any "Audible unavailable" hold) of the account's customer.
+pub async fn clear_cooldown(app: &App, id: &str) -> anyhow::Result<()> {
+    let key = ensure_state(app, id).await?;
     sqlx::query(
-        "UPDATE account_state SET cooldown_until = NULL, cooldown_reason = NULL, cooldown_level = 0 WHERE account_id = ?",
+        "UPDATE licence_pacing SET cooldown_until = NULL, cooldown_reason = NULL, cooldown_level = 0,
+                hold_until = NULL, hold_reason = NULL
+         WHERE pacing_key = ?",
     )
-    .bind(id)
+    .bind(&key)
     .execute(&app.db)
     .await?;
     app.queue.wake();
@@ -333,6 +462,17 @@ mod tests {
         assert_eq!(v.locale.as_deref(), Some("us"));
         assert_eq!(v.daily_licence_cap, Some(20));
         assert_eq!(v.licences_last24h, 4);
+    }
+
+    #[test]
+    fn audible_pacing_is_per_customer_other_providers_per_account() {
+        assert_eq!(pacing_key_for("audible", "amzn1.account.X:us", None), "amzn1.account.X");
+        assert_eq!(pacing_key_for("audible", "amzn1.account.X:uk", None), "amzn1.account.X");
+        let json = serde_json::json!({ "identity": { "customer_info": { "user_id": "amzn1.account.Y" } } });
+        assert_eq!(pacing_key_for("audible", "whatever:de", Some(&json)), "amzn1.account.Y", "customer_info wins");
+        assert_eq!(pacing_key_for("audible", "legacy", None), "legacy");
+        assert_eq!(pacing_key_for("chirp", "chirp:42", None), "chirp:42", "Chirp ids contain a colon too");
+        assert_eq!(pacing_key_for("librofm", "a@b.example", None), "a@b.example");
     }
 
     #[test]

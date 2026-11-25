@@ -8,13 +8,15 @@ use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
 use axum::extract::{Request, State};
-use axum::http::{header, HeaderMap, HeaderValue, Uri};
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use chrono::Duration;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
+use std::sync::OnceLock;
+use tokio::sync::Semaphore;
 
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -45,6 +47,35 @@ pub fn verify_password(password: &str, hash: &str) -> bool {
     PasswordHash::new(hash)
         .map(|parsed| Argon2::default().verify_password(password.as_bytes(), &parsed).is_ok())
         .unwrap_or(false)
+}
+
+/// Argon2 is deliberately expensive (~20 MB and tens of ms per hash); this many may
+/// run at once, so a flood of login attempts queues instead of exhausting CPU and
+/// memory.
+const MAX_CONCURRENT_HASHES: usize = 2;
+
+fn hash_permits() -> &'static Semaphore {
+    static PERMITS: OnceLock<Semaphore> = OnceLock::new();
+    PERMITS.get_or_init(|| Semaphore::new(MAX_CONCURRENT_HASHES))
+}
+
+/// Run an argon2 operation off the async threads, at most [`MAX_CONCURRENT_HASHES`] at
+/// a time.
+async fn limited<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> anyhow::Result<T> {
+    let _permit = hash_permits().acquire().await.map_err(|e| anyhow::anyhow!("hash limiter closed: {e}"))?;
+    tokio::task::spawn_blocking(f).await.map_err(|e| anyhow::anyhow!("hashing task failed: {e}"))
+}
+
+/// [`verify_password`], rate-limited (login, password change).
+pub async fn verify_password_limited(password: &str, hash: &str) -> bool {
+    let (password, hash) = (password.to_string(), hash.to_string());
+    limited(move || verify_password(&password, &hash)).await.unwrap_or(false)
+}
+
+/// [`hash_password`], rate-limited (setup, password change, unknown-user login).
+pub async fn hash_password_limited(password: &str) -> anyhow::Result<String> {
+    let password = password.to_string();
+    limited(move || hash_password(&password)).await?
 }
 
 /// Compare secrets without leaking where they differ.
@@ -86,7 +117,7 @@ pub fn check_new_password(password: &str) -> Result<(), ApiError> {
 /// Create the admin user, only while none exists. Returns the new user id, or `None`
 /// if a user was created concurrently.
 pub async fn create_first_user(pool: &SqlitePool, username: &str, password: &str) -> anyhow::Result<Option<i64>> {
-    let hash = hash_password(password)?;
+    let hash = hash_password_limited(password).await?;
     let id = sqlx::query(
         "INSERT INTO users (username, password_hash, created_at)
          SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM users)",
@@ -100,7 +131,7 @@ pub async fn create_first_user(pool: &SqlitePool, username: &str, password: &str
 }
 
 pub async fn set_password(pool: &SqlitePool, user_id: i64, password: &str) -> anyhow::Result<()> {
-    let hash = hash_password(password)?;
+    let hash = hash_password_limited(password).await?;
     sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
         .bind(hash)
         .bind(user_id)
@@ -213,7 +244,33 @@ pub fn is_anonymous(path: &str) -> bool {
     !path.starts_with("/api/") || ANONYMOUS.contains(&path)
 }
 
+/// Did this request come from our own pages? `Sec-Fetch-Site` (sent by every current
+/// browser) must be `same-origin` or `none` (typed into the address bar); without it,
+/// the `Origin` must name the host the request was sent to. A request with neither
+/// header isn't trusted.
+pub fn same_origin(headers: &HeaderMap) -> bool {
+    if let Some(site) = headers.get("sec-fetch-site") {
+        return matches!(site.to_str().map(str::to_ascii_lowercase).as_deref(), Ok("same-origin" | "none"));
+    }
+    let Some(origin) = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) else { return false };
+    let Ok(origin) = url::Url::parse(origin) else { return false };
+    let Some(host) = origin.host_str() else { return false };
+    let authority = match origin.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_string(),
+    };
+    // Behind a reverse proxy that rewrites Host, the original host is forwarded.
+    [header::HOST.as_str(), "x-forwarded-host"]
+        .iter()
+        .filter_map(|h| headers.get(*h).and_then(|v| v.to_str().ok()))
+        .any(|h| h.trim().eq_ignore_ascii_case(&authority))
+}
+
 /// Middleware guarding `/api/*`.
+///
+/// A cookie-authenticated request that changes something must also pass
+/// [`same_origin`] (CSRF): the session cookie is sent by the browser on cross-site
+/// requests too, the API key never is, so API-key requests are exempt.
 pub async fn require_auth(State(app): State<AppState>, mut req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
     if is_anonymous(&path) {
@@ -221,6 +278,11 @@ pub async fn require_auth(State(app): State<AppState>, mut req: Request, next: N
     }
     match authenticate(&app, req.headers(), req.uri()).await {
         Some(principal) => {
+            let safe = matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS);
+            if principal.user.is_some() && !safe && !same_origin(req.headers()) {
+                tracing::warn!("Refused a cross-site {} {path}", req.method());
+                return ApiError::new(StatusCode::FORBIDDEN, "forbidden", "Cross-site request refused").into_response();
+            }
             req.extensions_mut().insert(principal);
             next.run(req).await
         }

@@ -135,6 +135,10 @@ fn is_secret_header(key: &str) -> bool {
 }
 
 /// Replace secret values with [`MASK`] for API responses.
+///
+/// A webhook's whole URL is a secret (Discord, Slack and most "incoming webhook" URLs
+/// carry their token in the path or query), as are Apprise's configuration key and
+/// stateless URLs (each URL embeds the target service's credentials).
 pub fn mask(kind: Kind, config: &mut Value) {
     let set = |v: &mut Value, field: &str| {
         if let Some(f) = v.get_mut(field) {
@@ -145,6 +149,7 @@ pub fn mask(kind: Kind, config: &mut Value) {
     };
     match kind {
         Kind::Webhook => {
+            set(config, "url");
             set(config, "password");
             if let Some(headers) = config.get_mut("headers").and_then(Value::as_array_mut) {
                 for h in headers {
@@ -155,23 +160,66 @@ pub fn mask(kind: Kind, config: &mut Value) {
                 }
             }
         }
-        Kind::Apprise => set(config, "statelessUrls"),
+        Kind::Apprise => {
+            set(config, "configKey");
+            set(config, "statelessUrls");
+        }
         Kind::Audiobookshelf => set(config, "apiKey"),
     }
 }
 
-/// Where the client sent [`MASK`] back, keep the stored secret.
-pub fn unmask(kind: Kind, config: &mut Value, stored: &Value) {
-    let keep = |v: &mut Value, old: &Value, field: &str| {
-        if v.get(field).and_then(Value::as_str) == Some(MASK) {
-            v[field] = old.get(field).cloned().unwrap_or(Value::Null);
+/// The field holding the address a notification's secrets are sent to.
+fn endpoint_field(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Webhook | Kind::Audiobookshelf => "url",
+        Kind::Apprise => "serverUrl",
+    }
+}
+
+/// Scheme, host and port of a URL: where its credentials end up.
+fn origin_of(url: &str) -> Option<(String, String, Option<u16>)> {
+    let u = url::Url::parse(url.trim()).ok()?;
+    Some((u.scheme().to_string(), u.host_str()?.to_ascii_lowercase(), u.port_or_known_default()))
+}
+
+/// Where the client sent [`MASK`] back, keep the stored secret — but only while the
+/// secrets still go to the same server. A changed address (or no stored copy) needs
+/// every secret entered again; otherwise anyone who can edit a notification could
+/// point it at their own server and receive the stored password, key or URL.
+pub fn unmask(kind: Kind, config: &mut Value, stored: Option<&Value>) -> Result<(), ApiError> {
+    let field_path = |f: &str| format!("config.{f}");
+    let endpoint = endpoint_field(kind);
+    let stored_endpoint = stored.and_then(|s| s.get(endpoint)).and_then(Value::as_str);
+    // A masked endpoint (the webhook URL) is itself kept from the stored copy.
+    if config.get(endpoint).and_then(Value::as_str) == Some(MASK) {
+        match stored_endpoint {
+            Some(url) => config[endpoint] = json!(url),
+            None => return Err(ApiError::invalid_field(&field_path(endpoint), "enter the address")),
         }
+    }
+    let new_endpoint = config.get(endpoint).and_then(Value::as_str).unwrap_or_default();
+    let same_server = match stored_endpoint {
+        Some(old) => origin_of(old).is_some_and(|o| Some(o) == origin_of(new_endpoint)),
+        None => false,
+    };
+    let reenter = |field: &str| {
+        ApiError::invalid_field(&field_path(field), "the address changed; enter this secret again")
+    };
+
+    let keep = |v: &mut Value, field: &str| -> Result<(), ApiError> {
+        if v.get(field).and_then(Value::as_str) == Some(MASK) {
+            if !same_server {
+                return Err(reenter(field));
+            }
+            v[field] = stored.and_then(|s| s.get(field)).cloned().unwrap_or(Value::Null);
+        }
+        Ok(())
     };
     match kind {
         Kind::Webhook => {
-            keep(config, stored, "password");
+            keep(config, "password")?;
             let old_headers: HashMap<String, Value> = stored
-                .get("headers")
+                .and_then(|s| s.get("headers"))
                 .and_then(Value::as_array)
                 .map(|a| {
                     a.iter()
@@ -182,15 +230,27 @@ pub fn unmask(kind: Kind, config: &mut Value, stored: &Value) {
             if let Some(headers) = config.get_mut("headers").and_then(Value::as_array_mut) {
                 for h in headers {
                     if h.get("value").and_then(Value::as_str) == Some(MASK) {
+                        if !same_server {
+                            return Err(reenter("headers"));
+                        }
                         let key = h.get("key").and_then(Value::as_str).unwrap_or_default().to_string();
                         h["value"] = old_headers.get(&key).cloned().unwrap_or(Value::Null);
                     }
                 }
             }
         }
-        Kind::Apprise => keep(config, stored, "statelessUrls"),
-        Kind::Audiobookshelf => keep(config, stored, "apiKey"),
+        Kind::Apprise => {
+            keep(config, "configKey")?;
+            keep(config, "statelessUrls")?;
+        }
+        Kind::Audiobookshelf => keep(config, "apiKey")?,
     }
+    Ok(())
+}
+
+/// May a masked Audiobookshelf API key stored with `stored_url` be sent to `url`?
+pub fn same_server(stored_url: &str, url: &str) -> bool {
+    origin_of(stored_url).is_some_and(|o| Some(o) == origin_of(url))
 }
 
 fn check_url(field: &str, url: &str) -> Result<(), ApiError> {
@@ -654,20 +714,27 @@ mod tests {
     #[test]
     fn secrets_are_masked_and_restored() {
         let stored = json!({
-            "url": "https://hooks.example/x", "method": "POST",
+            "url": "https://hooks.example/x?token=t0k", "method": "POST",
             "headers": [{"key": "Authorization", "value": "Bearer s3cret"}, {"key": "X-Env", "value": "prod"}],
             "username": "u", "password": "p"
         });
         let mut shown = stored.clone();
         mask(Kind::Webhook, &mut shown);
+        assert_eq!(shown["url"], MASK, "a webhook URL carries its token");
         assert_eq!(shown["password"], MASK);
         assert_eq!(shown["headers"][0]["value"], MASK);
         assert_eq!(shown["headers"][1]["value"], "prod");
         assert_eq!(shown["username"], "u");
 
         let mut back = shown.clone();
-        unmask(Kind::Webhook, &mut back, &stored);
+        unmask(Kind::Webhook, &mut back, Some(&stored)).unwrap();
         assert_eq!(back, stored);
+
+        // Same server, different path: the stored secrets still go to the same place.
+        let mut moved = shown.clone();
+        moved["url"] = json!("https://hooks.example/y");
+        unmask(Kind::Webhook, &mut moved, Some(&stored)).unwrap();
+        assert_eq!(moved["password"], "p");
 
         let abs = json!({"url": "http://abs:80", "apiKey": "k", "libraryId": "l"});
         let mut shown = abs.clone();
@@ -675,8 +742,48 @@ mod tests {
         assert_eq!(shown["apiKey"], MASK);
         let mut changed = shown.clone();
         changed["apiKey"] = json!("new");
-        unmask(Kind::Audiobookshelf, &mut changed, &abs);
+        unmask(Kind::Audiobookshelf, &mut changed, Some(&abs)).unwrap();
         assert_eq!(changed["apiKey"], "new");
+
+        let apprise = json!({"serverUrl": "http://apprise:8000", "configKey": "k", "statelessUrls": "tgram://bot/chat"});
+        let mut shown = apprise.clone();
+        mask(Kind::Apprise, &mut shown);
+        assert_eq!((shown["configKey"].as_str(), shown["statelessUrls"].as_str()), (Some(MASK), Some(MASK)));
+        unmask(Kind::Apprise, &mut shown, Some(&apprise)).unwrap();
+        assert_eq!(shown, apprise);
+    }
+
+    #[test]
+    fn a_stored_secret_is_never_sent_to_a_new_server() {
+        let abs = json!({"url": "http://abs:80", "apiKey": "k", "libraryId": "l"});
+        let mut evil = json!({"url": "http://evil.example", "apiKey": MASK, "libraryId": "l"});
+        let err = unmask(Kind::Audiobookshelf, &mut evil, Some(&abs)).unwrap_err();
+        assert_eq!(err.field.as_deref(), Some("config.apiKey"));
+
+        // A different port is a different server too; the default port is not.
+        let mut port = json!({"url": "http://abs:8080", "apiKey": MASK, "libraryId": "l"});
+        assert!(unmask(Kind::Audiobookshelf, &mut port, Some(&abs)).is_err());
+        let mut same = json!({"url": "HTTP://ABS/", "apiKey": MASK, "libraryId": "l"});
+        unmask(Kind::Audiobookshelf, &mut same, Some(&abs)).unwrap();
+        assert_eq!(same["apiKey"], "k");
+
+        let hook = json!({"url": "https://hooks.example/x", "password": "p", "headers": [{"key": "Authorization", "value": "s"}]});
+        let mut evil = json!({"url": "https://evil.example/x", "password": MASK, "headers": []});
+        assert_eq!(unmask(Kind::Webhook, &mut evil, Some(&hook)).unwrap_err().field.as_deref(), Some("config.password"));
+        let mut evil = json!({"url": "https://evil.example/x", "headers": [{"key": "Authorization", "value": MASK}]});
+        assert_eq!(unmask(Kind::Webhook, &mut evil, Some(&hook)).unwrap_err().field.as_deref(), Some("config.headers"));
+
+        let apprise = json!({"serverUrl": "http://apprise:8000", "configKey": "k"});
+        let mut evil = json!({"serverUrl": "http://evil:8000", "configKey": MASK});
+        assert_eq!(unmask(Kind::Apprise, &mut evil, Some(&apprise)).unwrap_err().field.as_deref(), Some("config.configKey"));
+
+        // Nothing stored (a new notification, or the kind changed): a mask is refused.
+        let mut fresh = json!({"url": MASK});
+        assert_eq!(unmask(Kind::Webhook, &mut fresh, None).unwrap_err().field.as_deref(), Some("config.url"));
+        let mut fresh = json!({"url": "http://abs", "apiKey": MASK, "libraryId": "l"});
+        assert!(unmask(Kind::Audiobookshelf, &mut fresh, None).is_err());
+        let mut plain = json!({"url": "http://abs", "apiKey": "typed", "libraryId": "l"});
+        unmask(Kind::Audiobookshelf, &mut plain, None).unwrap();
     }
 
     #[test]

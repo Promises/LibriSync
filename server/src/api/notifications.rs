@@ -18,23 +18,19 @@ pub async fn list(State(app): State<AppState>) -> ApiResult<Json<Vec<Notificatio
 }
 
 pub async fn create(State(app): State<AppState>, JsonBody(mut n): JsonBody<Notification>) -> ApiResult<Json<Notification>> {
+    n.id = 0;
+    restore_secrets(&app, &mut n).await?;
     notify::validate(&mut n)?;
     let id = notify::insert(&app.db, &n).await?;
     let saved = notify::get(&app.db, id).await?.ok_or_else(|| ApiError::internal("notification vanished"))?;
     Ok(Json(masked(saved)))
 }
 
-/// Restore masked secrets from the stored copy when the kind is unchanged.
+/// Restore masked secrets from the stored copy (same kind, same server); a mask with
+/// nothing to restore it from is refused.
 async fn restore_secrets(app: &AppState, n: &mut Notification) -> ApiResult<()> {
-    if n.id <= 0 {
-        return Ok(());
-    }
-    if let Some(stored) = notify::get(&app.db, n.id).await? {
-        if stored.kind == n.kind {
-            notify::unmask(n.kind, &mut n.config, &stored.config);
-        }
-    }
-    Ok(())
+    let stored = if n.id > 0 { notify::get(&app.db, n.id).await?.filter(|s| s.kind == n.kind) } else { None };
+    notify::unmask(n.kind, &mut n.config, stored.as_ref().map(|s| &s.config))
 }
 
 pub async fn update(
@@ -105,6 +101,8 @@ pub async fn abs_libraries(State(app): State<AppState>, JsonBody(b): JsonBody<Ab
         };
         stored
             .filter(|n| n.kind == Kind::Audiobookshelf)
+            // Never send the stored key to a different server.
+            .filter(|n| n.config.get("url").and_then(|u| u.as_str()).is_some_and(|u| notify::same_server(u, &b.url)))
             .and_then(|n| n.config.get("apiKey").and_then(|k| k.as_str()).map(String::from))
             .ok_or_else(|| ApiError::invalid_field("apiKey", "enter the API key"))?
     } else {

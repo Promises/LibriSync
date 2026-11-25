@@ -55,7 +55,7 @@ function validate(d: NotificationDraft): Errors {
   const e: Errors = {};
   if (!d.name.trim()) e.name = 'Give the connection a name.';
   if (d.kind === 'webhook') {
-    if (!isHttpUrl(d.config.url)) e.url = 'Enter an http:// or https:// URL.';
+    if (d.config.url !== SECRET_MASK && !isHttpUrl(d.config.url)) e.url = 'Enter an http:// or https:// URL.';
     if (d.config.headers.some((h) => !h.key.trim())) e.headers = 'Every header needs a name.';
   }
   if (d.kind === 'apprise') {
@@ -240,6 +240,8 @@ function SecretInput({
 }
 
 const SECRET_HINT = 'Stored securely; shown masked. Type a new value to replace it.';
+const URL_SECRET_HINT =
+  'Stored securely; webhook URLs usually contain a token. Type a new URL to replace it; changing the server means re-entering the password and secret headers.';
 
 function WebhookFields({
   config,
@@ -255,10 +257,14 @@ function WebhookFields({
   return (
     <Fieldset legend="Webhook">
       <div className={styles.urlRow}>
-        <FormField label="URL" error={errors.url}>
-          {(p) => (
-            <TextInput {...p} type="url" placeholder="https://example.com/hooks/librisync" value={config.url} onChange={(e) => setConfig({ url: e.target.value })} />
-          )}
+        <FormField label="URL" error={errors.url} hint={config.url === SECRET_MASK ? URL_SECRET_HINT : undefined}>
+          {(p) =>
+            config.url === SECRET_MASK ? (
+              <SecretInput {...p} value={config.url} onChange={(url) => setConfig({ url })} />
+            ) : (
+              <TextInput {...p} type="url" placeholder="https://example.com/hooks/librisync" value={config.url} onChange={(e) => setConfig({ url: e.target.value })} />
+            )
+          }
         </FormField>
         <FormField label="Method">
           {(p) => (
@@ -324,14 +330,21 @@ function AppriseFields({
         )}
       </FormField>
       <FieldRow>
-        <FormField label="Configuration key" error={errors.configKey}>
-          {(p) => <TextInput {...p} value={config.configKey ?? ''} onChange={(e) => setConfig({ configKey: e.target.value })} />}
+        <FormField label="Configuration key" error={errors.configKey} hint={config.configKey === SECRET_MASK ? SECRET_HINT : undefined}>
+          {(p) => <SecretInput {...p} value={config.configKey ?? ''} onChange={(configKey) => setConfig({ configKey })} />}
         </FormField>
         <FormField label="Tags" hint="Optional; only notify services with these tags.">
           {(p) => <TextInput {...p} value={config.tags ?? ''} onChange={(e) => setConfig({ tags: e.target.value })} />}
         </FormField>
       </FieldRow>
-      <FormField label="Stateless URLs" hint="Instead of a configuration key: one or more Apprise URLs, separated by spaces or commas.">
+      <FormField
+        label="Stateless URLs"
+        hint={
+          config.statelessUrls === SECRET_MASK
+            ? SECRET_HINT
+            : 'Instead of a configuration key: one or more Apprise URLs, separated by spaces or commas.'
+        }
+      >
         {(p) => (
           <Textarea
             {...p}

@@ -21,10 +21,17 @@ pub struct FakeExecutor {
     pub plans: Mutex<VecDeque<Result<DownloadPlan, PlanFailure>>>,
     pub runs: Mutex<VecDeque<Result<(), PipelineError>>>,
     pub plan_calls: Mutex<Vec<String>>,
+    /// Pipeline runs (one per attempt, including same-plan retries).
+    pub run_calls: Mutex<Vec<std::path::PathBuf>>,
+    /// What `check_tools` answers; `None` = a working ffmpeg.
+    pub tools: Mutex<Option<Result<String, String>>>,
+    /// Called with the book id at the start of every plan request.
+    #[allow(clippy::type_complexity)]
+    pub on_plan: Mutex<Option<Box<dyn Fn(&str) + Send + Sync>>>,
 }
 
 pub fn empty_plan() -> DownloadPlan {
-    DownloadPlan { parts: Vec::new(), embed_metadata: false, chapters: Vec::new(), join_parts: false }
+    DownloadPlan { parts: Vec::new(), embed_metadata: false, chapters: Vec::new(), join_parts: false, licence_throttled: false }
 }
 
 #[async_trait]
@@ -40,10 +47,16 @@ impl Executor for FakeExecutor {
         if let Ok(mut c) = self.plan_calls.lock() {
             c.push(book_id.to_string());
         }
+        if let Some(hook) = self.on_plan.lock().ok().as_deref().and_then(Option::as_ref) {
+            hook(book_id);
+        }
         self.plans.lock().ok().and_then(|mut p| p.pop_front()).unwrap_or_else(|| Ok(empty_plan()))
     }
 
     async fn run(&self, job: PipelineJob, _p: ProgressFn, _c: CancellationToken) -> Result<PipelineOutput, PipelineError> {
+        if let Ok(mut c) = self.run_calls.lock() {
+            c.push(job.dest_dir.clone());
+        }
         let next = self.runs.lock().ok().and_then(|mut r| r.pop_front()).unwrap_or(Ok(()));
         next.map(|_| PipelineOutput {
             audio_files: vec![job.dest_dir.join(format!("{}.m4b", job.file_stem))],
@@ -56,7 +69,7 @@ impl Executor for FakeExecutor {
     }
 
     async fn check_tools(&self) -> Result<String, String> {
-        Ok("ffmpeg test".into())
+        self.tools.lock().ok().and_then(|t| t.clone()).unwrap_or_else(|| Ok("ffmpeg test".into()))
     }
 }
 

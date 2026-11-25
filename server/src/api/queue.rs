@@ -22,21 +22,28 @@ async fn row_or_404(app: &AppState, id: &str) -> ApiResult<QueueRow> {
 
 pub async fn cancel(State(app): State<AppState>, Path(id): Path<String>) -> ApiResult<Response> {
     let row = row_or_404(&app, &id).await?;
-    match row.state() {
-        QueueState::Planning | QueueState::Running if app.queue.cancel(row.id) => {
-            // The worker records the cancellation once the pipeline has stopped;
-            // partial files stay in the work dir for a retry.
-        }
-        QueueState::Completed | QueueState::Cancelled => {}
-        _ => {
-            sqlx::query("UPDATE queue SET state = 'cancelled', finished_at = ?, waiting_reason = NULL WHERE id = ?")
-                .bind(time::now_str())
-                .bind(row.id)
-                .execute(&app.db)
-                .await?;
-            queue::publish_id(&app, row.id).await;
-        }
+    if matches!(row.state(), QueueState::Completed | QueueState::Cancelled) {
+        return Ok(no_content());
     }
+    // An item that hasn't started is cancelled here — but only if it still hasn't: the
+    // dispatcher may claim it between the read above and this update.
+    let cancelled = sqlx::query(
+        "UPDATE queue SET state = 'cancelled', finished_at = ?, waiting_reason = NULL
+         WHERE id = ? AND state IN ('queued','waiting','failed')",
+    )
+    .bind(time::now_str())
+    .bind(row.id)
+    .execute(&app.db)
+    .await?
+    .rows_affected();
+    if cancelled == 1 {
+        queue::publish_id(&app, row.id).await;
+        return Ok(no_content());
+    }
+    // It is planning or running: signal its worker, which records the cancellation
+    // once the pipeline has stopped (partial files stay in the work dir for a retry).
+    // A worker that has already finished has nothing left to cancel.
+    app.queue.cancel(row.id);
     Ok(no_content())
 }
 
@@ -47,18 +54,21 @@ pub async fn retry(State(app): State<AppState>, Path(id): Path<String>) -> ApiRe
     }
     let result = sqlx::query(
         "UPDATE queue SET state = 'queued', attempts = 0, error = NULL, not_before = NULL, waiting_reason = NULL,
-                started_at = NULL, finished_at = NULL WHERE id = ?",
+                started_at = NULL, finished_at = NULL WHERE id = ? AND state IN ('failed','cancelled')",
     )
     .bind(row.id)
     .execute(&app.db)
     .await;
     match result {
-        Ok(_) => {}
+        Ok(r) if r.rows_affected() == 1 => {}
+        Ok(_) => return Err(ApiError::conflict("Only failed or cancelled items can be retried")),
         Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
             return Err(ApiError::conflict("This book is already in the queue"));
         }
         Err(e) => return Err(e.into()),
     }
+    // Retrying is the user saying whatever paused the queue (disk, ffmpeg) is fixed.
+    app.queue.clear_hold();
     app.queue.wake();
     let row = row_or_404(&app, &id).await?;
     queue::publish(&app, &row);
@@ -75,11 +85,15 @@ pub async fn move_item(State(app): State<AppState>, Path(id): Path<String>, Json
     if !matches!(row.state(), QueueState::Queued | QueueState::Waiting) {
         return Err(ApiError::conflict("Only items that haven't started can be moved"));
     }
-    sqlx::query("UPDATE queue SET priority = ? WHERE id = ?")
+    let moved = sqlx::query("UPDATE queue SET priority = ? WHERE id = ? AND state IN ('queued','waiting')")
         .bind(b.priority.as_i64())
         .bind(row.id)
         .execute(&app.db)
-        .await?;
+        .await?
+        .rows_affected();
+    if moved == 0 {
+        return Err(ApiError::conflict("Only items that haven't started can be moved"));
+    }
     app.queue.wake();
     let row = row_or_404(&app, &id).await?;
     queue::publish(&app, &row);

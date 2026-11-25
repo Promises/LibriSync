@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useBlocker } from 'react-router';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { isApiError } from '../../api/client';
 import { settingsApi } from '../../api/endpoints';
 import { keys, useSettings } from '../../api/queries';
 import type { Settings } from '../../api/types';
 import { Button } from '../../components/Button';
+import { useConfirm } from '../../components/Confirm';
 import { Banner, ErrorState, SkeletonRows } from '../../components/Feedback';
 import { PageHeader } from '../../components/Navigation';
 import { toast } from '../../components/Toast';
@@ -19,7 +21,7 @@ import {
   type SetField,
 } from './SettingsSections';
 import { PasswordCard } from './PasswordCard';
-import { fieldFromServerError, validateSettings, type FieldErrors } from './validate';
+import { validateSettings, type FieldErrors } from './validate';
 import styles from './SettingsPage.module.css';
 
 export function SettingsPage() {
@@ -41,6 +43,7 @@ export function SettingsPage() {
 
 function SettingsForm({ saved }: { saved: Settings }) {
   const client = useQueryClient();
+  const confirm = useConfirm();
   const [draft, setDraft] = useState<Settings>(saved);
   const [showErrors, setShowErrors] = useState(false);
   const [serverError, setServerError] = useState<{ field: string | null; message: string } | null>(null);
@@ -53,6 +56,23 @@ function SettingsForm({ saved }: { saved: Settings }) {
     // Only a new baseline should reset the draft.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [saved]);
+
+  // Leaving the page inside the app asks first; closing or reloading the tab gets the
+  // browser's own prompt.
+  const blocker = useBlocker(({ currentLocation, nextLocation }) => dirty && currentLocation.pathname !== nextLocation.pathname);
+  const blockerRef = useRef(blocker);
+  blockerRef.current = blocker;
+  // Keyed on the state alone: the blocker object is new on every render, and asking twice
+  // would cancel the first prompt.
+  useEffect(() => {
+    if (blocker.state !== 'blocked') return;
+    void confirm({
+      title: 'Discard unsaved changes?',
+      message: <p>Your settings changes have not been saved.</p>,
+      confirmLabel: 'Discard changes',
+      tone: 'danger',
+    }).then((ok) => (ok ? blockerRef.current.proceed?.() : blockerRef.current.reset?.()));
+  }, [blocker.state, confirm]);
 
   useEffect(() => {
     if (!dirty) return;
@@ -82,7 +102,7 @@ function SettingsForm({ saved }: { saved: Settings }) {
     },
     onError: (e) => {
       if (isApiError(e) && e.error === 'invalid_input') {
-        const field = fieldFromServerError(e.field, e.message);
+        const field = e.field;
         setServerError({ field, message: e.message });
         // The field may be scrolled out of view; say so where the user is looking.
         if (field) toast.error('The server rejected a setting', e.message);

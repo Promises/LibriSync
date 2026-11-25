@@ -21,8 +21,9 @@ const FORCE_WARNING = (
       the throttle clear.
     </p>
     <p>
-      <strong>Requesting another licence now is believed to extend the throttle.</strong> Only do this if you
-      need this book urgently.
+      A forced download skips the cooldown <em>and</em> the daily licence limit, and is requested straight away.{' '}
+      <strong>Requesting another licence now is believed to extend the throttle.</strong> Only do this if you need
+      this book urgently.
     </p>
   </>
 );

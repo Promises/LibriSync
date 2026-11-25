@@ -42,32 +42,3 @@ export function validateSettings(s: Settings): FieldErrors {
 
   return e;
 }
-
-const KNOWN_FIELDS = [
-  'general.instanceName',
-  'general.logLevel',
-  'media.folderTemplate',
-  'media.noSeriesFolderTemplate',
-  'media.format',
-  'media.writeSidecars',
-  'sync.intervalHours',
-  'sync.autoDownloadNew',
-  'backfill.enabled',
-  'backfill.order',
-  'backfill.windowStart',
-  'backfill.windowEnd',
-  'audible.dailyLicenceCap',
-  'audible.spacingMinMinutes',
-  'audible.spacingMaxMinutes',
-  'audible.throttleCooldownHours',
-  'downloads.concurrency',
-];
-
-/**
- * API.md says a `400 invalid_input` "names the field" without saying where. Accept an
- * explicit `field` property, else look for a known field path in the message.
- */
-export function fieldFromServerError(field: string | null, message: string): string | null {
-  if (field) return field;
-  return KNOWN_FIELDS.find((f) => message.includes(f)) ?? KNOWN_FIELDS.find((f) => message.includes(f.split('.')[1] ?? f)) ?? null;
-}

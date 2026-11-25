@@ -1,6 +1,6 @@
 import { Link } from 'react-router';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { RefreshCw, Snowflake, Trash2 } from 'lucide-react';
+import { KeyRound, RefreshCw, Snowflake, Trash2 } from 'lucide-react';
 import { accountsApi } from '../../api/endpoints';
 import { keys, useProviders } from '../../api/queries';
 import type { AccountPatch, AccountView } from '../../api/types';
@@ -9,6 +9,7 @@ import { Button } from '../../components/Button';
 import { useConfirm } from '../../components/Confirm';
 import { Banner } from '../../components/Feedback';
 import { Switch } from '../../components/Form';
+import { Spinner } from '../../components/Spinner';
 import { Meter } from '../../components/Progress';
 import { ProviderIcon, providerName } from '../../components/ProviderIcon';
 import { toast } from '../../components/Toast';
@@ -39,7 +40,7 @@ function SyncSummary({ account, now }: { account: AccountView; now: number }) {
   );
 }
 
-export function AccountCard({ account }: { account: AccountView }) {
+export function AccountCard({ account, onReauth }: { account: AccountView; onReauth: (account: AccountView) => void }) {
   const client = useQueryClient();
   const confirm = useConfirm();
   const providers = useProviders();
@@ -138,7 +139,11 @@ export function AccountCard({ account }: { account: AccountView }) {
             {locale ? ` · ${locale}` : ''}
           </p>
         </div>
-        {account.authStatus === 'expired' ? (
+        {account.syncing ? (
+          <Badge tone="accent" icon={<Spinner size={10} />}>
+            Syncing
+          </Badge>
+        ) : account.authStatus === 'expired' ? (
           <Badge tone="danger">Sign-in expired</Badge>
         ) : !account.enabled ? (
           <Badge tone="neutral">Paused</Badge>
@@ -151,9 +156,17 @@ export function AccountCard({ account }: { account: AccountView }) {
 
       <div className={styles.body}>
         {account.authStatus === 'expired' && (
-          <Banner tone="danger" title="Sign in again">
-            The store no longer accepts this account's credentials. Remove it and add it again; your downloaded books
-            are kept.
+          <Banner
+            tone="danger"
+            title="Sign-in expired"
+            action={
+              <Button size="sm" variant="primary" icon={<KeyRound size={14} />} onClick={() => onReauth(account)}>
+                Sign in again
+              </Button>
+            }
+          >
+            The store no longer accepts this account's credentials. Signing in again keeps its settings, history and
+            downloads.
           </Banner>
         )}
 
@@ -204,7 +217,13 @@ export function AccountCard({ account }: { account: AccountView }) {
           <div>
             <dt>Next sync</dt>
             <dd title={formatDateTime(account.nextSync)}>
-              {account.enabled ? (account.nextSync ? formatRelative(account.nextSync, now) : '—') : 'Paused'}
+              {account.syncing
+                ? 'Syncing now'
+                : account.enabled
+                  ? account.nextSync
+                    ? formatRelative(account.nextSync, now)
+                    : '—'
+                  : 'Paused'}
             </dd>
           </div>
         </dl>
@@ -258,9 +277,20 @@ export function AccountCard({ account }: { account: AccountView }) {
         <Button variant="ghost" icon={<Trash2 size={16} />} onClick={() => void onRemove()} loading={remove.isPending}>
           Remove
         </Button>
-        <Button icon={<RefreshCw size={16} />} onClick={() => sync.mutate()} loading={sync.isPending}>
-          Sync now
-        </Button>
+        <div className={styles.footerActions}>
+          {isAudible && account.authStatus !== 'expired' && (
+            <Button variant="ghost" icon={<KeyRound size={16} />} onClick={() => onReauth(account)}>
+              Sign in again
+            </Button>
+          )}
+          <Button
+            icon={<RefreshCw size={16} />}
+            onClick={() => sync.mutate()}
+            loading={sync.isPending || account.syncing}
+          >
+            {account.syncing ? 'Syncing…' : 'Sync now'}
+          </Button>
+        </div>
       </footer>
     </article>
   );

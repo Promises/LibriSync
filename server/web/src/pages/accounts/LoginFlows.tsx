@@ -13,12 +13,18 @@ import { useNow } from '../../hooks/useNow';
 import { formatDuration } from '../../lib/format';
 import styles from './LoginFlows.module.css';
 
-type FlowProps = { provider: ProviderInfo; onAdded: (account: AccountView) => void };
+type FlowProps = {
+  provider: ProviderInfo;
+  onAdded: (account: AccountView) => void;
+  /** Re-authentication: the account's own marketplace. */
+  defaultLocale?: string | null;
+};
 
 const POLL_MS = 4_000;
 
-/** The store's locale that matches the browser's region, else the first one. */
-function guessLocale(provider: ProviderInfo): string {
+/** The given locale if the store has it, else the one matching the browser's region, else the first. */
+function guessLocale(provider: ProviderInfo, preferred?: string | null): string {
+  if (preferred && provider.locales.some((l) => l.code === preferred)) return preferred;
   const region = navigator.language.split('-')[1]?.toLowerCase();
   const aliases: Record<string, string> = { gb: 'uk' };
   const wanted = region ? (aliases[region] ?? region) : undefined;
@@ -52,8 +58,8 @@ function hostAndPath(url: string): string {
 
 // ---- Audible: device code -----------------------------------------------------------
 
-export function DeviceCodeFlow({ provider, onAdded }: FlowProps) {
-  const [locale, setLocale] = useState(() => guessLocale(provider));
+export function DeviceCodeFlow({ provider, onAdded, defaultLocale }: FlowProps) {
+  const [locale, setLocale] = useState(() => guessLocale(provider, defaultLocale));
   const [sessionId, setSessionId] = useState<string | null>(null);
   const sessionRef = useRef<string | null>(null);
   const finished = useRef(false);
@@ -203,8 +209,8 @@ export function DeviceCodeFlow({ provider, onAdded }: FlowProps) {
 
 // ---- Audible: external browser ------------------------------------------------------
 
-export function ExternalBrowserFlow({ provider, onAdded }: FlowProps) {
-  const [locale, setLocale] = useState(() => guessLocale(provider));
+export function ExternalBrowserFlow({ provider, onAdded, defaultLocale }: FlowProps) {
+  const [locale, setLocale] = useState(() => guessLocale(provider, defaultLocale));
   const [responseUrl, setResponseUrl] = useState('');
 
   const start = useMutation({
@@ -286,8 +292,8 @@ export function ExternalBrowserFlow({ provider, onAdded }: FlowProps) {
 
 // ---- Libro.fm / Chirp: email + password ---------------------------------------------
 
-export function CredentialsFlow({ provider, onAdded }: FlowProps) {
-  const [email, setEmail] = useState('');
+export function CredentialsFlow({ provider, onAdded, defaultEmail }: FlowProps & { defaultEmail?: string }) {
+  const [email, setEmail] = useState(defaultEmail ?? '');
   const [password, setPassword] = useState('');
   const submit = useMutation({
     mutationFn: () =>

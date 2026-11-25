@@ -10,7 +10,7 @@ export const API_BASE = '/api/v1';
 export class ApiError extends Error {
   readonly status: number;
   readonly error: ApiErrorCode | 'network' | 'bad_response' | string;
-  /** Present when the server names the offending field (`400 invalid_input`). */
+  /** Dotted path of the offending field on `400 invalid_input` ("audible.dailyLicenceCap"). */
   readonly field: string | null;
 
   constructor(status: number, error: string, message: string, field: string | null = null) {

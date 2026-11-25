@@ -38,10 +38,13 @@ export function useBulkDownload(onDone: () => void) {
       const ok = await confirm({
         title: `Download ${pluralize(ids.length, 'book')}?`,
         message: (
-          <p>
-            Audible books still go through the per-account licence budget, so a large batch can take days to finish.
-            Back-fill already works through the library at a safe pace; use this for books you want soon.
-          </p>
+          <>
+            <p>
+              They are queued ahead of back-fill, but Audible books still count against each account's daily licence
+              limit and wait for it, so a large batch can take days. Accounts in a cooldown wait until it ends.
+            </p>
+            <p>To fetch a whole backlog, enable back-fill instead; it does this at a safe pace on its own.</p>
+          </>
         ),
         confirmLabel: 'Queue downloads',
         tone: 'primary',

@@ -33,13 +33,25 @@ enum Mode {
     IgnoreRange,
     /// Honour `Range`, but trickle the body (8 KiB every 40 ms).
     Slow,
+    /// Honour `Range` but ignore `If-Range`, so a changed file is spliced on unless the
+    /// client notices.
+    IgnoreIfRange,
 }
 
 #[derive(Debug, Clone)]
 struct Hit {
     path: String,
     range: Option<String>,
+    if_range: Option<String>,
     status: u16,
+}
+
+/// A strong ETag that changes with the content.
+fn etag_of(bytes: &[u8]) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    format!("\"{:016x}-{}\"", hasher.finish(), bytes.len())
 }
 
 #[derive(Clone)]
@@ -103,15 +115,23 @@ impl TestServer {
             .and_then(|l| l.split_whitespace().nth(1))
             .unwrap_or("/")
             .to_string();
-        let range = lines
+        let headers: Vec<(String, String)> = lines
             .filter_map(|l| l.split_once(':'))
-            .find(|(k, _)| k.trim().eq_ignore_ascii_case("range"))
-            .map(|(_, v)| v.trim().to_string());
+            .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_string()))
+            .collect();
+        let header = |name: &str| headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
+        let range = header("range");
+        let if_range = header("if-range");
         let mode = *self.mode.lock().unwrap();
         let file = self.files.lock().unwrap().get(&path).cloned();
 
         let record = |status: u16| {
-            self.hits.lock().unwrap().push(Hit { path: path.clone(), range: range.clone(), status });
+            self.hits.lock().unwrap().push(Hit {
+                path: path.clone(),
+                range: range.clone(),
+                if_range: if_range.clone(),
+                status,
+            });
         };
         let Some(file) = file else {
             let status = if path.starts_with("/expired") { 403 } else { 404 };
@@ -121,8 +141,13 @@ impl TestServer {
             return Ok(());
         };
         let len = file.len() as u64;
+        let etag = etag_of(&file);
+        // RFC 9110 §13.1.5: a stale If-Range validator means "send the whole file".
+        let if_range_holds = mode == Mode::IgnoreIfRange
+            || if_range.as_deref().map_or(true, |v| v == etag);
         let start = match (&range, mode) {
-            (Some(r), Mode::Normal | Mode::Slow) => r
+            _ if !if_range_holds => None,
+            (Some(r), Mode::Normal | Mode::Slow | Mode::IgnoreIfRange) => r
                 .strip_prefix("bytes=")
                 .and_then(|r| r.strip_suffix('-'))
                 .and_then(|n| n.parse::<u64>().ok()),
@@ -135,13 +160,13 @@ impl TestServer {
             Some(s) => (
                 206,
                 format!(
-                    "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {s}-{}/{len}\r\nContent-Length: {}\r\n",
+                    "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {s}-{}/{len}\r\nContent-Length: {}\r\nETag: {etag}\r\n",
                     len - 1,
                     len - s
                 ),
                 &file[s as usize..],
             ),
-            None => (200, format!("HTTP/1.1 200 OK\r\nContent-Length: {len}\r\n"), &file[..]),
+            None => (200, format!("HTTP/1.1 200 OK\r\nContent-Length: {len}\r\nETag: {etag}\r\n"), &file[..]),
         };
         record(status);
         socket.write_all(format!("{head}Connection: close\r\n\r\n").as_bytes()).await?;
@@ -294,7 +319,7 @@ fn three_track_plan(server: &TestServer, scratch: &Path) -> DownloadPlan {
             end_ms: (i as u64 + 1) * 2000,
         })
         .collect();
-    DownloadPlan { parts, embed_metadata: true, chapters, join_parts: true }
+    DownloadPlan { parts, embed_metadata: true, chapters, join_parts: true, licence_throttled: false }
 }
 
 // ------------------------------------------------------------------ tests
@@ -324,6 +349,7 @@ async fn single_plain_m4b_is_tagged_with_cover_and_sidecars() {
         embed_metadata: true,
         chapters: vec![],
         join_parts: false,
+        licence_throttled: false,
     };
     let job = job(plan, meta(Some(cover)), OutputFormat::M4b, root.path(), true);
     let (dest, work) = (job.dest_dir.clone(), job.work_dir.clone());
@@ -442,6 +468,7 @@ async fn mixed_codec_tracks_are_joined_by_reencoding() {
         embed_metadata: true,
         chapters: vec![],
         join_parts: true,
+        licence_throttled: false,
     };
     let out = run(job(plan, meta(None), OutputFormat::M4b, root.path(), false), &tools)
         .await
@@ -490,6 +517,7 @@ async fn zip_parts_are_extracted_flat_and_safely() {
         embed_metadata: false,
         chapters: vec![],
         join_parts: false,
+        licence_throttled: false,
     };
     let job = job(plan, meta(None), OutputFormat::Mp3, root.path(), true);
     let dest = job.dest_dir.clone();
@@ -540,6 +568,7 @@ fn big_plain_plan(server: &TestServer, scratch: &Path) -> (DownloadPlan, Vec<u8>
         embed_metadata: false,
         chapters: vec![],
         join_parts: false,
+        licence_throttled: false,
     };
     (plan, bytes)
 }
@@ -564,6 +593,7 @@ async fn cancelled_download_resumes_with_a_range_request() {
         .expect("a ranged request");
     assert_eq!(resumed.path, "/big.m4b");
     assert_eq!(resumed.range.as_deref(), Some(format!("bytes={partial_size}-").as_str()));
+    assert!(resumed.if_range.is_some(), "the resume names the object it continues");
     assert_eq!(resumed.status, 206);
     assert_eq!(std::fs::read(&out.audio_files[0]).unwrap(), original, "byte-identical");
 }
@@ -587,6 +617,56 @@ async fn a_server_that_ignores_range_restarts_the_download() {
     assert_eq!(std::fs::read(&out.audio_files[0]).unwrap(), original);
 }
 
+/// The object behind the download's name is replaced between runs (a new signed URL for
+/// a re-encoded file, a CDN swap). The partial of the old object must not be resumed.
+async fn replace_object_behind_partial(mode: Mode) -> Option<(Vec<Hit>, Vec<u8>, Vec<u8>)> {
+    let tools = tools_or_skip().await?;
+    let root = tempfile::tempdir().unwrap();
+    let server = TestServer::start().await;
+    let (plan, _) = big_plain_plan(&server, root.path());
+    let (partial_size, partial) =
+        cancelled_partial_download(&tools, &server, plan.clone(), root.path()).await;
+    assert!(partial_size > 0);
+    assert!(
+        partial.with_file_name("book.m4b.part.meta").exists(),
+        "the partial records which object it holds"
+    );
+    let first_run_hits = server.hits().len();
+
+    let other = tone(root.path(), "other-src.m4b", 880, 30, 44_100, "aac", &["-f", "ipod"]);
+    server.add("big.m4b", other.clone());
+    server.set_mode(mode);
+    let out = run(job(plan, meta(None), OutputFormat::M4b, root.path(), false), &tools)
+        .await
+        .expect("run against the replaced object");
+    let produced = std::fs::read(&out.audio_files[0]).unwrap();
+    let hits = server.hits().split_off(first_run_hits);
+    Some((hits, produced, other))
+}
+
+#[tokio::test]
+async fn a_partial_of_a_replaced_object_is_not_resumed() {
+    let Some((hits, produced, other)) = replace_object_behind_partial(Mode::Normal).await else {
+        return;
+    };
+    let resume = &hits[0];
+    assert!(resume.range.is_some() && resume.if_range.is_some(), "{resume:?}");
+    assert_eq!(resume.status, 200, "a stale If-Range gets the whole new file");
+    assert_eq!(produced, other, "no bytes of the old object survive");
+}
+
+#[tokio::test]
+async fn a_server_ignoring_if_range_cannot_splice_two_objects() {
+    let Some((hits, produced, other)) = replace_object_behind_partial(Mode::IgnoreIfRange).await
+    else {
+        return;
+    };
+    assert_eq!(hits[0].status, 206, "the server resumed regardless: {hits:?}");
+    let restart = hits.iter().skip(1).find(|h| h.range.is_none()).expect("a fresh download");
+    assert_eq!(restart.status, 200);
+    assert_eq!(produced, other, "the changed object was noticed and fetched whole");
+}
+
 #[tokio::test]
 async fn a_truncated_file_fails_validation_and_is_kept() {
     let Some(tools) = tools_or_skip().await else { return };
@@ -600,6 +680,7 @@ async fn a_truncated_file_fails_validation_and_is_kept() {
         embed_metadata: false,
         chapters: vec![],
         join_parts: false,
+        licence_throttled: false,
     };
     let job = job(plan, meta(None), OutputFormat::M4b, root.path(), false);
     let (work, dest) = (job.work_dir.clone(), job.dest_dir.clone());
@@ -621,6 +702,7 @@ async fn a_refused_link_is_reported_as_expired() {
         embed_metadata: false,
         chapters: vec![],
         join_parts: false,
+        licence_throttled: false,
     };
     let err = run(job(plan, meta(None), OutputFormat::M4b, root.path(), false), &tools)
         .await

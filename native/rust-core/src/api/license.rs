@@ -298,6 +298,12 @@ pub struct DownloadLicense {
 
     /// Download URL (extracted from content_metadata or DASH manifest)
     pub download_url: String,
+
+    /// Audible refused the AAXC licence as `CustomerThrottled` and this licence came
+    /// from the legacy AAX fallback instead. The licence is usable, but the account is
+    /// throttled: anything that paces licence requests must back off as if the request
+    /// had been refused.
+    pub throttled_fallback: bool,
 }
 
 /// Key data for decryption
@@ -596,6 +602,43 @@ impl AudibleClient {
         asin: &str,
         request: &LicenseRequest,
     ) -> Result<ContentLicense> {
+        self.request_license(asin, request)
+            .await
+            .map_err(Self::rate_limit_as_throttle)
+    }
+
+    /// HTTP 429 from `licenserequest` is Audible rate-limiting the account, the same
+    /// thing `CustomerThrottled` says inside a 200. Report it as a throttled refusal so
+    /// callers back off (`error_code()` = `license_throttled`) instead of treating it as
+    /// a network blip and retrying into it. 5xx stays a transport error.
+    fn rate_limit_as_throttle(error: LibationError) -> LibationError {
+        if !Self::is_rate_limited(&error) {
+            return error;
+        }
+        LibationError::LicenseDenied {
+            reason: "Audible is rate-limiting download licences for this account (HTTP 429). \
+                     Wait a while, then try again."
+                .to_string(),
+            throttled: true,
+        }
+    }
+
+    fn is_rate_limited(error: &LibationError) -> bool {
+        matches!(
+            error,
+            LibationError::ApiRequestFailed { status_code: Some(429), .. }
+                | LibationError::RateLimitExceeded { .. }
+        )
+    }
+
+    /// [`Self::get_download_license`] without the 429 mapping, so
+    /// [`Self::build_download_license`] can tell an HTTP rate limit (never fall back)
+    /// from a `CustomerThrottled` refusal (fall back to AAX).
+    async fn request_license(
+        &self,
+        asin: &str,
+        request: &LicenseRequest,
+    ) -> Result<ContentLicense> {
         let endpoint = format!("/1.0/content/{}/licenserequest", asin);
 
         // post_once, not post: a licence request must never be retried automatically.
@@ -805,6 +848,7 @@ impl AudibleClient {
             // 4 bytes marks this as activation bytes; an AAXC key is 16.
             decryption_keys: Some(vec![KeyData { key_part_1: key, key_part_2: None }]),
             download_url,
+            throttled_fallback: false,
         })
     }
 
@@ -970,8 +1014,12 @@ impl AudibleClient {
 
         // Podcast episodes are plain MP3 assets. Audible rejects ADRM for them
         // with a Sable asset-details error, then accepts a Download+Mpeg request.
-        let license = match self.get_download_license(asin, &request).await {
+        let license = match self.request_license(asin, &request).await {
             Ok(license) => license,
+            // An HTTP rate limit: going on to the AAX service would be retrying into it.
+            Err(error) if Self::is_rate_limited(&error) => {
+                return Err(Self::rate_limit_as_throttle(error));
+            }
             Err(error)
                 if !prefer_widevine
                     && drm_type == DrmType::Adrm
@@ -989,11 +1037,17 @@ impl AudibleClient {
             // Upstream has this fallback but only reaches it when `licenserequest`
             // *throws*; a refusal arrives as HTTP 200 with `status_code: "Denied"`, so
             // its escape hatch never fires for the current outage.
+            //
+            // A throttled refusal stays visible on the result (`throttled_fallback`):
+            // the AAX licence is usable, but a caller that paces licence requests must
+            // still treat the account as throttled.
             Err(error @ LibationError::LicenseDenied { .. }) => {
                 eprintln!("Licence denied ({error}); falling back to the AAX service");
+                let throttled = matches!(error, LibationError::LicenseDenied { throttled: true, .. });
                 return self
                     .aax_download_license(asin)
                     .await
+                    .map(|license| DownloadLicense { throttled_fallback: throttled, ..license })
                     .map_err(|fallback| Self::with_fallback_failure(error, &fallback));
             }
             Err(error) => return Err(error),
@@ -1047,6 +1101,7 @@ impl AudibleClient {
             content_metadata: license.content_metadata,
             decryption_keys,
             download_url,
+            throttled_fallback: false,
         })
     }
 
@@ -1774,6 +1829,58 @@ mod tests {
             "podcast episodes need Mpeg offered: {}",
             licence_requests[0]
         );
+    }
+
+    /// HTTP 429 from the licence endpoint is a throttle, not a network blip, and must not
+    /// go on to the AAX service: that would be retrying into the rate limit.
+    #[tokio::test]
+    async fn rate_limited_licence_request_is_throttled_without_fallback() {
+        static ROUTES: &[(&str, u16, &str)] = &[
+            ("/1.0/content/B0RATELIMT/licenserequest", 429, r#"{"message":"Too many requests"}"#),
+            ("/1.0/library/B0RATELIMT", 200, r#"{"item":{"asin":"B0RATELIMT","available_codecs":[{"enhanced_codec":"LC_64_44100_stereo"}]}}"#),
+        ];
+        let (url, seen) = mock_api(ROUTES).await;
+        let client = signed_in_client(&url);
+
+        let error = match client
+            .build_download_license("B0RATELIMT", DownloadQuality::High, false)
+            .await
+        {
+            Ok(_) => panic!("a rate-limited licence must not succeed"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, LibationError::LicenseDenied { throttled: true, .. }),
+            "{error:?}"
+        );
+        assert_eq!(error.error_code(), "license_throttled");
+
+        let requests = seen.lock().unwrap().clone();
+        assert_eq!(requests.len(), 1, "only the licence request may be sent: {requests:?}");
+        assert!(requests[0].starts_with("POST /1.0/content/B0RATELIMT/licenserequest"));
+
+        // The lower-level call classifies it the same way.
+        let direct = client
+            .get_download_license("B0RATELIMT", &LicenseRequest::default())
+            .await
+            .err()
+            .expect("429 must be an error");
+        assert_eq!(direct.error_code(), "license_throttled");
+    }
+
+    /// A 5xx from the licence endpoint stays a transport error.
+    #[tokio::test]
+    async fn server_error_from_licence_endpoint_stays_network() {
+        static ROUTES: &[(&str, u16, &str)] =
+            &[("/1.0/content/B0SERVERER/licenserequest", 503, r#"{"message":"unavailable"}"#)];
+        let (url, _seen) = mock_api(ROUTES).await;
+        let client = signed_in_client(&url);
+        let error = client
+            .get_download_license("B0SERVERER", &LicenseRequest::default())
+            .await
+            .err()
+            .expect("503 must be an error");
+        assert_eq!(error.error_code(), "network");
     }
 
     /// A granted podcast licence is plain MP3: `drm_type` Mpeg, an offline URL, and no

@@ -10,13 +10,22 @@
 //! Layout: bytes stream into `<target>.part`; only a verified-complete file is renamed
 //! to `<target>`. A later run finds either the finished file (reused) or the partial
 //! (resumed with `Range`).
+//!
+//! A partial is only resumed against the object it came from. When a download starts,
+//! `<target>.part.meta` records the total length and the `ETag` / `Last-Modified` the
+//! server sent; a resume sends `If-Range` with that validator, and the partial is
+//! discarded if the server answers with the whole file, a different total length or a
+//! different validator. A partial without its sidecar is never resumed.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_RANGE, RANGE};
+use reqwest::header::{
+    HeaderMap, HeaderName, HeaderValue, CONTENT_RANGE, ETAG, IF_RANGE, LAST_MODIFIED, RANGE,
+};
 use reqwest::StatusCode;
+use serde::{Deserialize, Serialize};
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio_util::sync::CancellationToken;
@@ -63,6 +72,85 @@ pub(crate) fn partial_path(target: &Path) -> PathBuf {
     target.with_file_name(name)
 }
 
+/// The sidecar describing which object a partial download belongs to.
+pub(crate) fn partial_meta_path(partial: &Path) -> PathBuf {
+    let mut name = partial.file_name().unwrap_or_default().to_os_string();
+    name.push(".meta");
+    partial.with_file_name(name)
+}
+
+/// What the server said about the object when a download started (`<name>.part.meta`).
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PartMeta {
+    #[serde(default)]
+    pub total: Option<u64>,
+    #[serde(default)]
+    pub etag: Option<String>,
+    #[serde(default)]
+    pub last_modified: Option<String>,
+}
+
+impl PartMeta {
+    fn from_headers(headers: &HeaderMap, total: Option<u64>) -> Self {
+        let text = |name| {
+            headers
+                .get(name)
+                .and_then(|v: &HeaderValue| v.to_str().ok())
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_string)
+        };
+        PartMeta { total, etag: text(ETAG), last_modified: text(LAST_MODIFIED) }
+    }
+
+    /// The validator for `If-Range`: a strong ETag, else `Last-Modified`. A weak ETag
+    /// may not be used there (RFC 9110 §13.1.5); the server would always send the
+    /// whole file.
+    pub(crate) fn if_range(&self) -> Option<&str> {
+        self.etag
+            .as_deref()
+            .filter(|tag| !tag.starts_with("W/"))
+            .or(self.last_modified.as_deref())
+    }
+
+    /// Whether `seen` (from a resumed response) describes the same object. Only values
+    /// both sides know are compared; the ETag decides when both have one.
+    pub(crate) fn same_object(&self, seen: &PartMeta) -> bool {
+        if let (Some(a), Some(b)) = (self.total, seen.total) {
+            if a != b {
+                return false;
+            }
+        }
+        let weak = |tag: &str| tag.trim_start_matches("W/").to_string();
+        match (&self.etag, &seen.etag) {
+            (Some(a), Some(b)) => weak(a) == weak(b),
+            _ => match (&self.last_modified, &seen.last_modified) {
+                (Some(a), Some(b)) => a == b,
+                _ => true,
+            },
+        }
+    }
+}
+
+async fn read_meta(partial: &Path) -> Option<PartMeta> {
+    let bytes = tokio::fs::read(partial_meta_path(partial)).await.ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+async fn write_meta(partial: &Path, meta: &PartMeta) -> Result<(), PipelineError> {
+    let path = partial_meta_path(partial);
+    let json = serde_json::to_vec(meta).map_err(|e| {
+        PipelineError::new(FailureKind::Io, format!("encoding {}: {e}", path.display()))
+    })?;
+    tokio::fs::write(&path, json)
+        .await
+        .map_err(|e| io_error(format_args!("writing {}", path.display()), e))
+}
+
+async fn remove_meta(partial: &Path) {
+    let _ = tokio::fs::remove_file(partial_meta_path(partial)).await;
+}
+
 /// Outcome of one HTTP attempt.
 enum Attempt {
     Complete,
@@ -101,7 +189,10 @@ fn header_map(headers: &Headers) -> Result<HeaderMap, PipelineError> {
 }
 
 /// Classify a reqwest error. Everything that isn't a malformed request is transient.
-fn network_error(e: &reqwest::Error) -> PipelineError {
+/// The URL is stripped from the message: download links are signed, and this message
+/// ends up in queue errors, history and webhooks.
+fn network_error(e: reqwest::Error) -> PipelineError {
+    let e = e.without_url();
     if e.is_builder() {
         PipelineError::new(FailureKind::InvalidPlan, format!("bad download URL: {e}"))
     } else {
@@ -155,6 +246,7 @@ pub(crate) async fn fetch_part(
                 tokio::fs::rename(&partial, req.target).await.map_err(|e| {
                     io_error(format_args!("finishing {}", req.target.display()), e)
                 })?;
+                remove_meta(&partial).await;
                 return Ok(Fetched::Downloaded);
             }
             Attempt::Retry { error, progressed } => {
@@ -179,7 +271,9 @@ pub(crate) async fn fetch_part(
     }
 }
 
+/// Empty a partial download and forget which object it belonged to.
 async fn truncate(path: &Path) -> Result<(), PipelineError> {
+    remove_meta(path).await;
     File::create(path)
         .await
         .map(|_| ())
@@ -196,10 +290,22 @@ async fn attempt(
     reporter: &Reporter,
     cancel: &CancellationToken,
 ) -> Result<Attempt, PipelineError> {
-    let offset = tokio::fs::metadata(partial).await.map(|m| m.len()).unwrap_or(0);
+    let mut offset = tokio::fs::metadata(partial).await.map(|m| m.len()).unwrap_or(0);
+    let stored = if offset > 0 { read_meta(partial).await } else { None };
+    if offset > 0 && stored.is_none() {
+        // Nothing says which object these bytes came from, so they can't be trusted.
+        log::warn!("pipeline: part {}: partial file has no record of its source; restarting", req.part);
+        truncate(partial).await?;
+        offset = 0;
+    }
     let mut request = http.get(req.url).headers(headers.clone());
     if offset > 0 {
         request = request.header(RANGE, format!("bytes={offset}-"));
+        if let Some(validator) = stored.as_ref().and_then(PartMeta::if_range) {
+            if let Ok(value) = HeaderValue::from_str(validator) {
+                request = request.header(IF_RANGE, value);
+            }
+        }
     }
     let response = tokio::select! {
         _ = cancel.cancelled() => return Err(cancelled()),
@@ -213,7 +319,7 @@ async fn attempt(
             })
         }
         Ok(Err(e)) => {
-            let error = network_error(&e);
+            let error = network_error(e);
             if error.kind == FailureKind::InvalidPlan {
                 return Err(error);
             }
@@ -229,9 +335,30 @@ async fn attempt(
         .and_then(|v| v.to_str().ok())
         .and_then(parse_content_range);
 
+    // What this response says about the object, to compare with the stored sidecar.
+    let different_object = |total: Option<u64>| {
+        let seen = PartMeta::from_headers(response.headers(), total);
+        stored.as_ref().is_some_and(|stored| !stored.same_object(&seen))
+    };
+
     // (write offset, expected total)
     let (start_at, total) = match status {
         StatusCode::PARTIAL_CONTENT if offset > 0 => match content_range {
+            Some((Some(start), total)) if start == offset && different_object(total) => {
+                log::warn!(
+                    "pipeline: part {}: the file on the server changed since the partial \
+                     download; restarting",
+                    req.part
+                );
+                truncate(partial).await?;
+                return Ok(Attempt::Retry {
+                    error: PipelineError::new(
+                        FailureKind::Http,
+                        "the file on the server changed during the download",
+                    ),
+                    progressed: false,
+                });
+            }
             Some((Some(start), total)) if start == offset => (offset, total),
             _ => {
                 log::warn!(
@@ -246,7 +373,9 @@ async fn attempt(
             }
         },
         StatusCode::RANGE_NOT_SATISFIABLE if offset > 0 => {
-            if matches!(content_range, Some((None, Some(total))) if total == offset) {
+            if matches!(content_range, Some((None, Some(total))) if total == offset)
+                && !different_object(Some(offset))
+            {
                 // The partial already holds every byte.
                 reporter.download(req.part, offset, Some(offset), None, true);
                 return Ok(Attempt::Complete);
@@ -276,6 +405,8 @@ async fn attempt(
     };
 
     let file = if start_at == 0 {
+        // Record which object the partial will hold before the first byte lands in it.
+        write_meta(partial, &PartMeta::from_headers(response.headers(), total)).await?;
         File::create(partial).await
     } else {
         OpenOptions::new().append(true).open(partial).await
@@ -308,7 +439,7 @@ async fn attempt(
                 ))
             }
             Ok(None) => break None,
-            Ok(Some(Err(e))) => break Some(network_error(&e)),
+            Ok(Some(Err(e))) => break Some(network_error(e)),
             Ok(Some(Ok(chunk))) => {
                 if let Err(e) = writer.write_all(&chunk).await {
                     let _ = writer.flush().await;
@@ -378,6 +509,44 @@ mod tests {
     #[test]
     fn partial_path_appends_part() {
         assert_eq!(partial_path(Path::new("/w/001.m4a")), Path::new("/w/001.m4a.part"));
+    }
+
+    #[test]
+    fn partial_meta_sits_next_to_the_partial() {
+        assert_eq!(
+            partial_meta_path(&partial_path(Path::new("/w/001.m4a"))),
+            Path::new("/w/001.m4a.part.meta")
+        );
+    }
+
+    fn meta(total: Option<u64>, etag: Option<&str>, modified: Option<&str>) -> PartMeta {
+        PartMeta {
+            total,
+            etag: etag.map(str::to_string),
+            last_modified: modified.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn if_range_prefers_a_strong_etag() {
+        let lm = "Wed, 21 Oct 2026 07:28:00 GMT";
+        assert_eq!(meta(None, Some("\"a\""), Some(lm)).if_range(), Some("\"a\""));
+        assert_eq!(meta(None, Some("W/\"a\""), Some(lm)).if_range(), Some(lm));
+        assert_eq!(meta(None, Some("W/\"a\""), None).if_range(), None);
+        assert_eq!(meta(Some(5), None, None).if_range(), None);
+    }
+
+    #[test]
+    fn same_object_compares_what_both_sides_know() {
+        let stored = meta(Some(100), Some("\"a\""), Some("Mon"));
+        assert!(stored.same_object(&meta(Some(100), Some("\"a\""), Some("Tue"))));
+        assert!(stored.same_object(&meta(Some(100), Some("W/\"a\""), None)));
+        assert!(stored.same_object(&meta(None, None, None)));
+        assert!(!stored.same_object(&meta(Some(101), Some("\"a\""), None)));
+        assert!(!stored.same_object(&meta(Some(100), Some("\"b\""), None)));
+        let no_tag = meta(Some(100), None, Some("Mon"));
+        assert!(!no_tag.same_object(&meta(Some(100), None, Some("Tue"))));
+        assert!(no_tag.same_object(&meta(Some(100), Some("\"x\""), Some("Mon"))));
     }
 
     #[test]

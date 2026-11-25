@@ -1,0 +1,60 @@
+[package]
+name = "librisync-server"
+version = "0.1.0"
+edition = "2021"
+description = "Self-hosted LibriSync daemon: syncs and downloads purchased audiobook libraries"
+license = "GPL-3.0-or-later"
+publish = false
+
+[[bin]]
+name = "librisync-server"
+path = "src/main.rs"
+
+[dependencies]
+rust-core = { path = "../native/rust-core" }
+
+# Must match rust-core's majors: two libsqlite3-sys versions won't link, and
+# `pipeline::run` takes rust-core's `reqwest::Client`.
+sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio", "sqlite", "chrono", "migrate", "macros"] }
+reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "json", "stream"] }
+
+tokio = { version = "1.35", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures-util = "0.3"
+async-trait = "0.1"
+
+axum = { version = "0.8", features = ["macros"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["compression-gzip", "trace", "catch-panic"] }
+rust-embed = "8.5"
+mime_guess = "2"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde", "clock"] }
+thiserror = "1"
+anyhow = "1"
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"] }
+tracing-appender = "0.2"
+
+argon2 = "0.5"
+rand = "0.8"
+sha2 = "0.10"
+hex = "0.4"
+uuid = { version = "1", features = ["v4"] }
+url = "2"
+urlencoding = "2"
+fs2 = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

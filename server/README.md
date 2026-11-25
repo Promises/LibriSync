@@ -15,10 +15,20 @@ It shares its Rust core with the [LibriSync](../README.md) Android app.
 
 ## Quick start
 
+No prebuilt image is published; you build it from this repository. Docker builds for
+whatever architecture it runs on (amd64 or arm64).
+
+```bash
+git clone https://github.com/Promises/LibriSync.git && cd LibriSync
+docker build -f server/Dockerfile -t librisync-server .
+```
+
+Then run it, e.g. with compose (`server/docker-compose.example.yml` builds the image itself):
+
 ```yaml
 services:
   librisync:
-    image: ghcr.io/promises/librisync-server:latest
+    image: librisync-server
     environment:
       - PUID=1000
       - PGID=1000
@@ -100,11 +110,6 @@ cd server && cargo run                     # needs ffmpeg ≥ 4.4 with libmp3lam
                                            # set LIBRISYNC_CONFIG_DIR / LIBRISYNC_LIBRARY_DIR
                                            # to writable folders
 ```
-
-Release images are built by `.github/workflows/server-image.yml` when a `server-vX.Y.Z`
-tag is pushed. Each architecture (amd64, arm64) builds natively on its own runner, and
-the results are merged into one multi-arch image. App release tags (`vX.Y.Z`) don't
-trigger it.
 
 ## Not supported (yet)
 

@@ -5,9 +5,9 @@
 #
 #   docker build -f server/Dockerfile -t librisync-server .
 #
-# Multi-arch images are built natively per architecture in CI (see
-# .github/workflows/server-image.yml) — compiling Rust under QEMU is slow and has
-# segfaulted rustc for this project before.
+# No image is published; build it on (or for) the machine that runs it. Avoid
+# cross-building another architecture under QEMU — compiling Rust that way is slow and
+# has segfaulted rustc for this project before.
 
 # ---- web UI (architecture-independent output) --------------------------------------
 FROM --platform=$BUILDPLATFORM node:22-slim AS web

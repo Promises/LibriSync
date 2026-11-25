@@ -901,7 +901,7 @@ mod tests {
     }
 
     fn plan(parts: Vec<DownloadPart>, join: bool) -> DownloadPlan {
-        DownloadPlan { parts, embed_metadata: true, chapters: Vec::<PlanChapter>::new(), join_parts: join }
+        DownloadPlan { parts, embed_metadata: true, chapters: Vec::<PlanChapter>::new(), join_parts: join, licence_throttled: false }
     }
 
     #[test]

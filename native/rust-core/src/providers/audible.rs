@@ -176,6 +176,7 @@ impl Provider for AudibleProvider {
                     embed_metadata: true,
                     chapters,
                     join_parts: false,
+                    licence_throttled: false,
                 });
             }
             if kd.key_part_1.len() != 16 {
@@ -206,6 +207,7 @@ impl Provider for AudibleProvider {
             embed_metadata: true,
             chapters,
             join_parts: false,
+            licence_throttled: false,
         })
     }
 }

@@ -294,7 +294,7 @@ fn three_track_plan(server: &TestServer, scratch: &Path) -> DownloadPlan {
             end_ms: (i as u64 + 1) * 2000,
         })
         .collect();
-    DownloadPlan { parts, embed_metadata: true, chapters, join_parts: true }
+    DownloadPlan { parts, embed_metadata: true, chapters, join_parts: true, licence_throttled: false }
 }
 
 // ------------------------------------------------------------------ tests
@@ -324,6 +324,7 @@ async fn single_plain_m4b_is_tagged_with_cover_and_sidecars() {
         embed_metadata: true,
         chapters: vec![],
         join_parts: false,
+        licence_throttled: false,
     };
     let job = job(plan, meta(Some(cover)), OutputFormat::M4b, root.path(), true);
     let (dest, work) = (job.dest_dir.clone(), job.work_dir.clone());
@@ -442,6 +443,7 @@ async fn mixed_codec_tracks_are_joined_by_reencoding() {
         embed_metadata: true,
         chapters: vec![],
         join_parts: true,
+        licence_throttled: false,
     };
     let out = run(job(plan, meta(None), OutputFormat::M4b, root.path(), false), &tools)
         .await
@@ -490,6 +492,7 @@ async fn zip_parts_are_extracted_flat_and_safely() {
         embed_metadata: false,
         chapters: vec![],
         join_parts: false,
+        licence_throttled: false,
     };
     let job = job(plan, meta(None), OutputFormat::Mp3, root.path(), true);
     let dest = job.dest_dir.clone();
@@ -540,6 +543,7 @@ fn big_plain_plan(server: &TestServer, scratch: &Path) -> (DownloadPlan, Vec<u8>
         embed_metadata: false,
         chapters: vec![],
         join_parts: false,
+        licence_throttled: false,
     };
     (plan, bytes)
 }
@@ -600,6 +604,7 @@ async fn a_truncated_file_fails_validation_and_is_kept() {
         embed_metadata: false,
         chapters: vec![],
         join_parts: false,
+        licence_throttled: false,
     };
     let job = job(plan, meta(None), OutputFormat::M4b, root.path(), false);
     let (work, dest) = (job.work_dir.clone(), job.dest_dir.clone());
@@ -621,6 +626,7 @@ async fn a_refused_link_is_reported_as_expired() {
         embed_metadata: false,
         chapters: vec![],
         join_parts: false,
+        licence_throttled: false,
     };
     let err = run(job(plan, meta(None), OutputFormat::M4b, root.path(), false), &tools)
         .await

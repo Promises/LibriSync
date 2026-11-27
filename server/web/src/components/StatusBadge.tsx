@@ -1,7 +1,21 @@
+import { Sparkles } from 'lucide-react';
 import type { BookStatus, QueueItem } from '../api/types';
 import { formatPercent } from '../lib/format';
 import { BOOK_STATUS } from '../lib/meta';
 import { Badge } from './Badge';
+
+/** Marks an Audible Plus catalogue title. */
+export function PlusBadge() {
+  return (
+    <Badge
+      tone="special"
+      icon={<Sparkles />}
+      title="Audible Plus catalogue title: downloadable only while you have an active Audible Plus membership"
+    >
+      Plus
+    </Badge>
+  );
+}
 
 /**
  * A book's status. While it is downloading, the live queue item (kept fresh by SSE)

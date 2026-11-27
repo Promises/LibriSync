@@ -2,7 +2,7 @@ import type { BookView, QueueItem } from '../../api/types';
 import { Cover } from '../../components/Cover';
 import { ProgressBar } from '../../components/Progress';
 import { ProviderIcon } from '../../components/ProviderIcon';
-import { BookStatusBadge } from '../../components/StatusBadge';
+import { BookStatusBadge, PlusBadge } from '../../components/StatusBadge';
 import { joinNames } from '../../lib/format';
 import styles from './BookGrid.module.css';
 
@@ -34,8 +34,11 @@ export function BookGrid({
                 <input type="checkbox" checked={isSelected} onChange={() => onToggle(book.id)} />
                 <span className="visually-hidden">Select {book.title}</span>
               </label>
-              <span className={styles.provider}>
-                <ProviderIcon provider={book.provider} size="sm" />
+              <span className={styles.corner}>
+                <span className={styles.provider}>
+                  <ProviderIcon provider={book.provider} size="sm" />
+                </span>
+                {book.plusCatalog && book.status !== 'excluded' && <PlusBadge />}
               </span>
               <span className={styles.status}>
                 <BookStatusBadge status={book.status} queueItem={q} />

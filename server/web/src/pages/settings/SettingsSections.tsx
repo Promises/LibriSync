@@ -296,6 +296,12 @@ export function AudibleSection({ draft, set, errors }: SectionProps) {
             />
           )}
         </FormField>
+        <Switch
+          label="Download Audible Plus catalogue titles"
+          description="Plus titles can only be downloaded while you have an active Audible Plus membership. Off: they're left out of back-fill and new-purchase downloads; you can still download one manually."
+          checked={a.includePlusCatalog}
+          onChange={(v) => set('audible', 'includePlusCatalog', v)}
+        />
       </div>
     </Card>
   );

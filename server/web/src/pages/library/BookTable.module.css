@@ -6,6 +6,11 @@
   min-width: 180px;
 }
 
+.plus {
+  margin-left: var(--space-2);
+  vertical-align: middle;
+}
+
 @media (max-width: 700px) {
   .titleCell {
     min-width: 0;

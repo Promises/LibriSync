@@ -14,3 +14,9 @@
 .coverCol {
   width: 56px;
 }
+
+.badges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}

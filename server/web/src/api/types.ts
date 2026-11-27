@@ -142,6 +142,8 @@ export type BookStatus =
   | 'queued'
   | 'downloading'
   | 'wanted'
+  /** An Audible Plus title left out of automatic downloads (audible.includePlusCatalog off). */
+  | 'excluded'
   | 'cooldown'
   | 'failed'
   | 'skipped';
@@ -162,6 +164,8 @@ export type BookView = {
   purchaseDate: string | null;
   addedAt: Timestamp;
   status: BookStatus;
+  /** An Audible Plus catalogue title. */
+  plusCatalog: boolean;
   /** Relative to libraryDir. */
   outputPath: string | null;
   format: OutputFormat | null;
@@ -329,6 +333,8 @@ export type Settings = {
     spacingMaxMinutes: number;
     /** Base, doubles; default 24. */
     throttleCooldownHours: number;
+    /** Download Audible Plus catalogue titles automatically; default false. */
+    includePlusCatalog: boolean;
   };
   downloads: {
     /** 1..4 */

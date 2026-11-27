@@ -186,10 +186,17 @@ pub enum LibationError {
 
     /// Audible refused to license the download. `reason` is Audible's own wording;
     /// `throttled` marks the CustomerThrottled case, which is temporary and worth
-    /// retrying later rather than reporting as a broken book.
+    /// retrying later rather than reporting as a broken book. `not_entitled` marks an
+    /// unthrottled refusal because the customer has no right to the title (an Audible
+    /// Plus catalogue title without a membership, or a title no longer owned): no other
+    /// route — the legacy AAX service included — will produce the book.
     /// Reference: AudibleApi/ApiExceptions/ContentLicenseDeniedException.cs
     #[error("Audible denied the download license: {reason}")]
-    LicenseDenied { reason: String, throttled: bool },
+    LicenseDenied {
+        reason: String,
+        throttled: bool,
+        not_entitled: bool,
+    },
 
     /// Server returned unexpected status code (maps to WebException in NetworkFileStream.cs)
     #[error("Server responded with unexpected status code: {status_code}")]
@@ -884,10 +891,12 @@ mod tests {
         let throttled = LibationError::LicenseDenied {
             reason: "CustomerThrottled".into(),
             throttled: true,
+            not_entitled: false,
         };
         let denied = LibationError::LicenseDenied {
             reason: "NotOwned".into(),
             throttled: false,
+            not_entitled: true,
         };
         assert_eq!(throttled.error_code(), "license_throttled");
         assert_eq!(denied.error_code(), "license_denied");

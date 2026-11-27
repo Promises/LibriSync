@@ -12,7 +12,8 @@ use crate::queue::SLOT_STATES_SQL;
 use crate::template::TemplateValues;
 use crate::time;
 
-pub const STATUSES: &[&str] = &["downloaded", "queued", "downloading", "wanted", "cooldown", "failed", "skipped"];
+pub const STATUSES: &[&str] =
+    &["downloaded", "queued", "downloading", "wanted", "excluded", "cooldown", "failed", "skipped"];
 
 /// `BookView` in API.md.
 #[derive(Debug, Clone, Serialize)]
@@ -33,6 +34,8 @@ pub struct BookView {
     pub purchase_date: Option<String>,
     pub added_at: String,
     pub status: String,
+    /// An Audible Plus catalogue title (`Books.is_ayce`).
+    pub plus_catalog: bool,
     pub output_path: Option<String>,
     pub format: Option<String>,
     pub downloaded_at: Option<String>,
@@ -83,6 +86,9 @@ pub struct BookQuery {
     pub page_size: i64,
     /// Restrict to one book (detail view).
     pub id: Option<String>,
+    /// `audible.includePlusCatalog`: when false, a Plus title that would otherwise be
+    /// `wanted` is `excluded`.
+    pub include_plus: bool,
 }
 
 impl Default for BookQuery {
@@ -97,6 +103,7 @@ impl Default for BookQuery {
             page: 1,
             page_size: 50,
             id: None,
+            include_plus: false,
         }
     }
 }
@@ -119,6 +126,7 @@ struct Row {
     qerror: Option<String>,
     backoff_until: Option<String>,
     status: String,
+    plus_catalog: bool,
 }
 
 /// Escape `%`, `_` and `\` for a `LIKE ... ESCAPE '\'` pattern.
@@ -155,7 +163,9 @@ fn base_sql(q: &BookQuery, now: &str, binds: &mut Vec<Bind>) -> String {
                      WHEN s.book_id IS NOT NULL THEN 'skipped'
                      WHEN tb.until > ?1 THEN 'cooldown'
                      WHEN q.state = 'failed' THEN 'failed'
-                     ELSE 'wanted' END AS status{}
+                     WHEN b.is_ayce = 1 AND ?2 = 0 THEN 'excluded'
+                     ELSE 'wanted' END AS status,
+                b.is_ayce = 1 AS plus_catalog{}
          FROM core.Books b
          LEFT JOIN downloads d ON d.book_id = b.audible_product_id
          LEFT JOIN queue q ON q.book_id = b.audible_product_id AND q.state IN {SLOT_STATES_SQL}
@@ -173,6 +183,7 @@ fn base_sql(q: &BookQuery, now: &str, binds: &mut Vec<Bind>) -> String {
         }
     );
     binds.push(Bind::Text(now.to_string()));
+    binds.push(Bind::Int(i64::from(q.include_plus)));
 
     if let Some(id) = &q.id {
         binds.push(Bind::Text(id.clone()));
@@ -250,8 +261,9 @@ pub async fn list(pool: &SqlitePool, q: &BookQuery) -> sqlx::Result<(i64, Vec<Bo
     Ok((total, views))
 }
 
-pub async fn get(pool: &SqlitePool, id: &str) -> sqlx::Result<Option<BookView>> {
-    let q = BookQuery { id: Some(id.to_string()), page_size: 1, ..Default::default() };
+/// One book. `include_plus` is `audible.includePlusCatalog` (it decides `excluded`).
+pub async fn get(pool: &SqlitePool, id: &str, include_plus: bool) -> sqlx::Result<Option<BookView>> {
+    let q = BookQuery { id: Some(id.to_string()), page_size: 1, include_plus, ..Default::default() };
     Ok(list(pool, &q).await?.1.into_iter().next())
 }
 
@@ -361,6 +373,7 @@ async fn hydrate(pool: &SqlitePool, rows: Vec<Row>) -> sqlx::Result<Vec<BookView
                 purchase_date: r.purchase_date.as_deref().map(time::api_from_core),
                 added_at: time::api_from_core(&r.created_at),
                 status: r.status,
+                plus_catalog: r.plus_catalog,
                 output_path: r.output_path,
                 format: r.format,
                 downloaded_at: r.downloaded_at,

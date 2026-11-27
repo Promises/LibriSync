@@ -620,6 +620,7 @@ impl AudibleClient {
                      Wait a while, then try again."
                 .to_string(),
             throttled: true,
+            not_entitled: false,
         }
     }
 
@@ -670,9 +671,9 @@ impl AudibleClient {
                 // tag with a status (older shape); otherwise report the fields.
                 if let Some(message) = license_json.get("message").and_then(|m| m.as_str()) {
                     let denial = Self::license_denied_error(license_json);
-                    if let LibationError::LicenseDenied { reason, throttled } = denial {
+                    if let LibationError::LicenseDenied { ref reason, .. } = denial {
                         if reason != "no reason given" {
-                            return Err(LibationError::LicenseDenied { reason, throttled });
+                            return Err(denial);
                         }
                     }
                     return Err(LibationError::ApiRequestFailed {
@@ -779,6 +780,18 @@ impl AudibleClient {
                      Wait a while, then try again. [{detail}]"
                 ),
                 throttled: true,
+                not_entitled: false,
+            };
+        }
+
+        if Self::is_entitlement_refusal(&reasons) {
+            return LibationError::LicenseDenied {
+                reason: format!(
+                    "Not entitled to this title — Audible Plus catalogue title without an \
+                     active membership, or no longer owned. [{detail}]"
+                ),
+                throttled: false,
+                not_entitled: true,
             };
         }
 
@@ -789,7 +802,26 @@ impl AudibleClient {
                 detail
             },
             throttled: false,
+            not_entitled: false,
         }
+    }
+
+    /// Whether a refusal's reasons say the customer has no right to the title: the
+    /// Ownership validator answering `RequesterEligibility` ("No Ownership information
+    /// returned by DAOQS"). That is an Audible Plus catalogue title without a
+    /// membership, or a title that was returned or removed. The legacy AAX service has
+    /// nothing to offer then — it answers with something that isn't audio — so such a
+    /// refusal must not fall back.
+    ///
+    /// Only meaningful for an *unthrottled* refusal: a throttle also lists knock-on
+    /// `Membership: RequesterEligibility` reasons, and the caller checks `throttled`
+    /// first. Membership alone is not enough either — it appears for owned titles too.
+    fn is_entitlement_refusal(reasons: &[serde_json::Value]) -> bool {
+        reasons.iter().any(|reason| {
+            let field = |name: &str| reason.get(name).and_then(|v| v.as_str()).unwrap_or("");
+            field("validationType").eq_ignore_ascii_case("Ownership")
+                && field("rejectionReason").eq_ignore_ascii_case("RequesterEligibility")
+        })
     }
 
     /// Add why the AAX fallback failed to the licence refusal it was standing in for.
@@ -797,9 +829,14 @@ impl AudibleClient {
     /// the fallback's reason used to go to stderr, which Android discards.
     fn with_fallback_failure(error: LibationError, fallback: &LibationError) -> LibationError {
         match error {
-            LibationError::LicenseDenied { reason, throttled } => LibationError::LicenseDenied {
+            LibationError::LicenseDenied {
+                reason,
+                throttled,
+                not_entitled,
+            } => LibationError::LicenseDenied {
                 reason: format!("{reason} Legacy AAX download also failed: {fallback}"),
                 throttled,
+                not_entitled,
             },
             other => other,
         }
@@ -1041,8 +1078,17 @@ impl AudibleClient {
             // A throttled refusal stays visible on the result (`throttled_fallback`):
             // the AAX licence is usable, but a caller that paces licence requests must
             // still treat the account as throttled.
+            //
+            // Except when the customer isn't entitled to the title (an Audible Plus
+            // catalogue title without a membership, or no longer owned): the AAX service
+            // then answers with something that isn't audio, and the download fails only
+            // after it has been fetched. Report the refusal as it is.
+            Err(error @ LibationError::LicenseDenied { not_entitled: true, .. }) => {
+                log::warn!("Licence for {asin} refused, not entitled: {error}");
+                return Err(error);
+            }
             Err(error @ LibationError::LicenseDenied { .. }) => {
-                eprintln!("Licence denied ({error}); falling back to the AAX service");
+                log::warn!("Licence for {asin} refused ({error}); falling back to the AAX service");
                 let throttled = matches!(error, LibationError::LicenseDenied { throttled: true, .. });
                 return self
                     .aax_download_license(asin)
@@ -1679,8 +1725,13 @@ mod tests {
     fn throttled_denial_keeps_every_reason() {
         let json: serde_json::Value = serde_json::from_str(THROTTLED_DENIAL).unwrap();
         match AudibleClient::license_denied_error(&json["content_license"]) {
-            LibationError::LicenseDenied { reason, throttled } => {
+            LibationError::LicenseDenied {
+                reason,
+                throttled,
+                not_entitled,
+            } => {
                 assert!(throttled);
+                assert!(!not_entitled, "a throttle is not an entitlement refusal");
                 assert!(reason.contains("throttling"), "{reason}");
                 assert!(reason.contains("AYCL: CustomerThrottled"), "{reason}");
                 assert!(reason.contains("Membership: RequesterEligibility"), "{reason}");
@@ -1690,18 +1741,95 @@ mod tests {
         }
     }
 
+    /// An Audible Plus catalogue title in the library of a customer without a
+    /// membership (seen 2026-11-26 on the server: 8 of 286 books). Shape and reasons as
+    /// Audible returned them; ids replaced.
+    const NOT_ENTITLED_DENIAL: &str = r#"{"content_license":{"status_code":"Denied","message":"License not granted to customer [A1TESTCUSTOMER] for asin [B0PLUSTITL]","license_denial_reasons":[{"validationType":"Membership","rejectionReason":"RequesterEligibility","message":"Customer is not part of any plans"},{"validationType":"Ownership","rejectionReason":"RequesterEligibility","message":"No Ownership information returned by DAOQS for customer [A1TESTCUSTOMER] and asin [B0PLUSTITL]"},{"validationType":"Client","rejectionReason":"RequesterEligibility","message":"Client [A2CZJZGLK2JJVM] does not has access to asin [B0PLUSTITL]"}]}}"#;
+
+    fn denial_reasons(json: &str) -> Vec<serde_json::Value> {
+        let json: serde_json::Value = serde_json::from_str(json).unwrap();
+        json["content_license"]["license_denial_reasons"]
+            .as_array()
+            .cloned()
+            .unwrap()
+    }
+
+    #[test]
+    fn ownership_refusal_is_an_entitlement_refusal() {
+        assert!(AudibleClient::is_entitlement_refusal(&denial_reasons(NOT_ENTITLED_DENIAL)));
+        // A throttle's knock-on Membership reason is not one.
+        assert!(!AudibleClient::is_entitlement_refusal(&denial_reasons(THROTTLED_DENIAL)));
+        // Neither is Membership alone, which owned titles can show too.
+        let membership_only = serde_json::json!([
+            {"validationType": "Membership", "rejectionReason": "RequesterEligibility"}
+        ]);
+        assert!(!AudibleClient::is_entitlement_refusal(
+            membership_only.as_array().unwrap()
+        ));
+        // Ownership refusing for another reason is not either.
+        let ownership_other = serde_json::json!([
+            {"validationType": "Ownership", "rejectionReason": "SomethingElse"}
+        ]);
+        assert!(!AudibleClient::is_entitlement_refusal(
+            ownership_other.as_array().unwrap()
+        ));
+    }
+
+    #[test]
+    fn not_entitled_denial_is_a_plain_denial_with_a_clear_message() {
+        let json: serde_json::Value = serde_json::from_str(NOT_ENTITLED_DENIAL).unwrap();
+        let error = AudibleClient::license_denied_error(&json["content_license"]);
+        assert_eq!(error.error_code(), "license_denied");
+        match error {
+            LibationError::LicenseDenied {
+                reason,
+                throttled,
+                not_entitled,
+            } => {
+                assert!(!throttled);
+                assert!(not_entitled);
+                assert!(reason.starts_with("Not entitled to this title"), "{reason}");
+                assert!(reason.contains("Audible Plus"), "{reason}");
+                assert!(reason.contains("Ownership: RequesterEligibility"), "{reason}");
+                assert!(!reason.contains("A1TESTCUSTOMER"), "customer id leaked: {reason}");
+            }
+            other => panic!("expected LicenseDenied, got {other:?}"),
+        }
+    }
+
+    /// A throttle that also names Ownership must stay a throttle (and keep falling back).
+    #[test]
+    fn throttle_listing_ownership_stays_a_throttle() {
+        let json = serde_json::json!({
+            "status_code": "Denied",
+            "license_denial_reasons": [
+                {"validationType": "Ownership", "rejectionReason": "RequesterEligibility"},
+                {"validationType": "AYCL", "rejectionReason": "CustomerThrottled"}
+            ]
+        });
+        assert!(matches!(
+            AudibleClient::license_denied_error(&json),
+            LibationError::LicenseDenied {
+                throttled: true,
+                not_entitled: false,
+                ..
+            }
+        ));
+    }
+
     #[test]
     fn failed_aax_fallback_is_reported_with_the_refusal() {
         let refusal = LibationError::LicenseDenied {
             reason: "throttled".to_string(),
             throttled: true,
+            not_entitled: false,
         };
         let fallback = LibationError::InvalidApiResponse {
             message: "B0HHYMGNRW reports no available codecs".to_string(),
             response_body: None,
         };
         match AudibleClient::with_fallback_failure(refusal, &fallback) {
-            LibationError::LicenseDenied { reason, throttled } => {
+            LibationError::LicenseDenied { reason, throttled, .. } => {
                 // Still throttled, so the Kotlin side still starts its cooldown.
                 assert!(throttled);
                 assert!(reason.starts_with("throttled"), "{reason}");
@@ -1810,7 +1938,7 @@ mod tests {
         };
 
         match &error {
-            LibationError::LicenseDenied { reason, throttled } => {
+            LibationError::LicenseDenied { reason, throttled, .. } => {
                 assert!(*throttled);
                 assert!(reason.contains("AYCL: CustomerThrottled"), "{reason}");
                 assert!(reason.contains("reports no available codecs"), "{reason}");
@@ -1829,6 +1957,35 @@ mod tests {
             "podcast episodes need Mpeg offered: {}",
             licence_requests[0]
         );
+    }
+
+    /// The Audible Plus case from 2026-11-26: refused for entitlement, the AAX service
+    /// used to be tried next and returned something that wasn't audio, which only failed
+    /// in validation — and was then retried with a fresh licence each time. Now: one
+    /// licence request, nothing else, and a `license_denied`.
+    #[tokio::test]
+    async fn not_entitled_refusal_does_not_fall_back_to_aax() {
+        static ROUTES: &[(&str, u16, &str)] = &[
+            ("/1.0/content/B0PLUSTITL/licenserequest", 200, NOT_ENTITLED_DENIAL),
+            ("/1.0/library/B0PLUSTITL", 200, r#"{"item":{"asin":"B0PLUSTITL","available_codecs":[{"enhanced_codec":"LC_64_44100_stereo"}]}}"#),
+        ];
+        let (url, seen) = mock_api(ROUTES).await;
+        let client = signed_in_client(&url);
+
+        let error = match client
+            .build_download_license("B0PLUSTITL", DownloadQuality::High, false)
+            .await
+        {
+            Ok(_) => panic!("a refused licence must not succeed"),
+            Err(error) => error,
+        };
+        assert_eq!(error.error_code(), "license_denied");
+        assert!(error.to_string().contains("Not entitled"), "{error}");
+        assert!(!error.to_string().contains("Legacy AAX"), "{error}");
+
+        let requests = seen.lock().unwrap().clone();
+        assert_eq!(requests.len(), 1, "only the licence request may be sent: {requests:?}");
+        assert!(requests[0].starts_with("POST /1.0/content/B0PLUSTITL/licenserequest"));
     }
 
     /// HTTP 429 from the licence endpoint is a throttle, not a network blip, and must not

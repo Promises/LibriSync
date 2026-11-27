@@ -14,6 +14,7 @@ import {
   ShieldAlert,
   ShieldX,
   Snowflake,
+  Sparkles,
   UserMinus,
   UserPlus,
   XCircle,
@@ -29,12 +30,27 @@ export const BOOK_STATUS: Record<BookStatus, Meta & { description: string }> = {
   downloading: { label: 'Downloading', tone: 'accent', Icon: CloudDownload, description: 'Being downloaded now' },
   queued: { label: 'Queued', tone: 'info', Icon: ListPlus, description: 'Waiting in the download queue' },
   wanted: { label: 'Wanted', tone: 'neutral', Icon: CircleDashed, description: 'Not downloaded yet; back-fill will get to it' },
+  excluded: {
+    label: 'Plus — excluded',
+    tone: 'neutral',
+    Icon: Sparkles,
+    description: 'Audible Plus catalogue title; left out of automatic downloads (Settings → Audible pacing)',
+  },
   cooldown: { label: 'Cooldown', tone: 'warning', Icon: Snowflake, description: 'Waiting out a licence refusal before retrying' },
   failed: { label: 'Failed', tone: 'danger', Icon: XCircle, description: 'The last attempt failed' },
   skipped: { label: 'Skipped', tone: 'neutral', Icon: Ban, description: 'Marked as not wanted; back-fill ignores it' },
 };
 
-export const BOOK_STATUS_ORDER: BookStatus[] = ['downloaded', 'downloading', 'queued', 'wanted', 'cooldown', 'failed', 'skipped'];
+export const BOOK_STATUS_ORDER: BookStatus[] = [
+  'downloaded',
+  'downloading',
+  'queued',
+  'wanted',
+  'excluded',
+  'cooldown',
+  'failed',
+  'skipped',
+];
 
 export const QUEUE_STATE: Record<QueueState, Meta> = {
   queued: { label: 'Queued', tone: 'info', Icon: ListPlus },

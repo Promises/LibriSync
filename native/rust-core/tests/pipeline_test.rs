@@ -709,3 +709,42 @@ async fn a_refused_link_is_reported_as_expired() {
         .expect_err("403");
     assert_eq!(err.kind, FailureKind::Expired);
 }
+
+/// The Audible Plus case: the AAX service answered a title the customer wasn't entitled
+/// to with a text body and 200. That must fail as a non-retryable `InvalidPlan` quoting
+/// the body (without its URLs), not as a "corrupt download", and the bogus file must go.
+#[tokio::test]
+async fn an_error_page_served_as_200_is_not_audio() {
+    let Some(tools) = tools_or_skip().await else { return };
+    let root = tempfile::tempdir().unwrap();
+    let server = TestServer::start().await;
+    let page = b"<!DOCTYPE html><html><head><title>Access Denied</title></head><body>\
+        <h1>Access Denied</h1><p>You don't have permission to access \
+        https://cds.audible.com/download?asin=B0PLUSTITL on this server.</p></body></html>";
+    let url = server.add("book.aax", page.to_vec());
+    let plan = DownloadPlan {
+        parts: vec![DownloadPart::Aax {
+            url,
+            headers: Default::default(),
+            activation_bytes: "1a2b3c4d".into(),
+            filename: "book.aax".into(),
+        }],
+        embed_metadata: true,
+        chapters: vec![],
+        join_parts: false,
+        licence_throttled: false,
+    };
+    let job = job(plan, meta(None), OutputFormat::M4b, root.path(), false);
+    let (work, dest) = (job.work_dir.clone(), job.dest_dir.clone());
+    let err = run(job, &tools).await.expect_err("an error page is not a book");
+    println!("error: {}", err.message);
+    assert_eq!(err.kind, FailureKind::InvalidPlan, "{}", err.message);
+    assert!(!err.is_retryable());
+    assert!(err.message.contains("not audio"), "{}", err.message);
+    assert!(err.message.contains("Access Denied"), "{}", err.message);
+    assert!(!err.message.contains("cds.audible.com"), "URL leaked: {}", err.message);
+    assert!(!work.join("book.aax").exists(), "the bogus file is deleted for the next attempt");
+    assert!(names_in(&dest).is_empty(), "nothing left in the book folder");
+    let downloads = server.hits().iter().filter(|h| h.path == "/book.aax").count();
+    assert_eq!(downloads, 1);
+}

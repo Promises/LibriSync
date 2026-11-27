@@ -8,7 +8,7 @@ import { Cover } from '../../components/Cover';
 import { Banner, EmptyState, ErrorState, SkeletonRows } from '../../components/Feedback';
 import { PageHeader, Pagination } from '../../components/Navigation';
 import { ProviderIcon } from '../../components/ProviderIcon';
-import { BookStatusBadge } from '../../components/StatusBadge';
+import { BookStatusBadge, PlusBadge } from '../../components/StatusBadge';
 import t from '../../components/Table.module.css';
 import { formatDate, formatLength, formatNumber, joinNames, pluralize } from '../../lib/format';
 import { BookDrawer } from '../library/BookDrawer';
@@ -118,7 +118,7 @@ export function WantedPage() {
         <ErrorState error={wanted.error} onRetry={() => void wanted.refetch()} />
       ) : items.length === 0 ? (
         <EmptyState icon={<CheckCircle2 size={24} />} title="Nothing missing">
-          Every book in your library is downloaded, queued or skipped.
+          Every book in your library is downloaded, queued, skipped or excluded.
         </EmptyState>
       ) : (
         <>
@@ -165,7 +165,10 @@ export function WantedPage() {
                     </td>
                     <td className={`${t.hideBelowWide} ${t.nowrap}`}>{formatDate(b.purchaseDate)}</td>
                     <td>
-                      <BookStatusBadge status={b.status} queueItem={queueByBook.get(b.id)} />
+                      <span className={styles.badges}>
+                        <BookStatusBadge status={b.status} queueItem={queueByBook.get(b.id)} />
+                        {b.plusCatalog && <PlusBadge />}
+                      </span>
                     </td>
                   </tr>
                 ))}

@@ -1,7 +1,7 @@
 import type { BookView, QueueItem } from '../../api/types';
 import { Cover } from '../../components/Cover';
 import { ProviderIcon } from '../../components/ProviderIcon';
-import { BookStatusBadge } from '../../components/StatusBadge';
+import { BookStatusBadge, PlusBadge } from '../../components/StatusBadge';
 import t from '../../components/Table.module.css';
 import { formatDate, formatLength, joinNames } from '../../lib/format';
 import styles from './BookTable.module.css';
@@ -67,6 +67,11 @@ export function BookTable({
                   <button type="button" className={t.rowButton} onClick={() => onOpen(book)}>
                     {book.title}
                   </button>
+                  {book.plusCatalog && book.status !== 'excluded' && (
+                    <span className={styles.plus}>
+                      <PlusBadge />
+                    </span>
+                  )}
                   {book.series && (
                     <span className={t.sub}>
                       {book.series}

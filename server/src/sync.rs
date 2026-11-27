@@ -465,6 +465,9 @@ async fn enqueue_new_books(app: &App, id: &str, started_core: &str) -> anyhow::R
         if enabled && auto {
             match queue::enqueue(app, &book_id, Priority::New, false).await {
                 Ok(_) | Err(EnqueueError::AlreadyDownloaded) | Err(EnqueueError::Skipped) => {}
+                Err(EnqueueError::PlusExcluded) => {
+                    tracing::info!("Not queueing {title}: Audible Plus catalogue titles are excluded");
+                }
                 Err(e) => tracing::warn!("Could not queue new book {book_id}: {e:?}"),
             }
         }

@@ -19,6 +19,7 @@
 //! - `chapters` — FFMETADATA chapter file, concat list, `NN - Title.mp3` names
 //! - `extract` — ZIP extraction
 //! - `sidecars` — cover download, `desc.txt`, `reader.txt`, `metadata.opf`
+//! - `sniff` — rejects a downloaded part that is an error page rather than media
 //! - `fsutil` — free space, error classification, sanitising, atomic placement
 //! - `progress` — throttled progress reporting
 //!
@@ -33,6 +34,7 @@ mod extract;
 mod fsutil;
 mod progress;
 mod sidecars;
+mod sniff;
 mod tools;
 
 use std::path::PathBuf;
@@ -172,7 +174,9 @@ pub enum FailureKind {
     Ffmpeg,
     /// The decoded audio failed validation (truncated or corrupt source).
     Validation,
-    /// The plan itself is unusable (e.g. `join_parts` with a non-plain part).
+    /// The plan itself is unusable (e.g. `join_parts` with a non-plain part), or a part
+    /// it pointed at downloaded as text (an error page) rather than media: the store
+    /// refused it, and the same plan would fetch the same refusal.
     InvalidPlan,
     /// Other local I/O failure.
     Io,

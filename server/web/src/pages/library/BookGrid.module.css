@@ -68,10 +68,18 @@
   }
 }
 
-.provider {
+/* Top-right: the provider icon, and the Plus badge under it. */
+.corner {
   position: absolute;
   top: var(--space-2);
   right: var(--space-2);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--space-1);
+}
+
+.provider {
   display: flex;
   border-radius: var(--radius-sm);
   background: var(--color-surface);

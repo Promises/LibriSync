@@ -10,7 +10,7 @@ import { Banner, ErrorState, Skeleton } from '../../components/Feedback';
 import { Modal } from '../../components/Modal';
 import { ProgressBar } from '../../components/Progress';
 import { ProviderIcon } from '../../components/ProviderIcon';
-import { BookStatusBadge } from '../../components/StatusBadge';
+import { BookStatusBadge, PlusBadge } from '../../components/StatusBadge';
 import { useNow } from '../../hooks/useNow';
 import {
   formatDate,
@@ -90,6 +90,7 @@ function BookDetails({ book }: { book: BookDetail }) {
           )}
           <div className={styles.badges}>
             <BookStatusBadge status={book.status} queueItem={queueItem} />
+            {book.plusCatalog && <PlusBadge />}
             {book.format && <Badge tone="neutral">{book.format.toUpperCase()}</Badge>}
           </div>
         </div>

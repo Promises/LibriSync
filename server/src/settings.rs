@@ -92,6 +92,12 @@ pub struct AudibleSettings {
     pub spacing_min_minutes: u32,
     pub spacing_max_minutes: u32,
     pub throttle_cooldown_hours: u32,
+    /// Download Audible Plus catalogue titles (`Books.is_ayce`) automatically. They can
+    /// only be licensed while the customer has a Plus membership, so the default leaves
+    /// them out of back-fill and new-purchase downloads; a manual download still works.
+    /// Missing from settings saved before it existed, which therefore read as `false`.
+    #[serde(default)]
+    pub include_plus_catalog: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -138,6 +144,7 @@ impl Default for Settings {
                 spacing_min_minutes: 20,
                 spacing_max_minutes: 60,
                 throttle_cooldown_hours: 24,
+                include_plus_catalog: false,
             },
             downloads: Downloads { concurrency: 1 },
         }
@@ -360,5 +367,39 @@ mod tests {
         let mut bad = json.clone();
         bad["downloads"].as_object_mut().unwrap().remove("concurrency");
         assert!(serde_json::from_value::<Settings>(bad).is_err());
+    }
+
+    /// Settings saved before the Audible Plus switch existed load with it off, and the
+    /// switch round-trips under its API name.
+    #[test]
+    fn plus_catalog_defaults_off_for_existing_settings() {
+        assert!(!Settings::default().audible.include_plus_catalog);
+        let mut stored = serde_json::to_value(Settings::default()).unwrap();
+        stored["audible"].as_object_mut().unwrap().remove("includePlusCatalog");
+        let loaded: Settings = serde_json::from_value(stored).unwrap();
+        assert!(!loaded.audible.include_plus_catalog);
+
+        let mut on = Settings::default();
+        on.audible.include_plus_catalog = true;
+        let json = serde_json::to_value(&on).unwrap();
+        assert_eq!(json["audible"]["includePlusCatalog"], true);
+        assert_eq!(serde_json::from_value::<Settings>(json).unwrap(), on);
+    }
+
+    #[tokio::test]
+    async fn stored_settings_without_the_plus_switch_still_load() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new().connect("sqlite::memory:").await.unwrap();
+        sqlx::query("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)").execute(&pool).await.unwrap();
+        let mut stored = serde_json::to_value(Settings::default()).unwrap();
+        stored["audible"].as_object_mut().unwrap().remove("includePlusCatalog");
+        stored["audible"]["dailyLicenceCap"] = 7.into();
+        sqlx::query("INSERT INTO settings (key, value) VALUES ('settings', ?)")
+            .bind(stored.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let loaded = load(&pool).await.unwrap();
+        assert_eq!(loaded.audible.daily_licence_cap, 7, "the stored document was used, not the defaults");
+        assert!(!loaded.audible.include_plus_catalog);
     }
 }

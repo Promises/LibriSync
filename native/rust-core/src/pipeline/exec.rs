@@ -25,6 +25,9 @@
 //!   MP3 output is chosen (Android silently kept the M4B).
 //! - Joined parts with differing codecs/parameters are re-encoded to AAC with the
 //!   `concat` filter (Android's stream-copy concat would fail on them).
+//! - Every downloaded part is sniffed before use: one that is text (an error page served
+//!   with 200) rather than media is deleted and fails the run as `InvalidPlan`, instead
+//!   of reaching decrypt/validation as "invalid data" and being retried as corrupt.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -46,6 +49,7 @@ use super::fsutil::{
 };
 use super::progress::Reporter;
 use super::sidecars::{self, CoverImage};
+use super::sniff;
 use super::tools::{self, cancelled, ffmpeg_failure, probe, run_ffmpeg, FfmpegJob, ProbeInfo};
 use super::{
     extract, FailureKind, MediaTools, OutputFormat, PipelineError, PipelineJob, PipelineOutput,
@@ -307,6 +311,9 @@ impl Executor<'_> {
                 self.cancel,
             )
             .await?;
+            // An error page served as 200 would otherwise fail later as "invalid data"
+            // and be retried as a corrupt download; a reused file is checked too.
+            sniff::reject_non_media(&target, i + 1).await?;
             sources.push(Source { path: target, reused: fetched == Fetched::Reused });
         }
         Ok(sources)

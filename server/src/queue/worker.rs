@@ -32,6 +32,12 @@ use crate::time;
 /// blip. The plan's signed URLs are still valid, so this costs no licence.
 const INLINE_RETRY_DELAY: StdDuration = if cfg!(test) { StdDuration::ZERO } else { StdDuration::from_secs(15) };
 
+/// Re-plans allowed after a source fails validation. A re-plan is another licence
+/// request, and a store that keeps serving something that won't decode will serve it
+/// again: one more try (which also lets the pipeline replace a reused source), then the
+/// item fails and waits for the user.
+pub const MAX_VALIDATION_RETRIES: i64 = 1;
+
 /// The states a worker's item is in while the worker owns it.
 const ACTIVE_STATES_SQL: &str = "('planning','running')";
 
@@ -49,6 +55,9 @@ pub enum Outcome {
     /// A local problem every download would hit (disk full, ffmpeg, unwritable
     /// folder): fail this item and pause the queue.
     Halt { kind: HoldKind, message: String },
+    /// The downloaded source failed validation: retried at most
+    /// [`MAX_VALIDATION_RETRIES`] times.
+    Invalid(String),
     Failed { message: String, retryable: bool },
     Cancelled,
 }
@@ -260,8 +269,10 @@ async fn execute_inner(
 /// How a pipeline failure is handled: `PipelineError::is_retryable` failures go back
 /// to the queue for a fresh plan; local problems pause the queue.
 fn pipeline_failure_outcome(e: PipelineError) -> Outcome {
-    if e.kind == FailureKind::Cancelled {
-        return Outcome::Cancelled;
+    match e.kind {
+        FailureKind::Cancelled => return Outcome::Cancelled,
+        FailureKind::Validation => return Outcome::Invalid(e.message),
+        _ => {}
     }
     if e.is_retryable() {
         return Outcome::Failed { message: e.message, retryable: true };
@@ -658,6 +669,34 @@ pub async fn finish(app: &AppState, row: &QueueRow, outcome: Outcome, user_cance
             let summary = hold.as_ref().map(|h| h.waiting_reason()).unwrap_or_default();
             tracing::error!("{} failed: {message}. {summary}", row.title);
             fail(app, row, row.attempts + 1, &message, now).await?;
+        }
+        Outcome::Invalid(message) => {
+            let attempts = row.attempts + 1;
+            let failures = row.validation_failures + 1;
+            sqlx::query(&format!(
+                "UPDATE queue SET validation_failures = ? WHERE id = ? AND state IN {ACTIVE_STATES_SQL}"
+            ))
+            .bind(failures)
+            .bind(row.id)
+            .execute(&app.db)
+            .await?;
+            let delay = if failures <= MAX_VALIDATION_RETRIES { pacing::retry_delay(attempts as u32) } else { None };
+            match delay {
+                Some(d) => {
+                    let at = now + d;
+                    let reason = format!("Attempt {attempts} failed validation; retrying at {}", time::local_label(at));
+                    tracing::warn!("{} failed validation (attempt {attempts}): {message}", row.title);
+                    wait_for_retry(app, row, attempts, &message, at, &reason).await?;
+                }
+                None => {
+                    let message = if failures > MAX_VALIDATION_RETRIES {
+                        format!("{message} (failed validation {failures} times; not retried automatically)")
+                    } else {
+                        message
+                    };
+                    fail(app, row, attempts, &message, now).await?
+                }
+            }
         }
         Outcome::Failed { message, retryable } => {
             let attempts = row.attempts + 1;

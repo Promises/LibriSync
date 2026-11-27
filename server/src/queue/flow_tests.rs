@@ -77,7 +77,7 @@ async fn row(app: &AppState, book: &str) -> Option<QueueRow> {
 }
 
 async fn status(app: &AppState, book: &str) -> String {
-    crate::books::get(&app.db, book).await.unwrap().unwrap().status
+    crate::books::get(&app.db, book, false).await.unwrap().unwrap().status
 }
 
 #[tokio::test]
@@ -112,7 +112,7 @@ async fn a_successful_download_is_recorded_under_the_template_path() {
 
     let r = row(&app, "chirp_1").await.unwrap();
     assert_eq!(r.state(), QueueState::Completed);
-    let book = crate::books::get(&app.db, "chirp_1").await.unwrap().unwrap();
+    let book = crate::books::get(&app.db, "chirp_1", false).await.unwrap().unwrap();
     assert_eq!(book.status, "downloaded");
     assert_eq!(book.output_path.as_deref(), Some("Ann Author/Saga/2 - The Book"));
     assert_eq!(book.format.as_deref(), Some("m4b"));
@@ -227,7 +227,7 @@ async fn a_denial_backs_the_title_off_and_takes_it_out_of_the_queue() {
     settle(&app).await;
 
     assert!(row(&app, "B1").await.is_none());
-    let book = crate::books::get(&app.db, "B1").await.unwrap().unwrap();
+    let book = crate::books::get(&app.db, "B1", false).await.unwrap().unwrap();
     assert_eq!(book.status, "cooldown");
     let until = crate::time::parse(book.backoff_until.as_deref().unwrap()).unwrap();
     assert!((until - crate::time::now()).num_hours() >= 23);
@@ -240,6 +240,7 @@ async fn a_denial_backs_the_title_off_and_takes_it_out_of_the_queue() {
         "amzn:us",
         "audible",
         crate::settings::BackfillOrder::NewestFirst,
+        false,
         10,
     )
     .await
@@ -292,7 +293,7 @@ async fn backfill_queues_one_audible_title_at_a_time_after_the_baseline() {
 
     // The one Chirp book left is wanted until it is skipped.
     let wanted = || async {
-        crate::backfill::wanted_for_account(&app.db, "chirp:1", "chirp", crate::settings::BackfillOrder::NewestFirst, 10)
+        crate::backfill::wanted_for_account(&app.db, "chirp:1", "chirp", crate::settings::BackfillOrder::NewestFirst, false, 10)
             .await
             .unwrap()
     };
@@ -581,8 +582,8 @@ async fn books_that_render_to_one_folder_get_their_own() {
     settle(&app).await;
 
     let base = "Ann Author/Saga/2 - Same Title";
-    let p1 = crate::books::get(&app.db, "c1").await.unwrap().unwrap().output_path.unwrap();
-    let p2 = crate::books::get(&app.db, "c2").await.unwrap().unwrap().output_path.unwrap();
+    let p1 = crate::books::get(&app.db, "c1", false).await.unwrap().unwrap().output_path.unwrap();
+    let p2 = crate::books::get(&app.db, "c2", false).await.unwrap().unwrap().output_path.unwrap();
     let mut got = vec![p1, p2];
     got.sort();
     assert!(
@@ -596,13 +597,13 @@ async fn books_that_render_to_one_folder_get_their_own() {
     // A book saved earlier also keeps its folder.
     enqueue(&app, "c3", Priority::New, false).await.unwrap();
     settle(&app).await;
-    let p3 = crate::books::get(&app.db, "c3").await.unwrap().unwrap().output_path.unwrap();
+    let p3 = crate::books::get(&app.db, "c3", false).await.unwrap().unwrap().output_path.unwrap();
     assert_eq!(p3, format!("{base} [c3]"));
 
     // Downloading a book again reuses its own folder.
     enqueue(&app, "c3", Priority::Manual, false).await.unwrap();
     settle(&app).await;
-    assert_eq!(crate::books::get(&app.db, "c3").await.unwrap().unwrap().output_path.unwrap(), format!("{base} [c3]"));
+    assert_eq!(crate::books::get(&app.db, "c3", false).await.unwrap().unwrap().output_path.unwrap(), format!("{base} [c3]"));
 }
 
 #[tokio::test]
@@ -765,4 +766,161 @@ async fn one_sync_queues_at_most_ten_books_as_new() {
         "{:?}",
         notes.iter().map(|n| &n.message).collect::<Vec<_>>()
     );
+}
+
+// ------------------------------------------------------------------ Audible Plus
+
+async fn mark_plus(app: &AppState, book: &str) {
+    sqlx::query("UPDATE core.Books SET is_ayce = 1 WHERE audible_product_id = ?")
+        .bind(book)
+        .execute(&app.db)
+        .await
+        .unwrap();
+}
+
+fn set_include_plus(app: &AppState, on: bool) {
+    let mut s = app.settings();
+    s.audible.include_plus_catalog = on;
+    app.set_settings(s);
+}
+
+/// With `audible.includePlusCatalog` off (the default), a Plus title is never queued
+/// automatically and isn't "wanted", but a manual download is still allowed.
+#[tokio::test]
+async fn plus_titles_are_left_out_of_automatic_downloads_by_default() {
+    let (app, _dir) = test_app_with(Arc::new(FakeExecutor::default())).await;
+    assert!(!app.settings().audible.include_plus_catalog);
+    add_account(&app, "amzn:us", "audible").await;
+    add_book(&app, "amzn:us", "audible", "BPLUS", "Plus Title").await;
+    add_book(&app, "amzn:us", "audible", "BOWN", "Owned Title").await;
+    mark_plus(&app, "BPLUS").await;
+
+    let plus = crate::books::get(&app.db, "BPLUS", false).await.unwrap().unwrap();
+    assert!(plus.plus_catalog);
+    assert_eq!(plus.status, "excluded");
+    let owned = crate::books::get(&app.db, "BOWN", false).await.unwrap().unwrap();
+    assert!(!owned.plus_catalog);
+    assert_eq!(owned.status, "wanted");
+
+    // Back-fill and new purchases skip it.
+    for p in [Priority::Backfill, Priority::New] {
+        assert!(matches!(enqueue(&app, "BPLUS", p, false).await, Err(EnqueueError::PlusExcluded)));
+    }
+    let wanted = crate::backfill::wanted_for_account(
+        &app.db,
+        "amzn:us",
+        "audible",
+        crate::settings::BackfillOrder::NewestFirst,
+        false,
+        10,
+    )
+    .await
+    .unwrap();
+    assert_eq!(wanted, vec!["BOWN"]);
+    sqlx::query("UPDATE account_state SET baseline_at = ?").bind(crate::time::now_str()).execute(&app.db).await.unwrap();
+    crate::backfill::run_once(&app).await;
+    let pending: Vec<String> = list_pending(&app.db).await.unwrap().into_iter().map(|r| r.book_id).collect();
+    assert_eq!(pending, vec!["BOWN"]);
+
+    // The listing's `excluded` filter finds it; `wanted` doesn't.
+    let q = |status: &str| crate::books::BookQuery { statuses: vec![status.into()], ..Default::default() };
+    let (n, items) = crate::books::list(&app.db, &q("excluded")).await.unwrap();
+    assert_eq!((n, items[0].id.as_str()), (1, "BPLUS"));
+    let (n, _) = crate::books::list(&app.db, &q("wanted")).await.unwrap();
+    assert_eq!(n, 0, "BOWN is queued now, BPLUS excluded");
+
+    // A manual download is the user's explicit choice.
+    let manual = enqueue(&app, "BPLUS", Priority::Manual, false).await.unwrap();
+    assert_eq!(manual.priority(), Priority::Manual);
+    assert_eq!(status(&app, "BPLUS").await, "queued");
+}
+
+#[tokio::test]
+async fn including_plus_titles_makes_them_wanted_again() {
+    let (app, _dir) = test_app_with(Arc::new(FakeExecutor::default())).await;
+    add_account(&app, "amzn:us", "audible").await;
+    add_book(&app, "amzn:us", "audible", "BPLUS", "Plus Title").await;
+    mark_plus(&app, "BPLUS").await;
+    set_include_plus(&app, true);
+
+    assert_eq!(crate::books::get(&app.db, "BPLUS", true).await.unwrap().unwrap().status, "wanted");
+    let wanted = crate::backfill::wanted_for_account(
+        &app.db,
+        "amzn:us",
+        "audible",
+        crate::settings::BackfillOrder::NewestFirst,
+        true,
+        10,
+    )
+    .await
+    .unwrap();
+    assert_eq!(wanted, vec!["BPLUS"]);
+    assert!(enqueue(&app, "BPLUS", Priority::Backfill, false).await.is_ok());
+
+    // Turned off again: the automatically queued item leaves the queue; a manual one stays.
+    set_include_plus(&app, false);
+    add_book(&app, "amzn:us", "audible", "BPLUS2", "Plus Two").await;
+    mark_plus(&app, "BPLUS2").await;
+    enqueue(&app, "BPLUS2", Priority::Manual, false).await.unwrap();
+    crate::backfill::drop_excluded_plus(&app).await.unwrap();
+    let pending: Vec<String> = list_pending(&app.db).await.unwrap().into_iter().map(|r| r.book_id).collect();
+    assert_eq!(pending, vec!["BPLUS2"]);
+}
+
+#[tokio::test]
+async fn a_new_plus_title_is_recorded_but_not_queued() {
+    let (app, _dir) = test_app_with(Arc::new(FakeExecutor::default())).await;
+    add_account(&app, "amzn:us", "audible").await;
+    sqlx::query("UPDATE account_state SET baseline_at = ?, backfill = 0")
+        .bind(crate::time::fmt(crate::time::now() - chrono::Duration::days(1)))
+        .execute(&app.db)
+        .await
+        .unwrap();
+    let started = crate::time::core_fmt(crate::time::now() - chrono::Duration::seconds(2));
+    add_book(&app, "amzn:us", "audible", "BNEW", "Bought").await;
+    add_book(&app, "amzn:us", "audible", "BPLUS", "Added from Plus").await;
+    mark_plus(&app, "BPLUS").await;
+    crate::sync::finish(&app, "amzn:us", "audible", &started, &clean_sync(2)).await.unwrap();
+
+    let pending: Vec<String> = list_pending(&app.db).await.unwrap().into_iter().map(|r| r.book_id).collect();
+    assert_eq!(pending, vec!["BNEW"]);
+    assert_eq!(events(&app, "bookAdded").await.len(), 2, "both are recorded as added");
+}
+
+// ------------------------------------------------------------------ validation
+
+/// A source that fails validation is re-planned (another licence) once, then the item
+/// fails: the incident this guards against re-planned three times, each a new licence.
+#[tokio::test]
+async fn a_validation_failure_is_replanned_once_then_fails() {
+    let exec = Arc::new(FakeExecutor::default());
+    for _ in 0..4 {
+        exec.runs
+            .lock()
+            .unwrap()
+            .push_back(Err(PipelineError::new(FailureKind::Validation, "Invalid data found when processing input")));
+    }
+    let (app, _dir) = test_app_with(exec.clone()).await;
+    add_account(&app, "amzn:us", "audible").await;
+    add_book(&app, "amzn:us", "audible", "B1", "One").await;
+    enqueue(&app, "B1", Priority::New, false).await.unwrap();
+
+    settle(&app).await;
+    let r = row(&app, "B1").await.unwrap();
+    assert_eq!((r.state(), r.attempts, r.validation_failures), (QueueState::Waiting, 1, 1));
+    assert!(r.waiting_reason.as_deref().unwrap().contains("failed validation"));
+    assert_eq!(exec.run_calls.lock().unwrap().len(), 1, "no same-plan rerun for a validation failure");
+
+    sqlx::query("UPDATE queue SET not_before = NULL WHERE book_id = 'B1'").execute(&app.db).await.unwrap();
+    // The re-plan is a licence request: clear the spacing it set.
+    sqlx::query("UPDATE licence_pacing SET next_licence_at = NULL").execute(&app.db).await.unwrap();
+    settle(&app).await;
+    let r = row(&app, "B1").await.unwrap();
+    assert_eq!((r.state(), r.attempts, r.validation_failures), (QueueState::Failed, 2, 2));
+    assert!(r.error.as_deref().unwrap().contains("not retried automatically"), "{:?}", r.error);
+    assert_eq!(exec.plan_calls.lock().unwrap().len(), 2, "one extra licence, no more");
+
+    // A retry by hand starts the count again.
+    let again = enqueue(&app, "B1", Priority::Manual, false).await.unwrap();
+    assert_eq!((again.attempts, again.validation_failures), (0, 0));
 }

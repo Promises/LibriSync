@@ -28,7 +28,7 @@ pub struct ListQuery {
     page_size: Option<i64>,
 }
 
-fn book_query(q: ListQuery) -> Result<BookQuery, ApiError> {
+fn book_query(app: &AppState, q: ListQuery) -> Result<BookQuery, ApiError> {
     let (page, page_size) = Paging { page: q.page, page_size: q.page_size }.resolve()?;
     let statuses = comma_list(q.status.as_deref());
     if let Some(bad) = statuses.iter().find(|s| !STATUSES.contains(&s.as_str())) {
@@ -59,11 +59,12 @@ fn book_query(q: ListQuery) -> Result<BookQuery, ApiError> {
         page,
         page_size,
         id: None,
+        include_plus: app.settings().audible.include_plus_catalog,
     })
 }
 
 pub async fn list(State(app): State<AppState>, QueryParams(q): QueryParams<ListQuery>) -> ApiResult<Json<Page<BookView>>> {
-    let q = book_query(q)?;
+    let q = book_query(&app, q)?;
     let (total, items) = books::list(&app.db, &q).await?;
     Ok(Json(Page { total, page: q.page, page_size: q.page_size, items }))
 }
@@ -78,7 +79,7 @@ pub struct WantedPage {
 
 pub async fn wanted(State(app): State<AppState>, QueryParams(mut q): QueryParams<ListQuery>) -> ApiResult<Json<WantedPage>> {
     q.status = Some("wanted".into());
-    let q = book_query(q)?;
+    let q = book_query(&app, q)?;
     let (total, items) = books::list(&app.db, &q).await?;
     let estimate = backfill::estimate(&app).await?;
     Ok(Json(WantedPage { page: Page { total, page: q.page, page_size: q.page_size, items }, estimate }))
@@ -93,7 +94,9 @@ pub struct BookDetail {
 }
 
 async fn view_or_404(app: &AppState, id: &str) -> ApiResult<BookView> {
-    books::get(&app.db, id).await?.ok_or_else(|| ApiError::not_found("Book not found"))
+    books::get(&app.db, id, app.settings().audible.include_plus_catalog)
+        .await?
+        .ok_or_else(|| ApiError::not_found("Book not found"))
 }
 
 pub async fn get(State(app): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<BookDetail>> {
@@ -120,6 +123,7 @@ fn enqueue_error(e: EnqueueError) -> ApiError {
         EnqueueError::AlreadyDownloaded => ApiError::conflict("Already downloaded"),
         EnqueueError::Skipped => ApiError::conflict("The book is skipped"),
         EnqueueError::Backoff(until) => ApiError::conflict(format!("Licence backoff until {}", time::local_label(until))),
+        EnqueueError::PlusExcluded => ApiError::conflict("Audible Plus catalogue titles are excluded from automatic downloads"),
         EnqueueError::Db(e) => e.into(),
     }
 }

@@ -101,6 +101,8 @@ pub struct QueueRow {
     pub waiting_reason: Option<String>,
     pub not_before: Option<String>,
     pub attempts: i64,
+    /// Attempts that failed validation (see `worker::MAX_VALIDATION_RETRIES`).
+    pub validation_failures: i64,
     pub error: Option<String>,
     pub created_at: String,
     pub started_at: Option<String>,
@@ -407,7 +409,7 @@ pub fn to_item(row: &QueueRow, rt: &Runtime) -> QueueItem {
     }
 }
 
-const COLUMNS: &str = "id, book_id, account_id, provider, title, authors, priority, state, force, waiting_reason, not_before, attempts, error, created_at, started_at, finished_at";
+const COLUMNS: &str = "id, book_id, account_id, provider, title, authors, priority, state, force, waiting_reason, not_before, attempts, validation_failures, error, created_at, started_at, finished_at";
 
 pub async fn get(pool: &SqlitePool, id: i64) -> sqlx::Result<Option<QueueRow>> {
     sqlx::query_as::<_, QueueRow>(&format!("SELECT {COLUMNS} FROM queue WHERE id = ?"))
@@ -473,6 +475,9 @@ pub enum EnqueueError {
     Skipped,
     /// Title backoff after a licence denial (only manual downloads bypass it).
     Backoff(DateTime<Utc>),
+    /// An Audible Plus catalogue title while `audible.includePlusCatalog` is off (only
+    /// manual downloads are allowed).
+    PlusExcluded,
     /// The owning Audible account is cooling down and the request wasn't forced.
     Cooldown(DateTime<Utc>),
     Db(sqlx::Error),
@@ -493,6 +498,7 @@ impl EnqueueError {
             EnqueueError::AlreadyDownloaded => "downloaded".into(),
             EnqueueError::Skipped => "skipped".into(),
             EnqueueError::Backoff(_) => "backoff".into(),
+            EnqueueError::PlusExcluded => "plus_excluded".into(),
             EnqueueError::Cooldown(_) => "account_cooldown".into(),
             EnqueueError::Db(_) => "internal".into(),
         }
@@ -513,15 +519,18 @@ struct OwnerRow {
 pub async fn enqueue(app: &App, book_id: &str, priority: Priority, force: bool) -> Result<QueueRow, EnqueueError> {
     let pool = &app.db;
     let now = time::now();
-    let book: Option<(String, String)> = sqlx::query_as(
-        "SELECT title, COALESCE(source, 'audible') FROM core.Books WHERE audible_product_id = ?",
+    let book: Option<(String, String, bool)> = sqlx::query_as(
+        "SELECT title, COALESCE(source, 'audible'), is_ayce = 1 FROM core.Books WHERE audible_product_id = ?",
     )
     .bind(book_id)
     .fetch_optional(pool)
     .await?;
-    let Some((title, provider)) = book else { return Err(EnqueueError::NotFound) };
+    let Some((title, provider, plus_catalog)) = book else { return Err(EnqueueError::NotFound) };
 
     if priority != Priority::Manual {
+        if plus_catalog && !app.settings().audible.include_plus_catalog {
+            return Err(EnqueueError::PlusExcluded);
+        }
         let downloaded: Option<i64> = sqlx::query_scalar("SELECT 1 FROM downloads WHERE book_id = ?")
             .bind(book_id)
             .fetch_optional(pool)
@@ -648,7 +657,7 @@ async fn upgrade_slot(
         QueueState::Failed => {
             sqlx::query(
                 "UPDATE queue SET state = 'queued', priority = ?, force = ?, account_id = ?, attempts = 0,
-                        error = NULL, not_before = NULL, waiting_reason = NULL, started_at = NULL, finished_at = NULL
+                        validation_failures = 0, error = NULL, not_before = NULL, waiting_reason = NULL, started_at = NULL, finished_at = NULL
                  WHERE id = ?",
             )
             .bind(priority.as_i64())

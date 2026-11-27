@@ -19,7 +19,14 @@ pub async fn put(State(app): State<AppState>, JsonBody(new): JsonBody<Settings>)
         (app.set_log_level)(new.general.log_level.as_str());
     }
     tracing::info!("Settings updated");
-    // Concurrency, pacing or the window may have changed.
+    if old.audible.include_plus_catalog && !new.audible.include_plus_catalog {
+        crate::backfill::drop_excluded_plus(&app).await?;
+    } else if !old.audible.include_plus_catalog && new.audible.include_plus_catalog {
+        // Plus titles are wanted again: let back-fill see them now, not in 15 minutes.
+        let app = app.clone();
+        tokio::spawn(async move { crate::backfill::run_once(&app).await });
+    }
+    // Concurrency, pacing, the window or the Plus switch may have changed.
     app.queue.wake();
     Ok(Json(app.settings()))
 }

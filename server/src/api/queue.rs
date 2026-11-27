@@ -53,7 +53,7 @@ pub async fn retry(State(app): State<AppState>, Path(id): Path<String>) -> ApiRe
         return Err(ApiError::conflict("Only failed or cancelled items can be retried"));
     }
     let result = sqlx::query(
-        "UPDATE queue SET state = 'queued', attempts = 0, error = NULL, not_before = NULL, waiting_reason = NULL,
+        "UPDATE queue SET state = 'queued', attempts = 0, validation_failures = 0, error = NULL, not_before = NULL, waiting_reason = NULL,
                 started_at = NULL, finished_at = NULL WHERE id = ? AND state IN ('failed','cancelled')",
     )
     .bind(row.id)

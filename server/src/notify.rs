@@ -631,7 +631,7 @@ async fn message_for(app: &App, item: &HistoryItem) -> Message {
     }
     let mut book = None;
     if let Some(id) = &item.book_id {
-        book = Some(match crate::books::get(&app.db, id).await.ok().flatten() {
+        book = Some(match crate::books::get(&app.db, id, app.settings().audible.include_plus_catalog).await.ok().flatten() {
             Some(b) => json!({
                 "id": b.id, "title": b.title, "authors": b.authors, "series": b.series,
                 "seriesSequence": b.series_sequence, "outputPath": b.output_path,

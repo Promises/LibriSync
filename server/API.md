@@ -159,7 +159,9 @@ download records; the response is the updated `AccountView`. That is how an acco
 ## Books
 
 ```ts
-type BookStatus = 'downloaded' | 'queued' | 'downloading' | 'wanted' | 'cooldown' | 'failed' | 'skipped';
+type BookStatus = 'downloaded' | 'queued' | 'downloading' | 'wanted' | 'excluded' | 'cooldown' | 'failed' | 'skipped';
+// 'excluded': an Audible Plus catalogue title that would otherwise be 'wanted', while
+// audible.includePlusCatalog is off. Never picked by back-fill or new-purchase downloads.
 type BookView = {
   id: string;                 // Books.audible_product_id (asin / chirp_<id> / isbn)
   provider: ProviderId;
@@ -171,6 +173,7 @@ type BookView = {
   lengthMinutes: number;
   releaseDate: string | null; purchaseDate: string | null; addedAt: string;
   status: BookStatus;
+  plusCatalog: boolean;       // Audible Plus catalogue title (Books.is_ayce)
   outputPath: string | null;  // relative to libraryDir
   format: 'm4b' | 'mp3' | null;
   downloadedAt: string | null;
@@ -197,7 +200,11 @@ cooldown. To fetch a whole backlog, enable back-fill.
 
 `GET /api/v1/wanted` = `/books?status=wanted` with the same paging, plus
 `{ "estimate": { "perDay": number, "daysRemaining": number | null } }` at top level for
-the Audible back-fill.
+the Audible back-fill. While `audible.includePlusCatalog` is off, Audible Plus titles are
+`excluded`, so neither the list nor the estimate counts them.
+
+A manual download (`POST /books/{id}/download`, `/books/download`) of an `excluded` Plus
+title is allowed; automatic downloads never queue one.
 
 ## Queue (Activity)
 
@@ -266,6 +273,7 @@ type Settings = {
     dailyLicenceCap: number;            // 1..200
     spacingMinMinutes: number; spacingMaxMinutes: number;
     throttleCooldownHours: number;      // base, doubles; default 24
+    includePlusCatalog: boolean;        // default false; see BookStatus 'excluded'
   };
   downloads: { concurrency: number /* 1..4 */ };
 };

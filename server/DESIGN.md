@@ -141,13 +141,27 @@ answer.
 | `license_throttled` (CustomerThrottled, or a 429) | **Account cooldown**: no licence requests for that account for 24 h, doubling per consecutive throttle, capped at 7 days. After it expires the next request is a single probe; a success resets the level. |
 | A plan with `licence_throttled` (AAXC refused as throttled, served from the AAX fallback) | The book downloads, but the request counts as throttled and starts the account cooldown exactly as above; it is not a successful probe, so the level is not reset. |
 | Server error (5xx) or network error from the licence request | **Account hold**: no licence requests for that account for 30 min ("Audible unavailable, retrying at …"). The title counts an attempt (so one title Audible always fails on can't block the rest forever). |
-| `license_denied` for an eligibility reason | **Title backoff**: 1 day, doubling, capped at 30 days. Other titles continue. |
-| Network / HTTP / validation failure in the pipeline | Normal retry: up to 3 attempts with 5 min → 30 min → 2 h waits, then `failed`. No cooldown. |
+| `license_denied` for an eligibility reason | **Title backoff**: 1 day, doubling, capped at 30 days. Other titles continue. An unthrottled refusal naming `Ownership: RequesterEligibility` (an Audible Plus title without a membership, or no longer owned) is reported as `license_denied` straight away — the core no longer tries the AAX fallback for it, which answered with something that wasn't audio. |
+| Network / HTTP failure in the pipeline | Normal retry: up to 3 attempts with 5 min → 30 min → 2 h waits, then `failed`. No cooldown. |
+| Validation failure (the source didn't decode) | One retry after 5 min — a re-plan, i.e. one more licence — then `failed` (counted in `queue.validation_failures`; a retry by hand resets it). The same store usually serves the same bad file again. |
+| A downloaded part that is text, not media (an error page served with 200) | The core deletes it and fails with `InvalidPlan`: the item **fails at once**, without spending another licence. |
 | Disk full, ffmpeg missing or broken, a folder that can't be written | The item **fails at once** (retrying would re-plan and spend another licence) and the **whole queue pauses** ("Downloads paused: disk full", shown in health) until the health monitor (every 5 min, a hold lasts at least 5 min) finds ffmpeg working and the library and work folders writable with ≥ 2 GB free — after a disk-full failure also ≥ 1 GB more free than when it paused — or the user retries the failed item. |
 
 A manual download bypasses title backoff and spacing, but **not** an account cooldown or
 hold unless the request says `force: true` (the UI warns that retrying into a throttle is
 believed to extend it).
+
+### Audible Plus catalogue titles
+
+Titles a member added from the Plus catalogue are in the library (`Books.is_ayce = 1`) but
+can only be licensed while the customer has a Plus membership; without one, every
+licence request for them is refused. `audible.includePlusCatalog` (default **off**)
+decides whether they are downloaded automatically. While it is off they are `excluded`:
+back-fill never picks them, new purchases don't queue them (they are still recorded as
+added), they are left out of `/wanted` and its estimate, and automatically queued ones
+that haven't started are removed from the queue (when the switch is turned off, and on
+every back-fill pass). A manual download is still allowed; if Audible refuses it, the
+normal title backoff applies.
 
 ## Output layout
 
